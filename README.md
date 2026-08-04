@@ -61,8 +61,13 @@ Prism, and Prism retires only at parity.
    which is already the bulk of what Prism handles in the wild.
 2. **Aether integration** — `PlayerTransport` routing behind a developer
    toggle; HTTP headers for server sources; teardown discipline.
-3. **Audio bridge** — TrueHD / DTS / DTS-HD MA → EAC3 5.1 (decode + re-encode)
-   so non-streamable audio still surrounds on the native path.
+3. **Audio bridge** *(implemented, needs a media fixture + a device)* — TrueHD /
+   DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 (decode +
+   re-encode, 128 kbps per channel) so non-streamable audio still surrounds on
+   the native path. Requires an FFmpeg built with the `eac3` **encoder**: stock
+   MPVKit ships only the ac3/eac3 decoders, so until Aether's MPVKit fork adds
+   `--enable-encoder=eac3` the bridge reports itself unavailable and routing
+   keeps v0's fallback to a copyable audio track.
 4. **DV + HDR signaling** — master playlist with honest `CODECS` /
    `SUPPLEMENTAL-CODECS`, `hvcC` normalization, P7→8.1 RPU conversion
    (Libdovi ships inside MPVKit already), panel-readiness gating.
@@ -93,6 +98,8 @@ same LGPL obligations already met.
 
 ## Status
 
-Early scaffold. `swift build` / `swift test` on macOS exercise the playlist
-and server pieces; the remux path needs a real media fixture and a device for
-the Atmos/DV claims.
+Early scaffold. `swift build` / `swift test` on macOS exercise the playlist,
+server, and audio-bridge pieces (the bridge's decode → resample → FIFO →
+encode chain runs end to end in tests over synthesized LPCM); the remux path
+needs a real media fixture and a device for the Atmos/DV claims, and the EAC3
+output itself needs an FFmpeg build with that encoder enabled.
