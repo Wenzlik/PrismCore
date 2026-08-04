@@ -9,10 +9,12 @@ import Foundation
 final class MediaPlaylistWriter {
 
     private let directory: URL
-    private let initFileName: String
+    /// `nil` omits `EXT-X-MAP` — what a WebVTT rendition playlist needs, since
+    /// its segments are plain text files with no init segment to reference.
+    private let initFileName: String?
     private var entries: [(duration: Double, file: String)] = []
 
-    init(directory: URL, initFileName: String = "init.mp4") {
+    init(directory: URL, initFileName: String? = "init.mp4") {
         self.directory = directory
         self.initFileName = initFileName
     }
@@ -39,9 +41,11 @@ final class MediaPlaylistWriter {
         #EXT-X-MEDIA-SEQUENCE:0
         #EXT-X-PLAYLIST-TYPE:EVENT
         #EXT-X-INDEPENDENT-SEGMENTS
-        #EXT-X-MAP:URI="\(initFileName)"
 
         """
+        if let initFileName {
+            text += "#EXT-X-MAP:URI=\"\(initFileName)\"\n"
+        }
         for entry in entries {
             text += String(format: "#EXTINF:%.5f,\n", entry.duration)
             text += entry.file + "\n"

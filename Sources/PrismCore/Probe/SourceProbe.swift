@@ -201,6 +201,31 @@ public struct AudioTrackInfo: Sendable, Equatable {
     public let copyability: StreamCopyability
 }
 
+public struct SubtitleTrackInfo: Sendable, Equatable {
+
+    /// What PrismCore can do with the track.
+    public enum Kind: String, Sendable, Equatable {
+        /// Text codec (SubRip / ASS / SSA / WebVTT / mov_text): carried as a
+        /// WebVTT `SUBTITLES` rendition, so it survives PiP and AirPlay.
+        case textRendition
+        /// Bitmap codec (PGS / DVB / DVD / XSUB) or teletext: **not** carried.
+        /// Reported so the host can render it in its own overlay — a rendition
+        /// would need OCR, which phase 6 doesn't ship.
+        case bitmapHostOnly
+        /// Something we neither convert nor recognize as bitmap.
+        case unsupported
+    }
+
+    public let streamIndex: Int
+    public let codecName: String
+    public let language: String?
+    public let title: String?
+    public let kind: Kind
+    public let isDefault: Bool
+    public let isForced: Bool
+    public let isHearingImpaired: Bool
+}
+
 /// Everything Aether's engine routing needs to decide PrismCore vs Prism, and
 /// everything `MasterPlaylistBuilder` needs to sign the manifest — read in one
 /// libavformat open.
@@ -211,6 +236,36 @@ public struct SourceInfo: Sendable, Equatable {
     public let duration: Double?
     public let video: VideoTrackInfo?
     public let audioTracks: [AudioTrackInfo]
+    /// Every subtitle stream, text and bitmap alike — the bitmap ones are
+    /// reported precisely because PrismCore does *not* carry them (phase 6),
+    /// and the host has to know they exist to offer them in its own overlay.
+    public let subtitleTracks: [SubtitleTrackInfo]
+
+    /// Explicit so `subtitleTracks` could be added without breaking callers
+    /// that predate it.
+    public init(
+        formatName: String,
+        duration: Double?,
+        video: VideoTrackInfo?,
+        audioTracks: [AudioTrackInfo],
+        subtitleTracks: [SubtitleTrackInfo] = []
+    ) {
+        self.formatName = formatName
+        self.duration = duration
+        self.video = video
+        self.audioTracks = audioTracks
+        self.subtitleTracks = subtitleTracks
+    }
+
+    /// Text subtitle tracks PrismCore turns into WebVTT renditions.
+    public var textSubtitleTracks: [SubtitleTrackInfo] {
+        subtitleTracks.filter { $0.kind == .textRendition }
+    }
+
+    /// Bitmap subtitle tracks the host has to render itself.
+    public var bitmapSubtitleTracks: [SubtitleTrackInfo] {
+        subtitleTracks.filter { $0.kind == .bitmapHostOnly }
+    }
 
     /// The single question the router asks: can PrismCore take this source
     /// today?
@@ -302,6 +357,7 @@ public enum SourceProbe {
 
         var video: VideoTrackInfo?
         var audio: [AudioTrackInfo] = []
+        var subtitles: [SubtitleTrackInfo] = []
 
         // The video track we report is the one the remuxer would select, so
         // routing and remuxing agree on which stream is "the" video.
@@ -315,6 +371,8 @@ public enum SourceProbe {
                 video = makeVideoInfo(streamIndex: index, stream: stream)
             case AVMEDIA_TYPE_AUDIO:
                 audio.append(makeAudioInfo(streamIndex: index, stream: stream))
+            case AVMEDIA_TYPE_SUBTITLE:
+                subtitles.append(makeSubtitleInfo(streamIndex: index, stream: stream))
             default:
                 continue
             }
@@ -324,7 +382,8 @@ public enum SourceProbe {
             formatName: formatName,
             duration: duration,
             video: video,
-            audioTracks: audio
+            audioTracks: audio,
+            subtitleTracks: subtitles
         )
     }
 
@@ -441,9 +500,40 @@ public enum SourceProbe {
             channelCount: Int(par.ch_layout.nb_channels),
             channelLayoutDescription: layout,
             sampleRate: Int(par.sample_rate),
-            language: metadataValue(stream.pointee.metadata, "language"),
-            title: metadataValue(stream.pointee.metadata, "title"),
+            language: avMetadataValue(stream.pointee.metadata, "language"),
+            title: avMetadataValue(stream.pointee.metadata, "title"),
             copyability: copyability
+        )
+    }
+
+    /// Classification comes from `SubtitleRenditionSet`'s own codec sets — the
+    /// remuxer decides what it converts, the probe only reports that decision,
+    /// so the two can't drift.
+    private static func makeSubtitleInfo(
+        streamIndex: Int,
+        stream: UnsafeMutablePointer<AVStream>
+    ) -> SubtitleTrackInfo {
+        let par = stream.pointee.codecpar.pointee
+        let disposition = stream.pointee.disposition
+
+        let kind: SubtitleTrackInfo.Kind
+        if SubtitleRenditionSet.textCodecs.contains(par.codec_id) {
+            kind = .textRendition
+        } else if SubtitleRenditionSet.bitmapCodecs.contains(par.codec_id) {
+            kind = .bitmapHostOnly
+        } else {
+            kind = .unsupported
+        }
+
+        return SubtitleTrackInfo(
+            streamIndex: streamIndex,
+            codecName: codecName(par.codec_id),
+            language: avMetadataValue(stream.pointee.metadata, "language"),
+            title: avMetadataValue(stream.pointee.metadata, "title"),
+            kind: kind,
+            isDefault: disposition & AV_DISPOSITION_DEFAULT != 0,
+            isForced: disposition & AV_DISPOSITION_FORCED != 0,
+            isHearingImpaired: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0
         )
     }
 
@@ -496,13 +586,6 @@ public enum SourceProbe {
         pointer.map { String(cString: $0) }
     }
 
-    private static func metadataValue(_ dictionary: OpaquePointer?, _ key: String) -> String? {
-        guard let dictionary,
-              let entry = av_dict_get(dictionary, key, nil, 0),
-              let value = entry.pointee.value
-        else { return nil }
-        return String(cString: value)
-    }
 }
 
 /// `AV_NOPTS_VALUE` is a macro Swift can't import: `INT64_C(0x8000…)`, i.e.
