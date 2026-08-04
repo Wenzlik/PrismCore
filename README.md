@@ -47,6 +47,16 @@ Source URL ──► libavformat demux ──► hls muxer (fMP4 segments, event
                                       LoopbackHTTPServer ──► AVPlayer
 ```
 
+The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and
+by an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
+`SegmentProvider` rather than straight off disk: `DirectorySegmentProvider` is
+the v0 implementation, and a provider that answers `.pending` gets an early
+`200` + `Transfer-Encoding: chunked` once a serve passes 2 s — keeping response
+headers inside AVPlayer's ~3.5 s media watchdog window. A pending serve that
+ultimately fails aborts the connection (truncated transfer → AVPlayer retries)
+instead of framing a cacheable empty `200`. That seam is where phase 5's
+demand-driven producer plugs in.
+
 v0 lets FFmpeg's own `hls` muxer do the segmentation (equivalent to
 `ffmpeg -f hls -hls_segment_type fmp4`), writing an EVENT playlist that grows
 as segments land and gains `EXT-X-ENDLIST` when the remux finishes. AVPlayer
