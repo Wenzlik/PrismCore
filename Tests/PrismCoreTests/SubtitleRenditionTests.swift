@@ -1,0 +1,209 @@
+import Testing
+import Foundation
+@testable import PrismCore
+
+/// Phase 6 end to end: a subtitled MKV becomes WebVTT renditions served over
+/// the loopback and declared in a master playlist, and an external `.srt`
+/// registered before `start()` becomes one too.
+///
+/// The fixture (`h264_aac_srt.mkv`) is synthetic — testsrc2 + sine + a
+/// three-cue Czech SRT, one cue deliberately straddling the 6 s segment
+/// boundary so the repeat-with-clamped-times rule is exercised by real
+/// segmentation and not only by the unit test.
+@Suite("Subtitle renditions", .serialized)
+struct SubtitleRenditionTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    private func waitForFinishedPlaylist(_ playlistURL: URL, timeout: Duration = .seconds(30)) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            let (data, _) = try await URLSession.shared.data(from: playlistURL)
+            if String(decoding: data, as: UTF8.self).contains("#EXT-X-ENDLIST") { return }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        throw PrismCoreSession.SessionError.startupTimedOut(underlying: nil)
+    }
+
+    /// Fetch over the loopback, returning body and `Content-Type`.
+    private func fetch(_ url: URL) async throws -> (text: String, contentType: String?) {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")
+        return (String(decoding: data, as: UTF8.self), contentType)
+    }
+
+    // MARK: - Embedded text track
+
+    @Test("Embedded SubRip track becomes a served WebVTT rendition the master declares")
+    func embeddedSubRipRendition() async throws {
+        let source = try fixture("h264_aac_srt.mkv")
+
+        // The probe reports it before any remux decision is made.
+        let info = try SourceProbe.probe(url: source)
+        let subtitle = try #require(info.subtitleTracks.first)
+        #expect(subtitle.codecName == "subrip")
+        #expect(subtitle.kind == .textRendition)
+        #expect(subtitle.language == "ces")
+        #expect(info.bitmapSubtitleTracks.isEmpty)
+
+        let session = try PrismCoreSession(url: source)
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        try await waitForFinishedPlaylist(playlist)
+
+        let renditions = await session.subtitleRenditions
+        let rendition = try #require(renditions.first)
+        #expect(renditions.count == 1)
+        #expect(rendition.uri == "subs0/index.m3u8")
+        #expect(rendition.language == "ces")
+        #expect(rendition.name == "Czech")   // the container's title metadata
+
+        // The master a host would serve carries the rendition and points the
+        // variant at its group.
+        let master = try MasterPlaylistBuilder.build(
+            MasterPlaylistBuilder.VariantDescription(
+                bandwidth: 1_000_000,
+                videoCodec: .explicit("avc1.64001f"),
+                subtitles: renditions
+            )
+        )
+        #expect(master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"))
+        #expect(master.contains("LANGUAGE=\"ces\""))
+        #expect(master.contains("URI=\"subs0/index.m3u8\""))
+        #expect(master.contains("SUBTITLES=\"subs\""))
+
+        // The rendition playlist and its segments come off the same loopback.
+        let base = playlist.deletingLastPathComponent()
+        let (subPlaylist, playlistType) = try await fetch(base.appendingPathComponent("subs0/index.m3u8"))
+        #expect(playlistType?.contains("mpegurl") == true)
+        #expect(subPlaylist.contains("seg00000.vtt"))
+        #expect(subPlaylist.contains("#EXT-X-ENDLIST"))
+        #expect(!subPlaylist.contains("#EXT-X-MAP"))
+
+        let (first, vttType) = try await fetch(base.appendingPathComponent("subs0/seg00000.vtt"))
+        #expect(vttType == "text/vtt")
+        #expect(first.hasPrefix("WEBVTT\n"))
+        // The fixture's first video PTS is 0, so the media axis and the cue
+        // axis coincide and the map is the neutral one.
+        #expect(first.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"))
+        #expect(first.contains("00:00:01.000 --> 00:00:03.000"))
+        #expect(first.contains("Ahoj <i>světe</i>"))
+        // The cue straddling the 6 s cut is clamped into this segment…
+        #expect(first.contains("00:00:05.500 --> 00:00:06.000"))
+
+        // …and repeated in the next one.
+        let (second, _) = try await fetch(base.appendingPathComponent("subs0/seg00001.vtt"))
+        #expect(second.contains("00:00:06.000 --> 00:00:06.500"))
+        #expect(second.contains("Přes hranici segmentu"))
+        #expect(second.contains("Konec"))
+
+        // One rendition segment per media segment.
+        let (media, _) = try await fetch(playlist)
+        let mediaSegments = media.split(separator: "\n").filter { $0.hasSuffix(".m4s") }.count
+        let subSegments = subPlaylist.split(separator: "\n").filter { $0.hasSuffix(".vtt") }.count
+        #expect(mediaSegments == subSegments)
+    }
+
+    // MARK: - External file
+
+    @Test("An external .srt registered before start() becomes its own rendition")
+    func externalSubtitleFile() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreExternalSubs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sidecar = directory.appendingPathComponent("german.srt")
+        try Data("""
+        1
+        00:00:00,500 --> 00:00:02,000
+        Guten Tag
+
+        2
+        00:00:07,000 --> 00:00:07,500
+        Ende
+
+        """.utf8).write(to: sidecar)
+
+        // A source with NO embedded subtitle stream, so the only rendition can
+        // be the external one.
+        let session = try PrismCoreSession(url: try fixture("h264_aac.mkv"))
+        try await session.addExternalSubtitle(url: sidecar, language: "de", name: "Deutsch")
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        try await waitForFinishedPlaylist(playlist)
+
+        let renditions = await session.subtitleRenditions
+        #expect(renditions.count == 1)
+        #expect(renditions.first?.name == "Deutsch")
+        #expect(renditions.first?.language == "de")
+        #expect(renditions.first?.uri == "subs0/index.m3u8")
+
+        let base = playlist.deletingLastPathComponent()
+        let (first, _) = try await fetch(base.appendingPathComponent("subs0/seg00000.vtt"))
+        #expect(first.hasPrefix("WEBVTT\n"))
+        #expect(first.contains("00:00:00.500 --> 00:00:02.000"))
+        #expect(first.contains("Guten Tag"))
+
+        // The sidecar is segmented on the video's boundaries like any embedded
+        // track, so its later cue lands in a later segment.
+        let (second, _) = try await fetch(base.appendingPathComponent("subs0/seg00001.vtt"))
+        #expect(second.contains("Ende"))
+    }
+
+    @Test("Registering an external subtitle after start() is refused, not ignored")
+    func registrationAfterStartRefused() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac.mkv"))
+        _ = try await session.start()
+        defer { Task { await session.stop() } }
+
+        await #expect(throws: PrismCoreSession.SessionError.self) {
+            try await session.addExternalSubtitle(url: URL(fileURLWithPath: "/tmp/none.srt"))
+        }
+    }
+
+    // MARK: - Master playlist rules
+
+    @Test("Renditions are never DEFAULT or AUTOSELECT — the host selects them")
+    func renditionsAreNeverSelfEngaging() throws {
+        let master = try MasterPlaylistBuilder.build(
+            MasterPlaylistBuilder.VariantDescription(
+                bandwidth: 1_000_000,
+                videoCodec: .explicit("avc1.64001f"),
+                subtitles: [
+                    .init(name: "English", language: "en", uri: "subs0/index.m3u8"),
+                    .init(name: "Signs", language: "en", uri: "subs1/index.m3u8", isForced: true),
+                ]
+            )
+        )
+        let mediaLines = master.split(separator: "\n").filter { $0.hasPrefix("#EXT-X-MEDIA:TYPE=SUBTITLES") }
+        #expect(mediaLines.count == 2)
+        for line in mediaLines {
+            #expect(line.contains("DEFAULT=NO"))
+            #expect(line.contains("AUTOSELECT=NO"))
+            #expect(line.contains("GROUP-ID=\"subs\""))
+        }
+        #expect(mediaLines.last?.contains("FORCED=YES") == true)
+        #expect(mediaLines.first?.contains("FORCED") == false)
+        // A `.vtt` rendition contributes nothing to CODECS (`wvtt` is for
+        // fMP4-packaged timed text, and claiming it filters the variant).
+        let streamInf = try #require(master.split(separator: "\n").first { $0.hasPrefix("#EXT-X-STREAM-INF:") })
+        #expect(!streamInf.contains("wvtt"))
+        #expect(streamInf.contains("SUBTITLES=\"subs\""))
+    }
+
+    @Test("No subtitles means no SUBTITLES attribute at all")
+    func noSubtitlesNoAttribute() throws {
+        let master = try MasterPlaylistBuilder.build(
+            MasterPlaylistBuilder.VariantDescription(
+                bandwidth: 1_000_000,
+                videoCodec: .explicit("avc1.64001f")
+            )
+        )
+        #expect(!master.contains("SUBTITLES"))
+    }
+}

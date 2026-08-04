@@ -28,6 +28,8 @@ The first integration is deliberately narrow — a *service*, not a player:
 
 ```swift
 let session = try PrismCoreSession(url: mkvURL)   // or with HTTP headers
+// optional, before start(): a sidecar joins the WebVTT renditions (phase 6)
+try await session.addExternalSubtitle(url: srtURL, language: "cs", name: "Čeština")
 let playlistURL = try await session.start()       // http://127.0.0.1:<port>/index.m3u8
 // hand playlistURL to AVPlayer (Aether: the Lumen path plays it)
 …
@@ -64,6 +66,21 @@ starts playback as soon as the first segments exist. Demand-driven seeking
 (producing segments *at* the seek target instead of from the start) is the
 single biggest piece of the later phases.
 
+### Subtitle timing (`X-TIMESTAMP-MAP`)
+
+WebVTT cue times are local to their file, so HLS bridges them to the media
+timeline with `X-TIMESTAMP-MAP=MPEGTS:<t>,LOCAL:<local>`, where `t` sits on a
+90 kHz axis whatever timescale the media segments use. Our fMP4 segments carry
+the source's own stream-copied timestamps, so the media timeline starts at the
+first video PTS — there is no MPEG-TS 10 s convention to honour, and assuming one
+is exactly what makes fMP4 subtitle tracks render ten seconds late in other
+implementations. PrismCore therefore writes cue times **relative to the
+presentation origin** and repeats
+`MPEGTS:round(origin × 90000),LOCAL:00:00:00.000` in every segment: `MPEGTS:0`
+for an ordinary file starting at PTS 0, `MPEGTS:900000` for a mid-stream capture
+that really does start at 10 s. The map states a fact about the output rather
+than a convention.
+
 ## Roadmap
 
 **End goal: replace Prism (libmpv) in Aether.** Until every phase lands,
@@ -92,8 +109,19 @@ Prism, and Prism retires only at parity.
    master playlist into `PrismCoreSession` behind the panel-readiness read.
 5. **Seek & cache** — keyframe-aligned segment plan, demand-driven producer
    with restart timeline continuity, byte-budgeted retention.
-6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay; bitmap
-   (PGS/DVB) rendering for the fullscreen overlay.
+6. **Subtitles** *(text half implemented)* — every text subtitle stream
+   (SubRip / ASS / SSA / WebVTT / mov_text) is converted during the remux read
+   loop into a segmented WebVTT rendition (`subs<N>/seg%05d.vtt` +
+   `subs<N>/index.m3u8`) cut on the video's own segment boundaries, so text
+   survives PiP / AirPlay instead of living in a host overlay. External `.srt` /
+   `.vtt` files register with `PrismCoreSession.addExternalSubtitle(url:…)`
+   before `start()` and become renditions the same way. The renditions are
+   declared `DEFAULT=NO,AUTOSELECT=NO` in a `SUBTITLES` group so AVKit never
+   engages one by itself — the host selects it in the legible
+   `AVMediaSelectionGroup`. Bitmap subtitles (PGS/DVB/DVD) are out of scope
+   here: `SourceProbe` reports them (`SourceInfo.bitmapSubtitleTracks`) so the
+   host can render them in its own overlay, and an OCR-fed rendition is a later
+   idea, not this phase.
 7. **Software decode path** — libavcodec →
    `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer` for what the
    HLS-fMP4 pipeline can't carry (VP9/VP8, MPEG-2/VC-1/MPEG-4 ASP,
@@ -118,7 +146,7 @@ same LGPL obligations already met.
 ## Status
 
 Early scaffold. `swift build` / `swift test` on macOS exercise the playlist,
-server, and audio-bridge pieces (the bridge's decode → resample → FIFO →
+server, subtitle-rendition, and audio-bridge pieces (the bridge's decode → resample → FIFO →
 encode chain runs end to end in tests over synthesized LPCM); the remux path
 needs a real media fixture and a device for the Atmos/DV claims, and the EAC3
 output itself needs an FFmpeg build with that encoder enabled.
