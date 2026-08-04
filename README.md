@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/prismcore-logo.png" alt="PrismCore" width="360">
+</p>
+
 # PrismCore
 
 Aether's native playback engine core: **FFmpeg demuxes, Apple plays.**
