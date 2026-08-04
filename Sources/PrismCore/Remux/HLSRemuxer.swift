@@ -22,8 +22,13 @@ import Libavutil
 /// through `AudioBridge`, which decodes and re-encodes them to EAC3 so surround
 /// survives (phase 3). Copyable audio never touches the bridge.
 ///
+/// Text subtitles are carried too (phase 6), but never into the fMP4: their
+/// packets go to `SubtitleRenditionSet`, which converts them to segmented WebVTT
+/// renditions cut on these same boundaries. Bitmap subtitles are skipped — the
+/// probe reports them so the host can draw its own overlay.
+///
 /// Not in v0 (by design, see README roadmap): demand-driven seeking, DV/HDR
-/// master-playlist signaling, multi-audio / subtitle tracks.
+/// master-playlist signaling, multi-audio tracks.
 final class HLSRemuxer: @unchecked Sendable {
 
     /// How the selected audio stream reaches the output.
@@ -77,6 +82,11 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
 
+    /// The WebVTT subtitle renditions produced alongside the fMP4 (phase 6).
+    /// Exposed so the session can register external files before the run and
+    /// read the produced renditions for the master playlist.
+    let subtitles: SubtitleRenditionSet
+
     init(
         sourceURL: URL,
         httpHeaders: [String: String] = [:],
@@ -87,6 +97,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.httpHeaders = httpHeaders
         self.outputDirectory = outputDirectory
         self.segmentSeconds = segmentSeconds
+        self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory)
     }
 
     func cancel() {
@@ -122,6 +133,12 @@ final class HLSRemuxer: @unchecked Sendable {
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
         let selection = try selectStreams(input)
+
+        // Subtitle renditions are set up before the muxer: their packets never
+        // reach it (in-band timed text is not HLS-conformant — the prior art
+        // tried and AVPlayer rejected the stream), they become WebVTT files
+        // alongside the fMP4 segments.
+        let subtitleStreams = try subtitles.prepare(input: input)
 
         // Bridge first — its encoder parameters must be on the output stream
         // BEFORE write_header (empty_moov writes the sample entries then).
@@ -178,6 +195,12 @@ final class HLSRemuxer: @unchecked Sendable {
                 duration: max(0.001, Double(endPTS - start) * tickSeconds),
                 file: file
             )
+            // Same wall-time window, so rendition segment N covers variant
+            // segment N — cut only when a media segment really landed.
+            try subtitles.flushSegment(
+                start: Double(start) * tickSeconds,
+                end: Double(endPTS) * tickSeconds
+            )
             segmentIndex += 1
         }
 
@@ -202,6 +225,12 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             defer { av_packet_unref(packet) }
 
+            // Subtitle packets are consumed here and never handed to the muxer.
+            if subtitleStreams.contains(Int32(packet.pointee.stream_index)) {
+                subtitles.ingest(packet)
+                continue
+            }
+
             guard let mapped = streamMap[Int(packet.pointee.stream_index)] else { continue }
 
             // Cut BEFORE writing a boundary keyframe, so the keyframe opens
@@ -215,6 +244,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     if segmentStartPTS == nil {
                         segmentStartPTS = pts
                         nextBoundaryPTS = pts + boundaryStep
+                        // The presentation origin: what the WebVTT timestamp
+                        // maps are anchored to (see WebVTTRenditionWriter).
+                        subtitles.setTimelineOrigin(seconds: Double(pts) * tickSeconds)
                     } else if pts >= nextBoundaryPTS {
                         try emitSegment(endPTS: pts)
                         segmentStartPTS = pts
@@ -263,8 +295,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 duration: max(0.001, Double(closingPTS - start) * tickSeconds),
                 file: file
             )
+            try subtitles.flushSegment(
+                start: Double(start) * tickSeconds,
+                end: Double(closingPTS) * tickSeconds
+            )
         }
         if reachedEOF {
+            try subtitles.finish()
             // ENDLIST only on a genuinely finished remux — a cancelled one leaves the
             // event playlist open-ended, and the session dir dies with stop().
             try playlist.finish()

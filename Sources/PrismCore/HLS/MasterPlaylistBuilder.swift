@@ -75,6 +75,42 @@ public enum MasterPlaylistBuilder {
         }
     }
 
+    /// One WebVTT subtitle rendition (phase 6).
+    ///
+    /// `DEFAULT=NO,AUTOSELECT=NO` always, and deliberately not configurable:
+    /// with either set to `YES` AVKit engages the rendition by itself, which
+    /// double-draws against a host overlay and turns subtitles on for users who
+    /// never asked. The host selects the rendition programmatically through the
+    /// legible `AVMediaSelectionGroup` instead.
+    public struct SubtitleRendition: Sendable, Equatable {
+        public var groupID: String
+        public var name: String
+        /// BCP-47 / ISO-639 tag from the container metadata (or the caller's,
+        /// for an external file).
+        public var language: String?
+        /// Relative URI of the rendition's media playlist. Required — a
+        /// subtitle rendition is never muxed into the variant's segments.
+        public var uri: String
+        /// Container `FORCED` disposition: subtitles for foreign dialogue only.
+        /// Emitted as `FORCED=YES` so the host can tell them apart in the
+        /// selection group.
+        public var isForced: Bool
+
+        public init(
+            groupID: String = "subs",
+            name: String,
+            language: String? = nil,
+            uri: String,
+            isForced: Bool = false
+        ) {
+            self.groupID = groupID
+            self.name = name
+            self.language = language
+            self.uri = uri
+            self.isForced = isForced
+        }
+    }
+
     public struct VariantDescription: Sendable, Equatable {
         /// Relative URI of the media playlist the remuxer writes.
         public var mediaPlaylistURI: String
@@ -95,6 +131,9 @@ public enum MasterPlaylistBuilder {
         /// claiming DV to a non-DV display fails the item outright.
         public var displayIsDolbyVisionCapable: Bool
         public var audio: AudioRendition?
+        /// WebVTT subtitle renditions, in declaration order. Empty means the
+        /// manifest says nothing about subtitles — the pre-phase-6 shape.
+        public var subtitles: [SubtitleRendition]
 
         public init(
             mediaPlaylistURI: String = "index.m3u8",
@@ -106,7 +145,8 @@ public enum MasterPlaylistBuilder {
             videoCodec: VideoCodec,
             dolbyVision: DolbyVisionConfiguration? = nil,
             displayIsDolbyVisionCapable: Bool = false,
-            audio: AudioRendition? = nil
+            audio: AudioRendition? = nil,
+            subtitles: [SubtitleRendition] = []
         ) {
             self.mediaPlaylistURI = mediaPlaylistURI
             self.bandwidth = bandwidth
@@ -118,6 +158,7 @@ public enum MasterPlaylistBuilder {
             self.dolbyVision = dolbyVision
             self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
             self.audio = audio
+            self.subtitles = subtitles
         }
     }
 
@@ -160,6 +201,9 @@ public enum MasterPlaylistBuilder {
         if let audio = variant.audio {
             lines.append(mediaLine(for: audio))
         }
+        for subtitle in variant.subtitles {
+            lines.append(mediaLine(for: subtitle))
+        }
         lines.append(try streamInfLine(for: variant))
         lines.append(variant.mediaPlaylistURI)
 
@@ -183,6 +227,28 @@ public enum MasterPlaylistBuilder {
         if let uri = audio.uri, !uri.isEmpty {
             attributes.append("URI=\(quoted(uri))")
         }
+        return "#EXT-X-MEDIA:" + attributes.joined(separator: ",")
+    }
+
+    /// `EXT-X-MEDIA` for a WebVTT rendition. No `CODECS` contribution: HLS
+    /// declares `wvtt` only for fMP4-packaged timed text, and a `CODECS` entry
+    /// for a plain `.vtt` rendition makes AVPlayer filter the variant.
+    private static func mediaLine(for subtitle: SubtitleRendition) -> String {
+        var attributes = [
+            "TYPE=SUBTITLES",
+            "GROUP-ID=\(quoted(subtitle.groupID))",
+            "NAME=\(quoted(subtitle.name))",
+        ]
+        if let language = subtitle.language, !language.isEmpty {
+            attributes.append("LANGUAGE=\(quoted(language))")
+        }
+        // See `SubtitleRendition`: never YES, on purpose.
+        attributes.append("DEFAULT=NO")
+        attributes.append("AUTOSELECT=NO")
+        if subtitle.isForced {
+            attributes.append("FORCED=YES")
+        }
+        attributes.append("URI=\(quoted(subtitle.uri))")
         return "#EXT-X-MEDIA:" + attributes.joined(separator: ",")
     }
 
@@ -216,6 +282,10 @@ public enum MasterPlaylistBuilder {
         }
         if let audio = variant.audio {
             attributes.append("AUDIO=\(quoted(audio.groupID))")
+        }
+        // One group for every subtitle rendition; the first one names it.
+        if let group = variant.subtitles.first?.groupID {
+            attributes.append("SUBTITLES=\(quoted(group))")
         }
         return "#EXT-X-STREAM-INF:" + attributes.joined(separator: ",")
     }
