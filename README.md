@@ -28,11 +28,15 @@ The first integration is deliberately narrow — a *service*, not a player:
 
 ```swift
 let session = try PrismCoreSession(url: mkvURL)   // or with HTTP headers
-let playlistURL = try await session.start()       // http://127.0.0.1:<port>/index.m3u8
+let playlistURL = try await session.start()       // http://127.0.0.1:<port>/master.m3u8
 // hand playlistURL to AVPlayer (Aether: the Lumen path plays it)
 …
 await session.stop()
 ```
+
+The URL is a **master** playlist when the source has audio (that is where the
+selectable audio renditions live) and the media playlist when it hasn't. Treat
+it as opaque: the shape is a property of the source.
 
 No view, no transport, no published state — the host's existing AVPlayer
 infrastructure stays in charge. The engine grows inward from there (see
@@ -41,11 +45,28 @@ Roadmap).
 ## Architecture (v0)
 
 ```
-Source URL ──► libavformat demux ──► hls muxer (fMP4 segments, event playlist)
-                                              │  tmp dir
-                                              ▼
-                                      LoopbackHTTPServer ──► AVPlayer
+                                    ┌─► video ──► fMP4 segments + index.m3u8
+Source URL ──► libavformat demux ───┼─► audio 0 ─► audio0/{init.mp4,seg*.m4s,index.m3u8}
+                                    └─► audio N ─► audioN/…        │  tmp dir
+                                              master.m3u8 ─────────┤
+                                                                   ▼
+                                                    LoopbackHTTPServer ──► AVPlayer
 ```
+
+Every viable audio track of the source becomes an HLS **alternate rendition**:
+its own fMP4 writer, its own media playlist, its own subdirectory, all wrapped
+by a `master.m3u8` whose `EXT-X-MEDIA` lines carry the tracks' names, languages
+and channel counts. That is what gives AVPlayer an `AVMediaSelectionGroup` to
+switch on — parity with the libmpv player PrismCore replaces, whose track menu
+the host app already exposes. Audio cuts follow the **video's** segment
+boundaries so the renditions stay comparable, which is what HLS asks of them.
+
+A source whose master playlist can't be written honestly (no derivable `CODECS`
+string, or a dynamic range this display hasn't been vouched for — see
+`PrismCoreSession`'s `displayIsHDRReady`) falls back to v0's shape: one audio
+track muxed into the video's own segments, media playlist served directly.
+Renditions only exist inside a master, so no master means the audio rides
+inside the variant.
 
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and
 by an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
@@ -57,8 +78,10 @@ ultimately fails aborts the connection (truncated transfer → AVPlayer retries)
 instead of framing a cacheable empty `200`. That seam is where phase 5's
 demand-driven producer plugs in.
 
-v0 lets FFmpeg's own `hls` muxer do the segmentation (equivalent to
-`ffmpeg -f hls -hls_segment_type fmp4`), writing an EVENT playlist that grows
+The segmentation is ours: MPVKit's libavformat is built without the `hls`
+muxer, so `FMP4SegmentWriter` drives the `mp4` muxer with `frag_custom` and cuts
+where we say (video keyframes at/after each 6 s boundary), and
+`MediaPlaylistWriter` turns those fragments into an EVENT playlist that grows
 as segments land and gains `EXT-X-ENDLIST` when the remux finishes. AVPlayer
 starts playback as soon as the first segments exist. Demand-driven seeking
 (producing segments *at* the seek target instead of from the start) is the
@@ -72,7 +95,10 @@ Prism, and Prism retires only at parity.
 
 1. **v0 (this)** — stream-copyable A/V (HEVC/H.264 + AAC/AC3/EAC3/FLAC/ALAC),
    loopback server, event playlist. Plays an MKV remux with Atmos intact —
-   which is already the bulk of what Prism handles in the wild.
+   which is already the bulk of what Prism handles in the wild. **Multi-audio**
+   landed here rather than later: every viable audio track is served as an
+   alternate rendition behind a master playlist, because a host whose track menu
+   can only offer one track is not at parity with the player it replaces.
 2. **Aether integration** — `PlayerTransport` routing behind a developer
    toggle; HTTP headers for server sources; teardown discipline.
 3. **Audio bridge** *(implemented, needs a media fixture + a device)* — TrueHD /
@@ -87,12 +113,18 @@ Prism, and Prism retires only at parity.
    (Libdovi ships inside MPVKit already), panel-readiness gating.
    *Groundwork landed:* `SourceProbe` (what the source is, and whether
    PrismCore can take it) and `MasterPlaylistBuilder` (the signaling rules, as
-   pure value-in/string-out logic with the rules pinned by unit tests). Still
-   open in this phase: `hvcC` normalization, the P7 conversion, and wiring the
-   master playlist into `PrismCoreSession` behind the panel-readiness read.
+   pure value-in/string-out logic with the rules pinned by unit tests). The
+   master playlist is now written and served (multi-audio needs it), with the
+   panel-readiness read still a caller-supplied `displayIsHDRReady` /
+   `displayIsDolbyVisionCapable` pair rather than a real display query: an HDR
+   or DV source keeps the media-direct shape until a host vouches for the
+   panel. Still open in this phase: `hvcC` normalization, the P7 conversion,
+   the actual panel read, and the master-rejection fallback (reload the media
+   playlist when AVPlayer refuses a master, `-11868` / `-11848` / `-1002`).
 5. **Seek & cache** — keyframe-aligned segment plan, demand-driven producer
    with restart timeline continuity, byte-budgeted retention.
-6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay; bitmap
+6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay (the
+   master + rendition plumbing multi-audio built is what they plug into); bitmap
    (PGS/DVB) rendering for the fullscreen overlay.
 7. **Software decode path** — libavcodec →
    `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer` for what the
@@ -117,8 +149,13 @@ same LGPL obligations already met.
 
 ## Status
 
-Early scaffold. `swift build` / `swift test` on macOS exercise the playlist,
+Early scaffold. `swift build` / `swift test` on macOS exercise the playlists,
 server, and audio-bridge pieces (the bridge's decode → resample → FIFO →
-encode chain runs end to end in tests over synthesized LPCM); the remux path
-needs a real media fixture and a device for the Atmos/DV claims, and the EAC3
-output itself needs an FFmpeg build with that encoder enabled.
+encode chain runs end to end in tests over synthesized LPCM), plus end-to-end
+remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces) is
+served over the loopback, re-probed through libavformat's hls demuxer with both
+codecs and both languages intact, and reaches `.readyToPlay` in a real
+`AVPlayer`. What fixtures can't carry still needs a device: the Atmos and Dolby
+Vision claims, actual track *switching* in AVKit's audio menu, and the EAC3
+output the bridge produces (which needs an FFmpeg build with that encoder
+enabled).

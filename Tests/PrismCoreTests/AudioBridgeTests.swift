@@ -193,6 +193,48 @@ struct AudioRoutingTests {
         #expect(HLSRemuxer.chooseAudio(candidates: [], best: nil, canBridge: bridgeEverything) == nil)
     }
 
+    @Test("Every viable track becomes a rendition, the preferred one leading")
+    func routesAllViableTracks() {
+        let candidates = [
+            HLSRemuxer.AudioCandidate(index: 1, codecID: AV_CODEC_ID_AC3),
+            HLSRemuxer.AudioCandidate(index: 2, codecID: AV_CODEC_ID_EAC3),
+            HLSRemuxer.AudioCandidate(index: 3, codecID: AV_CODEC_ID_DTS),
+        ]
+        // The demuxer's best is index 2; it leads because the first rendition is
+        // the one flagged DEFAULT. The rest keep container order.
+        let routes = HLSRemuxer.routeAll(candidates: candidates, best: 2, canBridge: bridgeEverything)
+        #expect(routes == [
+            HLSRemuxer.AudioRoute(index: 2, mode: .streamCopy),
+            HLSRemuxer.AudioRoute(index: 1, mode: .streamCopy),
+            HLSRemuxer.AudioRoute(index: 3, mode: .bridge),
+        ])
+    }
+
+    @Test("Tracks that can be neither copied nor bridged are left out entirely")
+    func skipsUnroutableTracks() {
+        let candidates = [
+            HLSRemuxer.AudioCandidate(index: 1, codecID: AV_CODEC_ID_TRUEHD),
+            HLSRemuxer.AudioCandidate(index: 2, codecID: AV_CODEC_ID_AAC),
+        ]
+        // A dormant bridge (no eac3 encoder in this build) drops the TrueHD
+        // track rather than serving a rendition AVPlayer would choke on.
+        let dormant = HLSRemuxer.routeAll(candidates: candidates, best: 1, canBridge: bridgeNothing)
+        #expect(dormant == [HLSRemuxer.AudioRoute(index: 2, mode: .streamCopy)])
+
+        // With the encoder present the same source carries both, TrueHD first
+        // (it is the best track, and bridged surround beats an AAC downmix).
+        let live = HLSRemuxer.routeAll(candidates: candidates, best: 1, canBridge: bridgeEverything)
+        #expect(live == [
+            HLSRemuxer.AudioRoute(index: 1, mode: .bridge),
+            HLSRemuxer.AudioRoute(index: 2, mode: .streamCopy),
+        ])
+    }
+
+    @Test("A silent source produces no renditions")
+    func noRenditionsWithoutAudio() {
+        #expect(HLSRemuxer.routeAll(candidates: [], best: nil, canBridge: bridgeEverything).isEmpty)
+    }
+
     @Test("The bridgeable set covers the codecs phase 3 promised, and no copyable one")
     func bridgeableSetShape() {
         for codec in [AV_CODEC_ID_TRUEHD, AV_CODEC_ID_DTS, AV_CODEC_ID_MP3,

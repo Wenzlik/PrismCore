@@ -332,6 +332,14 @@ final class AudioBridge {
         encoderCtx?.pointee.time_base ?? AVRational(num: 1, den: 48_000)
     }
 
+    /// Channels the encoder actually emits — the negotiated layout, not the
+    /// source's (FFmpeg's EAC3 encoder caps at 6, so a 7.1 source leaves as
+    /// 5.1). This is the honest `CHANNELS` value for the rendition.
+    var outputChannelCount: Int? {
+        guard let encoderCtx, encoderCtx.pointee.ch_layout.nb_channels > 0 else { return nil }
+        return Int(encoderCtx.pointee.ch_layout.nb_channels)
+    }
+
     /// Human-readable "what did we do to this track", for diagnostics and for
     /// the host's track UI (`"TrueHD 7.1 → EAC3 5.1"`).
     var routeDescription: String {

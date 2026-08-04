@@ -55,9 +55,20 @@ final class FMP4SegmentWriter {
     struct StreamPlan {
         let inputIndex: Int32
         let configure: ((UnsafeMutablePointer<AVStream>) throws -> Void)?
+        /// ISO-639 tag for the output track's `mdhd`, when the source had one.
+        /// A rendition's language is carried by the master playlist's
+        /// `LANGUAGE` attribute, so this is not what AVPlayer selects on — it
+        /// keeps the media itself self-describing for anything that reads the
+        /// trak instead of the manifest.
+        let language: String?
 
-        init(inputIndex: Int32, configure: ((UnsafeMutablePointer<AVStream>) throws -> Void)? = nil) {
+        init(
+            inputIndex: Int32,
+            language: String? = nil,
+            configure: ((UnsafeMutablePointer<AVStream>) throws -> Void)? = nil
+        ) {
             self.inputIndex = inputIndex
+            self.language = language
             self.configure = configure
         }
     }
@@ -92,6 +103,9 @@ final class FMP4SegmentWriter {
                     "avcodec_parameters_copy"
                 )
                 outStream.pointee.codecpar.pointee.codec_tag = 0
+            }
+            if let language = entry.language, !language.isEmpty {
+                av_dict_set(&outStream.pointee.metadata, "language", language, 0)
             }
             streamMap[Int(entry.inputIndex)] = outStream.pointee.index
         }
