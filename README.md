@@ -94,11 +94,21 @@ Prism, and Prism retires only at parity.
    with restart timeline continuity, byte-budgeted retention.
 6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay; bitmap
    (PGS/DVB) rendering for the fullscreen overlay.
-7. **Software decode path** — libavcodec →
-   `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer` for what the
-   HLS-fMP4 pipeline can't carry (VP9/VP8, MPEG-2/VC-1/MPEG-4 ASP,
-   interlaced H.264 + deinterlace). This is the phase that lets Prism —
-   and with it the entire libmpv dependency — retire.
+7. **Software decode path** *(skeleton implemented; no session integration yet)*
+   — libavcodec → `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer`
+   under an `AVSampleBufferRenderSynchronizer` for what the HLS-fMP4 pipeline
+   can't carry (VP9/VP8, MPEG-2/VC-1/MPEG-4 ASP, interlaced H.264 +
+   deinterlace). This is the phase that lets Prism — and with it the entire
+   libmpv dependency — retire.
+   *Landed:* `Sources/PrismCore/Software/` — `SoftwareVideoDecoder` (frames as
+   `CMSampleBuffer`s of `CVPixelBuffer`s; zero-copy through the VideoToolbox
+   hwaccel where MPVKit's build has one, which includes VP9, with a CPU decode
+   + NV12/P010 conversion fallback), `SoftwareAudioDecoder` (LPCM buffers whose
+   timestamps come from a running sample count, not from container-quantized
+   PTS — see `AudioClock`), and `SoftwarePlaybackPipeline` (demux + both
+   decoders + renderers + master clock, with `load/play/pause/seek/stop`).
+   Still open in this phase: wiring it into `PrismCoreSession` and the host's
+   routing, deinterlacing, subtitles, track switching, and frame-accurate seek.
 
 ## Prior art & rules
 
@@ -122,3 +132,12 @@ server, and audio-bridge pieces (the bridge's decode → resample → FIFO →
 encode chain runs end to end in tests over synthesized LPCM); the remux path
 needs a real media fixture and a device for the Atmos/DV claims, and the EAC3
 output itself needs an FFmpeg build with that encoder enabled.
+
+The software path (phase 7) is exercised headless as far as it can be: the VP9
+fixture decodes to `CVPixelBuffer`s of the right shape on a monotonic,
+source-anchored timeline, the pipeline runs demux → decode → stamp →
+back-pressure → enqueue against renderer stand-ins (including the case where a
+stalled video renderer must not starve audio), and the clock arithmetic is
+unit-tested on its own. What no headless test can assert is that a frame reached
+a display or a speaker — that needs a device, and so does the A/V sync the
+synchronizer is supposed to be maintaining.
