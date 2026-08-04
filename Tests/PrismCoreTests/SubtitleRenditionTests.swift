@@ -19,10 +19,24 @@ struct SubtitleRenditionTests {
         return try #require(url, "fixture \(name) missing from test bundle")
     }
 
+    /// Since the multi-audio merge, `start()` returns a MASTER for sources
+    /// with audio renditions — and masters never gain `EXT-X-ENDLIST`. Follow
+    /// the master to its variant and poll THAT for the finish, same as the
+    /// remux integration suite.
     private func waitForFinishedPlaylist(_ playlistURL: URL, timeout: Duration = .seconds(30)) async throws {
+        var mediaURL = playlistURL
+        let (firstData, _) = try await URLSession.shared.data(from: playlistURL)
+        let first = String(decoding: firstData, as: UTF8.self)
+        if first.contains("#EXT-X-STREAM-INF") {
+            let variant = try #require(
+                PrismCoreSession.playlistURIs(inMaster: first).last,
+                "a master must reference a variant playlist"
+            )
+            mediaURL = playlistURL.deletingLastPathComponent().appendingPathComponent(variant)
+        }
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
-            let (data, _) = try await URLSession.shared.data(from: playlistURL)
+            let (data, _) = try await URLSession.shared.data(from: mediaURL)
             if String(decoding: data, as: UTF8.self).contains("#EXT-X-ENDLIST") { return }
             try await Task.sleep(for: .milliseconds(200))
         }
@@ -101,8 +115,10 @@ struct SubtitleRenditionTests {
         #expect(second.contains("Přes hranici segmentu"))
         #expect(second.contains("Konec"))
 
-        // One rendition segment per media segment.
-        let (media, _) = try await fetch(playlist)
+        // One rendition segment per media segment — counted off the VARIANT
+        // playlist (`playlist` is the master since the multi-audio merge, and
+        // a master lists no segments).
+        let (media, _) = try await fetch(base.appendingPathComponent("index.m3u8"))
         let mediaSegments = media.split(separator: "\n").filter { $0.hasSuffix(".m4s") }.count
         let subSegments = subPlaylist.split(separator: "\n").filter { $0.hasSuffix(".vtt") }.count
         #expect(mediaSegments == subSegments)

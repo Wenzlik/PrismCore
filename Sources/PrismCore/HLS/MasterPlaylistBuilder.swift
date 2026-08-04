@@ -2,11 +2,12 @@ import Foundation
 
 /// Builds the HLS **master** playlist that wraps the remux's media playlist.
 ///
-/// v0 hands AVPlayer the media playlist directly, which is enough to play but
-/// says nothing about the stream: no `CODECS`, no `VIDEO-RANGE`, no
-/// `SUPPLEMENTAL-CODECS`. Those attributes are the only way to ask Apple's
-/// stack for HDR and to make AVKit engage Dolby Vision, so an HDR or DV source
-/// needs a master playlist in front of it.
+/// A bare media playlist is enough to play, but it says nothing about the
+/// stream: no `CODECS`, no `VIDEO-RANGE`, no `SUPPLEMENTAL-CODECS`, and — the
+/// reason the session serves a master at all today — no way to offer more than
+/// one audio track. Those attributes are the only way to ask Apple's stack for
+/// HDR and to make AVKit engage Dolby Vision, and an `EXT-X-MEDIA` group is the
+/// only way an `AVMediaSelectionGroup` of audio renditions comes into being.
 ///
 /// Deliberately pure: values in, string out, no I/O and no libavformat. Every
 /// signaling rule is therefore pinned by a unit test instead of by a device.
@@ -31,13 +32,14 @@ public enum MasterPlaylistBuilder {
     public enum VideoCodec: Sendable, Equatable {
         /// HEVC, declared from the source's own `hvcC` profile_tier_level.
         case hevc(HEVCConfigurationRecord)
-        /// Anything else (H.264 `avc1.…`), where the caller already has the
-        /// RFC 6381 string. Phase 4's signaling work is HEVC/DV; H.264 is SDR
-        /// plumbing and gets to stay a passthrough.
+        /// H.264, declared from the source's own `avcC` three PTL bytes.
+        case avc(AVCConfigurationRecord)
+        /// Anything else, where the caller already has the RFC 6381 string.
         case explicit(String)
     }
 
-    /// The one audio rendition the v0 remuxer produces.
+    /// One selectable audio rendition. The remuxer emits one per viable audio
+    /// track of the source, each backed by its own media playlist.
     public struct AudioRendition: Sendable, Equatable {
         public var groupID: String
         public var name: String
@@ -54,6 +56,8 @@ public enum MasterPlaylistBuilder {
         /// `EXT-X-MEDIA` exactly that way, so the rendition still shows up as
         /// a selectable `AVMediaSelectionOption`.
         public var uri: String?
+        /// `DEFAULT=YES`. Exactly one rendition of a group may claim it, and
+        /// the caller decides which — the builder prints what it is told.
         public var isDefault: Bool
 
         public init(
@@ -130,7 +134,9 @@ public enum MasterPlaylistBuilder {
         /// a different manifest on a DV panel and on an HDR10 one, and
         /// claiming DV to a non-DV display fails the item outright.
         public var displayIsDolbyVisionCapable: Bool
-        public var audio: AudioRendition?
+        /// Every selectable audio rendition, in the order they are offered.
+        /// Empty for a silent source (no `EXT-X-MEDIA`, no `AUDIO` attribute).
+        public var audioRenditions: [AudioRendition]
         /// WebVTT subtitle renditions, in declaration order. Empty means the
         /// manifest says nothing about subtitles — the pre-phase-6 shape.
         public var subtitles: [SubtitleRendition]
@@ -145,7 +151,7 @@ public enum MasterPlaylistBuilder {
             videoCodec: VideoCodec,
             dolbyVision: DolbyVisionConfiguration? = nil,
             displayIsDolbyVisionCapable: Bool = false,
-            audio: AudioRendition? = nil,
+            audioRenditions: [AudioRendition] = [],
             subtitles: [SubtitleRendition] = []
         ) {
             self.mediaPlaylistURI = mediaPlaylistURI
@@ -157,7 +163,7 @@ public enum MasterPlaylistBuilder {
             self.videoCodec = videoCodec
             self.dolbyVision = dolbyVision
             self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
-            self.audio = audio
+            self.audioRenditions = audioRenditions
             self.subtitles = subtitles
         }
     }
@@ -198,7 +204,7 @@ public enum MasterPlaylistBuilder {
             "#EXT-X-INDEPENDENT-SEGMENTS",
         ]
 
-        if let audio = variant.audio {
+        for audio in variant.audioRenditions {
             lines.append(mediaLine(for: audio))
         }
         for subtitle in variant.subtitles {
@@ -220,7 +226,12 @@ public enum MasterPlaylistBuilder {
             attributes.append("LANGUAGE=\(quoted(language))")
         }
         attributes.append("DEFAULT=\(audio.isDefault ? "YES" : "NO")")
-        attributes.append("AUTOSELECT=\(audio.isDefault ? "YES" : "NO")")
+        // AUTOSELECT=YES on every rendition, default or not: it is what lets
+        // AVFoundation honour the user's system audio-language preference (and
+        // `AVPlayerItem.select(_:in:)` with a language criterion) instead of
+        // locking playback to whichever track the container listed first.
+        // NO would make the alternates dead weight in the selection group.
+        attributes.append("AUTOSELECT=YES")
         if let channels = audio.channels, !channels.isEmpty {
             attributes.append("CHANNELS=\(quoted(channels))")
         }
@@ -259,7 +270,17 @@ public enum MasterPlaylistBuilder {
         }
 
         var codecs = [primaryVideoCodecString(for: variant)]
-        if let audioCodec = variant.audio?.codecString, !audioCodec.isEmpty {
+        // Only the DEFAULT rendition's codec is declared, even when the group
+        // holds renditions of other codecs. Apple's authoring rules want one
+        // group (and one variant) per audio codec, which for a remux proxy
+        // would mean N near-identical variants AVPlayer would treat as bitrate
+        // alternatives of each other. Listing the union instead is the worse
+        // trade: a single codec this platform can't decode gets the whole
+        // variant filtered at master-parse time (`-1002`), so an exotic
+        // secondary track would take the playable ones down with it. The
+        // alternates still play when selected — `EXT-X-MEDIA` carries its own
+        // media playlist and init segment.
+        if let audioCodec = defaultRendition(of: variant)?.codecString, !audioCodec.isEmpty {
             codecs.append(audioCodec)
         }
         attributes.append("CODECS=\(quoted(codecs.joined(separator: ",")))")
@@ -280,14 +301,22 @@ public enum MasterPlaylistBuilder {
         if variant.dynamicRange != .sdr {
             attributes.append("VIDEO-RANGE=\(variant.dynamicRange.rawValue)")
         }
-        if let audio = variant.audio {
-            attributes.append("AUDIO=\(quoted(audio.groupID))")
+        if let group = variant.audioRenditions.first?.groupID {
+            attributes.append("AUDIO=\(quoted(group))")
         }
         // One group for every subtitle rendition; the first one names it.
         if let group = variant.subtitles.first?.groupID {
             attributes.append("SUBTITLES=\(quoted(group))")
         }
         return "#EXT-X-STREAM-INF:" + attributes.joined(separator: ",")
+    }
+
+    /// The rendition whose codec the variant declares: the one flagged
+    /// `DEFAULT`, or the first offered when nobody claimed it.
+    private static func defaultRendition(
+        of variant: VariantDescription
+    ) -> AudioRendition? {
+        variant.audioRenditions.first(where: \.isDefault) ?? variant.audioRenditions.first
     }
 
     // MARK: - Codec strings
@@ -303,9 +332,23 @@ public enum MasterPlaylistBuilder {
         switch variant.videoCodec {
         case .hevc(let record):
             return hevcCodecString(record)
+        case .avc(let record):
+            return avcCodecString(record)
         case .explicit(let string):
             return string
         }
+    }
+
+    /// `avc1.PPCCLL` per RFC 6381: profile_idc, profile_compatibility and
+    /// level_idc as three uppercase hex bytes, straight out of the `avcC`.
+    /// High profile level 4.0 is the familiar `avc1.640028`.
+    static func avcCodecString(_ record: AVCConfigurationRecord) -> String {
+        String(
+            format: "avc1.%02X%02X%02X",
+            Int(record.profileIDC),
+            Int(record.profileCompatibility),
+            Int(record.levelIDC)
+        )
     }
 
     /// `SUPPLEMENTAL-CODECS`, or `nil` when this variant must not claim DV.

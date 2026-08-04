@@ -60,7 +60,7 @@ private func variant(
     frameRate: Double? = 23.976,
     dolbyVision dv: DolbyVisionConfiguration? = nil,
     dvCapableDisplay: Bool = false,
-    audio: MasterPlaylistBuilder.AudioRendition? = atmosRendition
+    audio: [MasterPlaylistBuilder.AudioRendition] = [atmosRendition]
 ) throws -> MasterPlaylistBuilder.VariantDescription {
     MasterPlaylistBuilder.VariantDescription(
         bandwidth: 24_000_000,
@@ -71,7 +71,7 @@ private func variant(
         videoCodec: .hevc(try record(from: hvcC)),
         dolbyVision: dv,
         displayIsDolbyVisionCapable: dvCapableDisplay,
-        audio: audio
+        audioRenditions: audio
     )
 }
 
@@ -163,6 +163,32 @@ struct HEVCCodecStringTests {
             MasterPlaylistBuilder.hevcCodecString(try record(from: Data(bytes)))
                 == "hvc1.2.4.L153.B0.00.0C"
         )
+    }
+
+    @Test("H.264 prints the three avcC bytes as hex")
+    func avcCodecString() throws {
+        // High profile, no constraint flags, level 4.0 — the familiar tag.
+        let record = try #require(
+            AVCConfigurationRecord.parse(avcC: Data([1, 100, 0, 40, 0xFF]))
+        )
+        #expect(record.profileIDC == 100)
+        #expect(record.profileCompatibility == 0)
+        #expect(record.levelIDC == 40)
+        #expect(MasterPlaylistBuilder.avcCodecString(record) == "avc1.640028")
+
+        // Constrained Baseline 3.1, where the compatibility byte matters.
+        let constrained = try #require(
+            AVCConfigurationRecord.parse(avcC: Data([1, 66, 0xE0, 31, 0xFF]))
+        )
+        #expect(MasterPlaylistBuilder.avcCodecString(constrained) == "avc1.42E01F")
+    }
+
+    @Test("Extradata that is not an avcC yields no declaration")
+    func rejectsNonAVCC() {
+        // Annex-B start code: MPEG-TS style in-band parameter sets.
+        #expect(AVCConfigurationRecord.parse(avcC: Data([0, 0, 0, 1, 0x67])) == nil)
+        // Truncated record.
+        #expect(AVCConfigurationRecord.parse(avcC: Data([1, 100, 0])) == nil)
     }
 
     @Test("Audio codec tags")
@@ -375,7 +401,9 @@ struct MasterPlaylistBuilderTests {
             resolution: .init(width: 1920, height: 1080),
             frameRate: 25,
             videoCodec: .explicit("avc1.640028"),
-            audio: .init(name: "English", language: "en", codecString: "mp4a.40.2", channels: "2")
+            audioRenditions: [
+                .init(name: "English", language: "en", codecString: "mp4a.40.2", channels: "2"),
+            ]
         )
         let line = try streamInf(MasterPlaylistBuilder.build(description))
         #expect(line.contains("CODECS=\"avc1.640028,mp4a.40.2\""))
@@ -386,10 +414,10 @@ struct MasterPlaylistBuilderTests {
     @Test("A separate audio playlist carries a URI; muxed audio omits it")
     func audioRenditionURI() throws {
         var description = try variant(range: .sdr)
-        description.audio?.uri = "audio.m3u8"
-        description.audio?.isDefault = true
+        description.audioRenditions[0].uri = "audio0/index.m3u8"
+        description.audioRenditions[0].isDefault = true
         let demuxed = try MasterPlaylistBuilder.build(description)
-        #expect(demuxed.contains("URI=\"audio.m3u8\""))
+        #expect(demuxed.contains("URI=\"audio0/index.m3u8\""))
 
         // v0 muxes audio into the video segments: a URI-less EXT-X-MEDIA is
         // how HLS says "this rendition is inside the variant".
@@ -400,17 +428,56 @@ struct MasterPlaylistBuilderTests {
 
     @Test("No audio track: no EXT-X-MEDIA line and no AUDIO attribute")
     func noAudio() throws {
-        let playlist = try MasterPlaylistBuilder.build(try variant(range: .sdr, audio: nil))
+        let playlist = try MasterPlaylistBuilder.build(try variant(range: .sdr, audio: []))
         #expect(!playlist.contains("#EXT-X-MEDIA"))
         let line = try streamInf(playlist)
         #expect(!line.contains("AUDIO="))
         #expect(line.contains("CODECS=\"hvc1.2.4.L153.B0\""))
     }
 
+    @Test("N audio tracks become N renditions of one group, one of them DEFAULT")
+    func multipleRenditions() throws {
+        let playlist = try MasterPlaylistBuilder.build(try variant(range: .sdr, audio: [
+            .init(name: "English", language: "eng", codecString: "mp4a.40.2",
+                  channels: "2", uri: "audio0/index.m3u8", isDefault: true),
+            .init(name: "Czech", language: "ces", codecString: "ac-3",
+                  channels: "6", uri: "audio1/index.m3u8", isDefault: false),
+            .init(name: "Commentary", language: "eng", codecString: "mp4a.40.2",
+                  channels: "2", uri: "audio2/index.m3u8", isDefault: false),
+        ]))
+        let media = playlist.split(separator: "\n").filter { $0.hasPrefix("#EXT-X-MEDIA:") }
+        #expect(media.count == 3)
+        // One group, so one AUDIO reference on the variant and a switchable set.
+        #expect(media.allSatisfy { $0.contains("GROUP-ID=\"aud\"") })
+        #expect(try streamInf(playlist).contains("AUDIO=\"aud\""))
+        #expect(media.filter { $0.contains("DEFAULT=YES") }.count == 1)
+        // Every rendition is selectable, default or not — otherwise the
+        // alternates can't be reached by a language preference.
+        #expect(media.allSatisfy { $0.contains("AUTOSELECT=YES") })
+        #expect(media[1].contains("LANGUAGE=\"ces\""))
+
+        // CODECS names the DEFAULT rendition's codec only: an over-claim gets
+        // the whole variant filtered at parse time.
+        let line = try streamInf(playlist)
+        #expect(line.contains("CODECS=\"hvc1.2.4.L153.B0,mp4a.40.2\""))
+        #expect(!line.contains("ac-3"))
+    }
+
+    @Test("Renditions in a different order still declare the DEFAULT one's codec")
+    func codecFollowsTheDefaultRendition() throws {
+        let playlist = try MasterPlaylistBuilder.build(try variant(range: .sdr, audio: [
+            .init(name: "Czech", language: "ces", codecString: "ac-3",
+                  uri: "audio0/index.m3u8", isDefault: false),
+            .init(name: "English", language: "eng", codecString: "ec-3",
+                  uri: "audio1/index.m3u8", isDefault: true),
+        ]))
+        #expect(try streamInf(playlist).contains("CODECS=\"hvc1.2.4.L153.B0,ec-3\""))
+    }
+
     @Test("A quote in a container-supplied track name can't break the attribute list")
     func quotesInNames() throws {
         var description = try variant(range: .sdr)
-        description.audio?.name = "Director\"s commentary"
+        description.audioRenditions[0].name = "Director\"s commentary"
         let playlist = try MasterPlaylistBuilder.build(description)
         #expect(playlist.contains("NAME=\"Director's commentary\""))
     }
@@ -438,6 +505,7 @@ struct SourceInfoRoutingTests {
             frameRate: 23.976,
             frameRateSource: .averageFrameRate,
             hevcConfiguration: nil,
+            avcConfiguration: nil,
             dolbyVision: nil,
             dynamicRange: .pq,
             copyability: copyability

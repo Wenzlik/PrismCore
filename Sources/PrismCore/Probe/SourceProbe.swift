@@ -87,6 +87,48 @@ public struct HEVCConfigurationRecord: Sendable, Equatable {
     }
 }
 
+/// The three `avcC` bytes an H.264 `CODECS` string is made of.
+///
+/// The HEVC story above needs the whole profile_tier_level; H.264 needs exactly
+/// `AVCProfileIndication`, `profile_compatibility` and `AVCLevelIndication`,
+/// which is what `avc1.PPCCLL` prints. Read from the record rather than from
+/// `AVCodecParameters.profile`/`.level` for the same reason: the compatibility
+/// byte (constraint_set flags) exists nowhere else, and AVPlayer checks the
+/// declaration against the init segment's own `avcC`.
+public struct AVCConfigurationRecord: Sendable, Equatable {
+    /// `AVCProfileIndication`: 66 = Baseline, 77 = Main, 100 = High.
+    public let profileIDC: UInt8
+    /// `profile_compatibility`, the constraint_set flags byte.
+    public let profileCompatibility: UInt8
+    /// `AVCLevelIndication` = level × 10 (L4.0 = 40, L5.1 = 51).
+    public let levelIDC: UInt8
+
+    public init(profileIDC: UInt8, profileCompatibility: UInt8, levelIDC: UInt8) {
+        self.profileIDC = profileIDC
+        self.profileCompatibility = profileCompatibility
+        self.levelIDC = levelIDC
+    }
+
+    /// Parses an ISO 14496-15 `AVCDecoderConfigurationRecord` (the `avcC` box
+    /// payload, which is what libavformat hands us as H.264 `extradata` for
+    /// MP4- and Matroska-sourced streams).
+    ///
+    /// `nil` for Annex-B extradata (MPEG-TS), exactly like the `hvcC` parse:
+    /// without a record there is no honest `CODECS` string, and the caller
+    /// routes media-direct instead of guessing one.
+    public static func parse(avcC data: Data) -> AVCConfigurationRecord? {
+        // configurationVersion(1) + the three PTL bytes + lengthSizeMinusOne.
+        guard data.count >= 5 else { return nil }
+        let bytes = [UInt8](data)
+        guard bytes[0] == 1 else { return nil }
+        return AVCConfigurationRecord(
+            profileIDC: bytes[1],
+            profileCompatibility: bytes[2],
+            levelIDC: bytes[3]
+        )
+    }
+}
+
 /// The container's `AVDOVIDecoderConfigurationRecord` (the `dvcC` / `dvvC`
 /// box), which is what decides the whole DV signaling route.
 public struct DolbyVisionConfiguration: Sendable, Equatable {
@@ -178,6 +220,8 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let frameRate: Double?
     public let frameRateSource: FrameRateSource
     public let hevcConfiguration: HEVCConfigurationRecord?
+    /// The `avcC` bytes, for H.264 sources (`nil` for anything else).
+    public let avcConfiguration: AVCConfigurationRecord?
     public let dolbyVision: DolbyVisionConfiguration?
     public let dynamicRange: DynamicRange
     public let copyability: StreamCopyability
@@ -349,6 +393,18 @@ public enum SourceProbe {
         // real packets.
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
+        return describe(input: input)
+    }
+
+    /// Describe an input that is **already open** (and already through
+    /// `avformat_find_stream_info`).
+    ///
+    /// Exists so `HLSRemuxer` can reuse the probe's per-stream detection —
+    /// codecs, copyability, languages, HDR/DV signaling — on the context it
+    /// opened for the remux itself, instead of duplicating the reads or opening
+    /// the source a second time (a second open on a network source costs a real
+    /// round trip and can even hand back different stream indices).
+    static func describe(input: UnsafeMutablePointer<AVFormatContext>) -> SourceInfo {
         let formatName = input.pointee.iformat.flatMap { $0.pointee.name }
             .map { String(cString: $0) } ?? "unknown"
         let duration = input.pointee.duration == swift_AV_NOPTS_VALUE()
@@ -401,6 +457,14 @@ public enum SourceProbe {
             else { return nil }
             let data = Data(bytes: extradata, count: Int(par.extradata_size))
             return HEVCConfigurationRecord.parse(hvcC: data)
+        }()
+
+        let avcConfiguration: AVCConfigurationRecord? = {
+            guard par.codec_id == AV_CODEC_ID_H264,
+                  let extradata = par.extradata, par.extradata_size > 0
+            else { return nil }
+            let data = Data(bytes: extradata, count: Int(par.extradata_size))
+            return AVCConfigurationRecord.parse(avcC: data)
         }()
 
         let dolbyVision = readDolbyVisionConfiguration(stream.pointee.codecpar)
@@ -465,6 +529,7 @@ public enum SourceProbe {
             frameRate: frameRate,
             frameRateSource: frameRateSource,
             hevcConfiguration: hevcConfiguration,
+            avcConfiguration: avcConfiguration,
             dolbyVision: dolbyVision,
             dynamicRange: dynamicRange,
             copyability: copyableVideo.contains(par.codec_id) ? .streamCopy : .unsupported
@@ -587,8 +652,3 @@ public enum SourceProbe {
     }
 
 }
-
-/// `AV_NOPTS_VALUE` is a macro Swift can't import: `INT64_C(0x8000…)`, i.e.
-
-/// `AV_PROFILE_UNKNOWN` is likewise a macro (`-99`).
-let swift_AV_PROFILE_UNKNOWN: Int32 = -99
