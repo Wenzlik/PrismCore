@@ -33,3 +33,18 @@ func swift_AVERROR(_ errno: Int32) -> Int32 {
 func swift_AV_NOPTS_VALUE() -> Int64 {
     Int64.min
 }
+
+/// `AV_PROFILE_UNKNOWN`, likewise a macro (`-99`).
+let swift_AV_PROFILE_UNKNOWN: Int32 = -99
+
+/// `AVERROR_EOF` is a macro Swift can't import either; recompute it the way the
+/// header does: `FFERRTAG('E','O','F',' ')` negated.
+///
+/// This file is the one home for the unimportable-macro shims — a second
+/// file-scope copy of any of them is a redeclaration the moment two features
+/// need it, which is exactly how the last wave collided.
+func swift_AVERROR_EOF() -> Int32 {
+    let tag = (Int32(UInt8(ascii: "E"))) | (Int32(UInt8(ascii: "O")) << 8)
+        | (Int32(UInt8(ascii: "F")) << 16) | (Int32(UInt8(ascii: " ")) << 24)
+    return -tag
+}
