@@ -1,0 +1,209 @@
+import Foundation
+import Libavformat
+import Libavcodec
+import Libavutil
+
+/// fMP4 segmentation over FFmpeg's `mp4` muxer with a custom AVIO sink.
+///
+/// Exists because MPVKit's libavformat is built without the `hls` muxer
+/// (mpv only demuxes; 23 muxers survive the trim, `ff_hls_muxer` is not one
+/// of them — discovered the moment the first integration test ran). Rather
+/// than forking the FFmpeg build for it, we segment ourselves:
+///
+/// - `movflags delay_moov+frag_custom+default_base_moof`: the first null
+///   flush after packets started arriving emits `ftyp+moov` alone — that IS
+///   the HLS init segment (`flushInitSegment()`) — and every later
+///   `av_write_frame(ctx, nil)` flush emits one `moof+mdat` fragment, which
+///   IS one HLS media segment.
+/// - The custom AVIO write callback collects the muxer's bytes into the
+///   current segment buffer; the remuxer decides the cut points (video
+///   keyframes at/after the boundary) and asks for the flush.
+///
+/// This is also the layout phase 5 needs anyway: a demand-driven producer
+/// must own its cuts, which the `hls` muxer never exposes.
+final class FMP4SegmentWriter {
+
+    /// Box passed through the AVIO opaque pointer — collects muxer output.
+    final class Sink {
+        var buffer = Data()
+    }
+
+    private var output: UnsafeMutablePointer<AVFormatContext>?
+    private var avio: UnsafeMutablePointer<AVIOContext>?
+    private let sink = Sink()
+    private var ioBuffer: UnsafeMutableRawPointer?
+
+    /// input stream index → output stream index
+    private(set) var streamMap: [Int: Int32] = [:]
+
+    deinit {
+        // Normal teardown runs `finish()`; this is the error-path backstop.
+        if let output {
+            avformat_free_context(output)
+        }
+        if let avio {
+            av_free(avio.pointee.buffer)
+            avio_context_free(&self.avio)
+        }
+    }
+
+    /// One output stream to create: mirror the input stream's parameters
+    /// (`configure == nil`), or let the caller fill them (a bridged stream
+    /// describes its ENCODER, not the source — and it must do so before
+    /// `write_header`; the sample entries themselves are completed from real
+    /// packets at moov-flush time, which is why the moov is deferred).
+    struct StreamPlan {
+        let inputIndex: Int32
+        let configure: ((UnsafeMutablePointer<AVStream>) throws -> Void)?
+
+        init(inputIndex: Int32, configure: ((UnsafeMutablePointer<AVStream>) throws -> Void)? = nil) {
+            self.inputIndex = inputIndex
+            self.configure = configure
+        }
+    }
+
+    /// Allocate the mp4 muxer, create the planned streams, and write the
+    /// header. With `delay_moov` the header emits nothing — the init segment
+    /// arrives from `flushInitSegment()` once packets have been fed.
+    func open(
+        input: UnsafeMutablePointer<AVFormatContext>,
+        plan: [StreamPlan]
+    ) throws -> Data {
+        var outputOpt: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(
+            avformat_alloc_output_context2(&outputOpt, nil, "mp4", nil),
+            "avformat_alloc_output_context2(mp4)"
+        )
+        guard let output = outputOpt else {
+            throw FFmpegError(code: -1, operation: "avformat_alloc_output_context2(mp4)")
+        }
+        self.output = output
+
+        for entry in plan {
+            let inStream = input.pointee.streams[Int(entry.inputIndex)]!
+            guard let outStream = avformat_new_stream(output, nil) else {
+                throw FFmpegError(code: -1, operation: "avformat_new_stream")
+            }
+            if let configure = entry.configure {
+                try configure(outStream)
+            } else {
+                try FFmpegError.check(
+                    avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar),
+                    "avcodec_parameters_copy"
+                )
+                outStream.pointee.codecpar.pointee.codec_tag = 0
+            }
+            streamMap[Int(entry.inputIndex)] = outStream.pointee.index
+        }
+
+        // Custom AVIO: the muxer writes, the sink collects. 64 KiB transfer
+        // buffer (av_malloc'd — AVIO may av_realloc it internally).
+        let bufferSize: Int32 = 64 * 1024
+        guard let raw = av_malloc(Int(bufferSize)) else {
+            throw FFmpegError(code: -1, operation: "av_malloc(avio buffer)")
+        }
+        ioBuffer = raw
+        let opaque = Unmanaged.passUnretained(sink).toOpaque()
+        avio = avio_alloc_context(
+            raw.assumingMemoryBound(to: UInt8.self),
+            bufferSize,
+            1,                    // write_flag
+            opaque,
+            nil,                  // read
+            { opaque, data, size in
+                guard let opaque, let data, size > 0 else { return size }
+                let sink = Unmanaged<Sink>.fromOpaque(opaque).takeUnretainedValue()
+                sink.buffer.append(data, count: Int(size))
+                return size
+            },
+            nil                   // seek — absent on purpose: a nil seek is
+                                  // what tells movenc the output is a stream,
+                                  // which fragmented MP4 handles by design.
+        )
+        guard avio != nil else { throw FFmpegError(code: -1, operation: "avio_alloc_context") }
+        output.pointee.pb = avio
+
+        var options: OpaquePointer?
+        defer { av_dict_free(&options) }
+        // delay_moov     → the moov (= HLS init segment) is written by the
+        //                  FIRST null flush after packets started arriving,
+        //                  not at header time. Mandatory for bridged/copied
+        //                  EAC3: movenc builds the `dec3` sample entry from
+        //                  parsed packets and refuses an up-front moov with
+        //                  "Cannot write moov atom before EAC3 packets
+        //                  parsed" (found by the HEVC+EAC3 fixture; the
+        //                  prior art defers the moov for the same reason).
+        // frag_custom    → fragments cut exactly when we flush, nowhere else.
+        // default_base_moof → offsets relative to the moof, which is what
+        //                  HLS-fMP4 players (AVPlayer included) require of
+        //                  segments served as separate resources.
+        av_dict_set(&options, "movflags", "+delay_moov+frag_custom+default_base_moof", 0)
+
+        try FFmpegError.check(
+            avformat_write_header(output, &options),
+            "avformat_write_header(mp4)"
+        )
+        avio_flush(avio)
+        return takeBufferedBytes()
+    }
+
+    /// Whether the deferred moov has been emitted yet.
+    private(set) var moovWritten = false
+
+    var context: UnsafeMutablePointer<AVFormatContext>? { output }
+
+    func write(_ packet: UnsafeMutablePointer<AVPacket>) throws {
+        guard let output else { return }
+        try FFmpegError.check(
+            av_interleaved_write_frame(output, packet),
+            "av_interleaved_write_frame"
+        )
+    }
+
+    /// Flush the current fragment. Returns the init segment too when this is
+    /// the FIRST cut: draining the interleave queue is what actually delivers
+    /// packets into movenc (feeding `av_interleaved_write_frame` only queues
+    /// them), and codec boxes like `dec3` are built from DELIVERED packets —
+    /// flushing the moov any earlier wrote a zero-size `stsd` entry for EAC3
+    /// (found by the HEVC+EAC3 fixture: the init probed as "invalid size 0 in
+    /// stsd"). Under `delay_moov` the first null flush emits the moov alone
+    /// and keeps queued samples; the second closes the fragment.
+    func cutSegment() throws -> (initSegment: Data?, media: Data) {
+        guard let output, let avio else { return (nil, Data()) }
+        // Drain the interleave queue into movenc first.
+        try FFmpegError.check(av_interleaved_write_frame(output, nil), "flush interleave queue")
+
+        var initSegment: Data?
+        if !moovWritten {
+            try FFmpegError.check(av_write_frame(output, nil), "av_write_frame(flush moov)")
+            avio_flush(avio)
+            initSegment = takeBufferedBytes()
+            moovWritten = true
+        }
+
+        try FFmpegError.check(av_write_frame(output, nil), "av_write_frame(flush fragment)")
+        avio_flush(avio)
+        return (initSegment, takeBufferedBytes())
+    }
+
+    /// Write the trailer and return any final bytes.
+    func finish() throws -> Data {
+        guard let output, let avio else { return Data() }
+        try FFmpegError.check(av_write_trailer(output), "av_write_trailer")
+        avio_flush(avio)
+        let tail = takeBufferedBytes()
+        avformat_free_context(output)
+        self.output = nil
+        av_free(avio.pointee.buffer)
+        avio_context_free(&self.avio)
+        self.avio = nil
+        ioBuffer = nil
+        return tail
+    }
+
+    private func takeBufferedBytes() -> Data {
+        let bytes = sink.buffer
+        sink.buffer = Data()
+        return bytes
+    }
+}

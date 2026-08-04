@@ -4,17 +4,18 @@ import Libavcodec
 import Libavutil
 
 /// Stream-copies one video + one audio elementary stream out of any container
-/// libavformat can demux, into HLS-fMP4 on disk — using FFmpeg's own `hls`
-/// muxer for the segmentation, playlist writing, and `EXT-X-MAP` handling.
+/// libavformat can demux, into HLS-fMP4 on disk — segmenting with our own
+/// `FMP4SegmentWriter` (the `hls` muxer is absent from MPVKit's libavformat
+/// build; see that type's doc) and writing the playlist ourselves.
 ///
 /// This is the v0 producer: it starts at the head of the source and runs to
 /// EOF, growing an EVENT playlist AVPlayer can start playing immediately.
-/// Because it *stream-copies*, the bits AVPlayer receives are the source's
-/// own: an EAC3+JOC (Atmos) track stays object audio all the way to HDMI, and
-/// HDR metadata rides the untouched HEVC bitstream. The prior art proves this
-/// segmentation is byte-equivalent to `ffmpeg -f hls -hls_segment_type fmp4`,
-/// which is what Apple's HLS spec is validated against — that's exactly what
-/// this muxer produces, because it IS that muxer.
+/// Cuts happen only at video keyframes at-or-after each `segmentSeconds`
+/// boundary, so every segment opens decodable on its own (what the playlist's
+/// `EXT-X-INDEPENDENT-SEGMENTS` promises). Because it *stream-copies*, the
+/// bits AVPlayer receives are the source's own: an EAC3+JOC (Atmos) track
+/// stays object audio all the way to HDMI, and HDR metadata rides the
+/// untouched HEVC bitstream.
 ///
 /// Audio is the one place where "stream-copy" isn't the whole story: codecs
 /// AVPlayer's fMP4 path can't take (TrueHD, DTS-HD MA, MP3, Opus, …) are routed
@@ -121,21 +122,64 @@ final class HLSRemuxer: @unchecked Sendable {
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
         let selection = try selectStreams(input)
-        let (output, streamMap, bridge) = try makeOutput(input: input, selection: selection)
+
+        // Bridge first — its encoder parameters must be on the output stream
+        // BEFORE write_header (empty_moov writes the sample entries then).
+        var bridge: AudioBridge?
         defer { bridge?.close() }
-        // Only this input stream goes through the bridge; everything else is
-        // copied exactly as v0 did.
-        let bridgedInputIndex = selection.audio?.mode == .bridge ? selection.audio?.index : nil
-        var outputCtx: UnsafeMutablePointer<AVFormatContext>? = output
-        defer {
-            if let outputCtx {
-                // Free the muxer context; `avio_closep` is owned by the hls
-                // muxer for its segment files.
-                avformat_free_context(outputCtx)
+        var plan: [FMP4SegmentWriter.StreamPlan] = [.init(inputIndex: selection.videoIndex)]
+        if let audio = selection.audio {
+            if audio.mode == .bridge {
+                let inStream = input.pointee.streams[Int(audio.index)]!
+                let audioBridge = try AudioBridge(
+                    codecpar: inStream.pointee.codecpar,
+                    timeBase: inStream.pointee.time_base,
+                    // mp4/mov is a global-header muxer by definition; the
+                    // encoder's extradata must land in codecpar, not in-band.
+                    globalHeader: true
+                )
+                bridge = audioBridge
+                plan.append(.init(inputIndex: audio.index) { outStream in
+                    try audioBridge.configure(outputStream: outStream)
+                })
+            } else {
+                plan.append(.init(inputIndex: audio.index))
             }
         }
+        let bridgedInputIndex = selection.audio?.mode == .bridge ? selection.audio?.index : nil
 
-        try writeHeader(output: output)
+        let writer = FMP4SegmentWriter()
+        _ = try writer.open(input: input, plan: plan)   // delay_moov: header emits nothing
+        let streamMap = writer.streamMap
+        let playlist = MediaPlaylistWriter(directory: outputDirectory)
+
+        // Segmentation state, tracked on the INPUT video stream's time base
+        // (the packet still carries it when the cut decision is made).
+        let videoTimeBase = input.pointee.streams[Int(selection.videoIndex)]!.pointee.time_base
+        let tickSeconds = av_q2d(videoTimeBase)
+        let boundaryStep = Int64((Double(segmentSeconds) / tickSeconds).rounded())
+        var segmentStartPTS: Int64?
+        var nextBoundaryPTS: Int64 = 0
+        var lastVideoEndPTS: Int64?
+        var segmentIndex = 0
+
+        func emitSegment(endPTS: Int64) throws {
+            let (initSegment, media) = try writer.cutSegment()
+            // The first cut also mints the init segment (see cutSegment's
+            // doc); write it BEFORE the playlist entry so a reader that saw
+            // the manifest can always fetch what it references.
+            if let initSegment, !initSegment.isEmpty {
+                try initSegment.write(to: outputDirectory.appendingPathComponent("init.mp4"), options: .atomic)
+            }
+            guard !media.isEmpty, let start = segmentStartPTS else { return }
+            let file = String(format: "seg%05d.m4s", segmentIndex)
+            try media.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
+            try playlist.appendSegment(
+                duration: max(0.001, Double(endPTS - start) * tickSeconds),
+                file: file
+            )
+            segmentIndex += 1
+        }
 
         var packet = av_packet_alloc()
         defer { av_packet_free(&packet) }
@@ -160,33 +204,71 @@ final class HLSRemuxer: @unchecked Sendable {
 
             guard let mapped = streamMap[Int(packet.pointee.stream_index)] else { continue }
 
+            // Cut BEFORE writing a boundary keyframe, so the keyframe opens
+            // the next segment (every segment starts decodable on its own —
+            // what EXT-X-INDEPENDENT-SEGMENTS promises).
+            if Int32(packet.pointee.stream_index) == selection.videoIndex,
+               packet.pointee.pts != swift_AV_NOPTS_VALUE() {
+                let pts = packet.pointee.pts
+                let isKey = packet.pointee.flags & AV_PKT_FLAG_KEY != 0
+                if isKey {
+                    if segmentStartPTS == nil {
+                        segmentStartPTS = pts
+                        nextBoundaryPTS = pts + boundaryStep
+                    } else if pts >= nextBoundaryPTS {
+                        try emitSegment(endPTS: pts)
+                        segmentStartPTS = pts
+                        nextBoundaryPTS = pts + boundaryStep
+                    }
+                }
+                lastVideoEndPTS = pts + max(packet.pointee.duration, 0)
+            }
+
             if let bridge, Int32(packet.pointee.stream_index) == bridgedInputIndex {
                 // Timestamps on the way in stay in the source stream's time
                 // base — the bridge's decoder is configured for it — and come
                 // back out on the encoder's, so only one rescale is left.
                 try bridge.feed(packet) { encoded in
-                    try write(encoded, to: mapped, from: bridge.timeBase, output: output)
+                    try write(encoded, to: mapped, from: bridge.timeBase, writer: writer)
                 }
                 continue
             }
 
             let inStream = input.pointee.streams[Int(packet.pointee.stream_index)]!
-            try write(packet, to: mapped, from: inStream.pointee.time_base, output: output)
+            try write(packet, to: mapped, from: inStream.pointee.time_base, writer: writer)
         }
 
         // A cancelled session is being torn down, so flushing the encoder tail
         // would only add work; on EOF the tail is real audio the file has.
         if reachedEOF, let bridge, let mapped = bridgedInputIndex.flatMap({ streamMap[Int($0)] }) {
             try bridge.flush { encoded in
-                try write(encoded, to: mapped, from: bridge.timeBase, output: output)
+                try write(encoded, to: mapped, from: bridge.timeBase, writer: writer)
             }
         }
 
-        // EOF or cancel: finalize. On EOF the hls muxer appends
-        // `EXT-X-ENDLIST`, flipping the event playlist to a finished VOD.
-        try FFmpegError.check(av_write_trailer(output), "av_write_trailer")
-        outputCtx = nil
-        avformat_free_context(output)
+        // Final segment: whatever is buffered since the last cut, plus the
+        // trailer's tail bytes, is one segment. A sub-6s source cuts here for
+        // the first time, so this can also mint the init segment.
+        let closingPTS = lastVideoEndPTS ?? nextBoundaryPTS
+        let (initSegment, media) = try writer.cutSegment()
+        if let initSegment, !initSegment.isEmpty {
+            try initSegment.write(to: outputDirectory.appendingPathComponent("init.mp4"), options: .atomic)
+        }
+        var finalSegment = media
+        finalSegment.append(try writer.finish())
+        if !finalSegment.isEmpty, let start = segmentStartPTS {
+            let file = String(format: "seg%05d.m4s", segmentIndex)
+            try finalSegment.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
+            try playlist.appendSegment(
+                duration: max(0.001, Double(closingPTS - start) * tickSeconds),
+                file: file
+            )
+        }
+        if reachedEOF {
+            // ENDLIST only on a genuinely finished remux — a cancelled one leaves the
+            // event playlist open-ended, and the session dir dies with stop().
+            try playlist.finish()
+        }
     }
 
     /// Rescale one packet onto an output stream and hand it to the muxer.
@@ -196,16 +278,14 @@ final class HLSRemuxer: @unchecked Sendable {
         _ packet: UnsafeMutablePointer<AVPacket>,
         to outputIndex: Int32,
         from sourceTimeBase: AVRational,
-        output: UnsafeMutablePointer<AVFormatContext>
+        writer: FMP4SegmentWriter
     ) throws {
+        guard let output = writer.context else { return }
         let outStream = output.pointee.streams[Int(outputIndex)]!
         av_packet_rescale_ts(packet, sourceTimeBase, outStream.pointee.time_base)
         packet.pointee.stream_index = outputIndex
         packet.pointee.pos = -1
-        try FFmpegError.check(
-            av_interleaved_write_frame(output, packet),
-            "av_interleaved_write_frame"
-        )
+        try writer.write(packet)
     }
 
     // MARK: - Setup
@@ -275,96 +355,6 @@ final class HLSRemuxer: @unchecked Sendable {
         return nil
     }
 
-    /// Allocate the `hls` output context and mirror the selected streams'
-    /// codec parameters onto it. Returns the context plus an input→output
-    /// stream index map.
-    private func makeOutput(
-        input: UnsafeMutablePointer<AVFormatContext>,
-        selection: StreamSelection
-    ) throws -> (UnsafeMutablePointer<AVFormatContext>, [Int: Int32], AudioBridge?) {
-        let playlistPath = outputDirectory.appendingPathComponent("index.m3u8").path
-
-        var outputOpt: UnsafeMutablePointer<AVFormatContext>?
-        try FFmpegError.check(
-            avformat_alloc_output_context2(&outputOpt, nil, "hls", playlistPath),
-            "avformat_alloc_output_context2(hls)"
-        )
-        guard let output = outputOpt else { throw Failure.noVideoStream }
-
-        var streamMap: [Int: Int32] = [:]
-        var bridge: AudioBridge?
-
-        var plan: [(index: Int32, bridged: Bool)] = [(selection.videoIndex, false)]
-        if let audio = selection.audio {
-            plan.append((audio.index, audio.mode == .bridge))
-        }
-
-        for entry in plan {
-            let inStream = input.pointee.streams[Int(entry.index)]!
-            guard let outStream = avformat_new_stream(output, nil) else {
-                throw FFmpegError(code: -1, operation: "avformat_new_stream")
-            }
-            if entry.bridged {
-                // The output stream describes the *encoder*, not the source:
-                // its codec, layout, and rate are what the muxer must write
-                // into the audio sample entry. Built before `write_header`
-                // because that's when the muxer reads them.
-                let audioBridge = try AudioBridge(
-                    codecpar: inStream.pointee.codecpar,
-                    timeBase: inStream.pointee.time_base,
-                    globalHeader: output.pointee.oformat.pointee.flags & AVFMT_GLOBALHEADER != 0
-                )
-                try audioBridge.configure(outputStream: outStream)
-                bridge = audioBridge
-            } else {
-                try FFmpegError.check(
-                    avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar),
-                    "avcodec_parameters_copy"
-                )
-                // The muxer picks its own tag space; a stale source tag (e.g. a
-                // matroska V_MPEG4/ISO/AVC fourcc) would poison the mp4 boxes.
-                outStream.pointee.codecpar.pointee.codec_tag = 0
-            }
-            streamMap[Int(entry.index)] = outStream.pointee.index
-        }
-        return (output, streamMap, bridge)
-    }
-
-    private func writeHeader(output: UnsafeMutablePointer<AVFormatContext>) throws {
-        var options: OpaquePointer?
-        defer { av_dict_free(&options) }
-
-        av_dict_set(&options, "hls_segment_type", "fmp4", 0)
-        av_dict_set(&options, "hls_time", String(segmentSeconds), 0)
-        // EVENT: entries accumulate while we produce; `av_write_trailer`
-        // appends ENDLIST. AVPlayer treats it as a growing seekable window.
-        av_dict_set(&options, "hls_playlist_type", "event", 0)
-        av_dict_set(&options, "hls_fmp4_init_filename", "init.mp4", 0)
-        av_dict_set(
-            &options, "hls_segment_filename",
-            outputDirectory.appendingPathComponent("seg%05d.m4s").path, 0
-        )
-        // Keep every segment on disk — the loopback serves the whole history
-        // (v0 has no eviction; the session dir is temporary and removed on
-        // stop). Without this the muxer would delete segments behind the
-        // live window for event playlists on some FFmpeg builds.
-        av_dict_set(&options, "hls_list_size", "0", 0)
-        // fMP4 segments need the moof-per-fragment layout.
-        av_dict_set(&options, "movflags", "+frag_keyframe", 0)
-        // Open question for the bridged-audio path, to settle on a real fixture:
-        // the init segment (and with it the `dec3` sample entry) is written at
-        // header time, before any EAC3 packet has passed through the muxer's
-        // bitstream inspection. The prior art hits exactly this and defers the
-        // moov (`+delay_moov`) so the box is filled from real packets. Whether
-        // FFmpeg's hls muxer tolerates a deferred moov for its fMP4 init file is
-        // not something a build-only check can answer, so this stays as-is until
-        // a fixture says otherwise.
-
-        try FFmpegError.check(
-            avformat_write_header(output, &options),
-            "avformat_write_header"
-        )
-    }
 }
 
 /// `AVERROR_EOF` is a macro Swift can't import; recompute it the way the
