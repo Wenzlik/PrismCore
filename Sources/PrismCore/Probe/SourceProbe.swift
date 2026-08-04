@@ -506,8 +506,6 @@ public enum SourceProbe {
 }
 
 /// `AV_NOPTS_VALUE` is a macro Swift can't import: `INT64_C(0x8000…)`, i.e.
-/// `Int64.min`.
-func swift_AV_NOPTS_VALUE() -> Int64 { Int64.min }
 
 /// `AV_PROFILE_UNKNOWN` is likewise a macro (`-99`).
 let swift_AV_PROFILE_UNKNOWN: Int32 = -99
