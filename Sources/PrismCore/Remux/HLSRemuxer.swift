@@ -16,14 +16,38 @@ import Libavutil
 /// which is what Apple's HLS spec is validated against — that's exactly what
 /// this muxer produces, because it IS that muxer.
 ///
-/// Not in v0 (by design, see README roadmap): demand-driven seeking, the
-/// audio bridge for non-streamable codecs, DV/HDR master-playlist signaling,
-/// multi-audio / subtitle tracks.
+/// Audio is the one place where "stream-copy" isn't the whole story: codecs
+/// AVPlayer's fMP4 path can't take (TrueHD, DTS-HD MA, MP3, Opus, …) are routed
+/// through `AudioBridge`, which decodes and re-encodes them to EAC3 so surround
+/// survives (phase 3). Copyable audio never touches the bridge.
+///
+/// Not in v0 (by design, see README roadmap): demand-driven seeking, DV/HDR
+/// master-playlist signaling, multi-audio / subtitle tracks.
 final class HLSRemuxer: @unchecked Sendable {
+
+    /// How the selected audio stream reaches the output.
+    enum AudioRouteMode: Equatable {
+        /// Bits pass through untouched (AAC/AC3/EAC3/FLAC/ALAC, Atmos included).
+        case streamCopy
+        /// Decoded and re-encoded to EAC3 by `AudioBridge`.
+        case bridge
+    }
+
+    struct AudioRoute: Equatable {
+        let index: Int32
+        let mode: AudioRouteMode
+    }
 
     struct StreamSelection {
         let videoIndex: Int32
-        let audioIndex: Int32?
+        let audio: AudioRoute?
+    }
+
+    /// One audio stream as the routing decision sees it. Deliberately a plain
+    /// value so the decision itself is pure and testable without a demuxer.
+    struct AudioCandidate: Equatable {
+        let index: Int32
+        let codecID: AVCodecID
     }
 
     enum Failure: Error {
@@ -97,7 +121,11 @@ final class HLSRemuxer: @unchecked Sendable {
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
         let selection = try selectStreams(input)
-        let (output, streamMap) = try makeOutput(input: input, selection: selection)
+        let (output, streamMap, bridge) = try makeOutput(input: input, selection: selection)
+        defer { bridge?.close() }
+        // Only this input stream goes through the bridge; everything else is
+        // copied exactly as v0 did.
+        let bridgedInputIndex = selection.audio?.mode == .bridge ? selection.audio?.index : nil
         var outputCtx: UnsafeMutablePointer<AVFormatContext>? = output
         defer {
             if let outputCtx {
@@ -114,9 +142,13 @@ final class HLSRemuxer: @unchecked Sendable {
         guard let packet else { return }
 
         // MARK: Copy loop
+        var reachedEOF = false
         while !cancelled.isSet {
             let readResult = av_read_frame(input, packet)
-            if readResult == swift_AVERROR_EOF() { break }
+            if readResult == swift_AVERROR_EOF() {
+                reachedEOF = true
+                break
+            }
             if readResult < 0 {
                 // Transient read errors on network sources: the reconnect
                 // options above handle the socket; anything that still
@@ -128,16 +160,26 @@ final class HLSRemuxer: @unchecked Sendable {
 
             guard let mapped = streamMap[Int(packet.pointee.stream_index)] else { continue }
 
-            let inStream = input.pointee.streams[Int(packet.pointee.stream_index)]!
-            let outStream = output.pointee.streams[Int(mapped)]!
-            av_packet_rescale_ts(packet, inStream.pointee.time_base, outStream.pointee.time_base)
-            packet.pointee.stream_index = mapped
-            packet.pointee.pos = -1
+            if let bridge, Int32(packet.pointee.stream_index) == bridgedInputIndex {
+                // Timestamps on the way in stay in the source stream's time
+                // base — the bridge's decoder is configured for it — and come
+                // back out on the encoder's, so only one rescale is left.
+                try bridge.feed(packet) { encoded in
+                    try write(encoded, to: mapped, from: bridge.timeBase, output: output)
+                }
+                continue
+            }
 
-            try FFmpegError.check(
-                av_interleaved_write_frame(output, packet),
-                "av_interleaved_write_frame"
-            )
+            let inStream = input.pointee.streams[Int(packet.pointee.stream_index)]!
+            try write(packet, to: mapped, from: inStream.pointee.time_base, output: output)
+        }
+
+        // A cancelled session is being torn down, so flushing the encoder tail
+        // would only add work; on EOF the tail is real audio the file has.
+        if reachedEOF, let bridge, let mapped = bridgedInputIndex.flatMap({ streamMap[Int($0)] }) {
+            try bridge.flush { encoded in
+                try write(encoded, to: mapped, from: bridge.timeBase, output: output)
+            }
         }
 
         // EOF or cancel: finalize. On EOF the hls muxer appends
@@ -145,6 +187,25 @@ final class HLSRemuxer: @unchecked Sendable {
         try FFmpegError.check(av_write_trailer(output), "av_write_trailer")
         outputCtx = nil
         avformat_free_context(output)
+    }
+
+    /// Rescale one packet onto an output stream and hand it to the muxer.
+    /// `sourceTimeBase` is the packet's own base — the input stream's for
+    /// copied packets, the encoder's for bridged ones.
+    private func write(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        to outputIndex: Int32,
+        from sourceTimeBase: AVRational,
+        output: UnsafeMutablePointer<AVFormatContext>
+    ) throws {
+        let outStream = output.pointee.streams[Int(outputIndex)]!
+        av_packet_rescale_ts(packet, sourceTimeBase, outStream.pointee.time_base)
+        packet.pointee.stream_index = outputIndex
+        packet.pointee.pos = -1
+        try FFmpegError.check(
+            av_interleaved_write_frame(output, packet),
+            "av_interleaved_write_frame"
+        )
     }
 
     // MARK: - Setup
@@ -159,24 +220,59 @@ final class HLSRemuxer: @unchecked Sendable {
             throw Failure.videoCodecNotNativelyPlayable(name)
         }
 
-        var audioIndex = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
-        if audioIndex >= 0 {
-            let audioCodec = input.pointee.streams[Int(audioIndex)]!.pointee.codecpar.pointee.codec_id
-            if !Self.copyableAudio.contains(audioCodec) {
-                // v0: prefer ANY copyable audio stream over the "best" one the
-                // phase-3 bridge would transcode. A DTS-main + AC3-compat
-                // source keeps sound through the AC3 track.
-                audioIndex = -1
-                for index in 0..<Int(input.pointee.nb_streams) {
-                    let par = input.pointee.streams[index]!.pointee.codecpar.pointee
-                    if par.codec_type == AVMEDIA_TYPE_AUDIO, Self.copyableAudio.contains(par.codec_id) {
-                        audioIndex = Int32(index)
-                        break
-                    }
-                }
+        var candidates: [AudioCandidate] = []
+        for index in 0..<Int(input.pointee.nb_streams) {
+            let par = input.pointee.streams[index]!.pointee.codecpar.pointee
+            guard par.codec_type == AVMEDIA_TYPE_AUDIO else { continue }
+            candidates.append(AudioCandidate(index: Int32(index), codecID: par.codec_id))
+        }
+        let bestAudio = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
+
+        return StreamSelection(
+            videoIndex: videoIndex,
+            audio: Self.chooseAudio(candidates: candidates, best: bestAudio >= 0 ? bestAudio : nil)
+        )
+    }
+
+    /// Decide which audio stream to carry, and how.
+    ///
+    /// Order of preference, and the reasoning:
+    ///
+    /// 1. The demuxer's *best* stream when it is stream-copyable — untouched
+    ///    bits beat anything we could re-encode, and this is the case that keeps
+    ///    Atmos alive.
+    /// 2. The best stream through the bridge. Before phase 3 this case fell back
+    ///    to a lesser copyable track, which meant a DTS-HD MA 7.1 main track
+    ///    lost to an AC3 2.0 compatibility track — the bridge makes the main
+    ///    track the better answer even at a re-encode's cost.
+    /// 3. Any copyable stream, for sources whose best track can't be bridged
+    ///    either (no decoder in this build, or no EAC3 encoder — see
+    ///    `AudioBridge.isEncoderAvailable`). This is v0's behaviour, preserved
+    ///    as the fallback rather than removed.
+    /// 4. Any bridgeable stream at all.
+    ///
+    /// `canBridge` is injected so the decision can be exercised as a pure
+    /// function in tests, independent of what the linked FFmpeg supports.
+    static func chooseAudio(
+        candidates: [AudioCandidate],
+        best: Int32?,
+        canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
+    ) -> AudioRoute? {
+        if let best, let bestCandidate = candidates.first(where: { $0.index == best }) {
+            if copyableAudio.contains(bestCandidate.codecID) {
+                return AudioRoute(index: best, mode: .streamCopy)
+            }
+            if canBridge(bestCandidate.codecID) {
+                return AudioRoute(index: best, mode: .bridge)
             }
         }
-        return StreamSelection(videoIndex: videoIndex, audioIndex: audioIndex >= 0 ? audioIndex : nil)
+        if let copyable = candidates.first(where: { copyableAudio.contains($0.codecID) }) {
+            return AudioRoute(index: copyable.index, mode: .streamCopy)
+        }
+        if let bridgeable = candidates.first(where: { canBridge($0.codecID) }) {
+            return AudioRoute(index: bridgeable.index, mode: .bridge)
+        }
+        return nil
     }
 
     /// Allocate the `hls` output context and mirror the selected streams'
@@ -185,7 +281,7 @@ final class HLSRemuxer: @unchecked Sendable {
     private func makeOutput(
         input: UnsafeMutablePointer<AVFormatContext>,
         selection: StreamSelection
-    ) throws -> (UnsafeMutablePointer<AVFormatContext>, [Int: Int32]) {
+    ) throws -> (UnsafeMutablePointer<AVFormatContext>, [Int: Int32], AudioBridge?) {
         let playlistPath = outputDirectory.appendingPathComponent("index.m3u8").path
 
         var outputOpt: UnsafeMutablePointer<AVFormatContext>?
@@ -196,21 +292,42 @@ final class HLSRemuxer: @unchecked Sendable {
         guard let output = outputOpt else { throw Failure.noVideoStream }
 
         var streamMap: [Int: Int32] = [:]
-        for index in [selection.videoIndex].compactMap({ $0 }) + (selection.audioIndex.map { [$0] } ?? []) {
-            let inStream = input.pointee.streams[Int(index)]!
+        var bridge: AudioBridge?
+
+        var plan: [(index: Int32, bridged: Bool)] = [(selection.videoIndex, false)]
+        if let audio = selection.audio {
+            plan.append((audio.index, audio.mode == .bridge))
+        }
+
+        for entry in plan {
+            let inStream = input.pointee.streams[Int(entry.index)]!
             guard let outStream = avformat_new_stream(output, nil) else {
                 throw FFmpegError(code: -1, operation: "avformat_new_stream")
             }
-            try FFmpegError.check(
-                avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar),
-                "avcodec_parameters_copy"
-            )
-            // The muxer picks its own tag space; a stale source tag (e.g. a
-            // matroska V_MPEG4/ISO/AVC fourcc) would poison the mp4 boxes.
-            outStream.pointee.codecpar.pointee.codec_tag = 0
-            streamMap[Int(index)] = outStream.pointee.index
+            if entry.bridged {
+                // The output stream describes the *encoder*, not the source:
+                // its codec, layout, and rate are what the muxer must write
+                // into the audio sample entry. Built before `write_header`
+                // because that's when the muxer reads them.
+                let audioBridge = try AudioBridge(
+                    codecpar: inStream.pointee.codecpar,
+                    timeBase: inStream.pointee.time_base,
+                    globalHeader: output.pointee.oformat.pointee.flags & AVFMT_GLOBALHEADER != 0
+                )
+                try audioBridge.configure(outputStream: outStream)
+                bridge = audioBridge
+            } else {
+                try FFmpegError.check(
+                    avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar),
+                    "avcodec_parameters_copy"
+                )
+                // The muxer picks its own tag space; a stale source tag (e.g. a
+                // matroska V_MPEG4/ISO/AVC fourcc) would poison the mp4 boxes.
+                outStream.pointee.codecpar.pointee.codec_tag = 0
+            }
+            streamMap[Int(entry.index)] = outStream.pointee.index
         }
-        return (output, streamMap)
+        return (output, streamMap, bridge)
     }
 
     private func writeHeader(output: UnsafeMutablePointer<AVFormatContext>) throws {
@@ -234,6 +351,14 @@ final class HLSRemuxer: @unchecked Sendable {
         av_dict_set(&options, "hls_list_size", "0", 0)
         // fMP4 segments need the moof-per-fragment layout.
         av_dict_set(&options, "movflags", "+frag_keyframe", 0)
+        // Open question for the bridged-audio path, to settle on a real fixture:
+        // the init segment (and with it the `dec3` sample entry) is written at
+        // header time, before any EAC3 packet has passed through the muxer's
+        // bitstream inspection. The prior art hits exactly this and defers the
+        // moov (`+delay_moov`) so the box is filled from real packets. Whether
+        // FFmpeg's hls muxer tolerates a deferred moov for its fMP4 init file is
+        // not something a build-only check can answer, so this stays as-is until
+        // a fixture says otherwise.
 
         try FFmpegError.check(
             avformat_write_header(output, &options),

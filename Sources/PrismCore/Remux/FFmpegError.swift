@@ -21,3 +21,15 @@ public struct FFmpegError: Error, CustomStringConvertible {
         return code
     }
 }
+
+/// `AVERROR(e)` for a POSIX errno — the macro Swift can't import. On Apple
+/// platforms libav* negates errno directly, which is what the header does.
+func swift_AVERROR(_ errno: Int32) -> Int32 {
+    -errno
+}
+
+/// `AV_NOPTS_VALUE`, another unimportable macro: the smallest int64. Compared
+/// against, never arithmetic'd.
+func swift_AV_NOPTS_VALUE() -> Int64 {
+    Int64.min
+}
