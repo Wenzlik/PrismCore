@@ -33,3 +33,15 @@ func swift_AVERROR(_ errno: Int32) -> Int32 {
 func swift_AV_NOPTS_VALUE() -> Int64 {
     Int64.min
 }
+
+/// One value out of an `AVDictionary` (a stream's or format's metadata), or
+/// `nil` when the key is absent — or present and empty, which containers do
+/// write and which no caller wants to treat as a language tag or a title.
+func avMetadataValue(_ dictionary: OpaquePointer?, _ key: String) -> String? {
+    guard let dictionary,
+          let entry = av_dict_get(dictionary, key, nil, 0),
+          let value = entry.pointee.value
+    else { return nil }
+    let text = String(cString: value)
+    return text.isEmpty ? nil : text
+}

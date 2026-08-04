@@ -16,6 +16,10 @@ public actor PrismCoreSession {
     public enum SessionError: Error {
         /// The remux produced no playable playlist within the startup budget.
         case startupTimedOut(underlying: Error?)
+        /// A registration call that only makes sense before `start()` arrived
+        /// after it. Silently ignoring it would leave a subtitle track the host
+        /// believes exists but that no rendition backs.
+        case alreadyStarted
     }
 
     private let sourceURL: URL
@@ -44,6 +48,48 @@ public actor PrismCoreSession {
             httpHeaders: httpHeaders,
             outputDirectory: directory
         )
+    }
+
+    // MARK: - Subtitles (phase 6)
+
+    /// Register an external subtitle file (`.srt` / `.vtt`) as its own WebVTT
+    /// rendition, before `start()`.
+    ///
+    /// The whole file is converted once at remux setup and then segmented on the
+    /// video's own boundaries, exactly like an embedded text track — so an
+    /// external track behaves identically from AVPlayer's side. The rendition
+    /// set is fixed when the remux starts (it has to be: the master playlist a
+    /// host builds from `subtitleRenditions` is read once at item creation),
+    /// hence the `alreadyStarted` refusal.
+    ///
+    /// - Parameters:
+    ///   - url: A local file URL. Remote sidecars are the host's to fetch —
+    ///     PrismCore has no download machinery and would only duplicate the
+    ///     header handling the host already does.
+    ///   - language: ISO-639 tag for `LANGUAGE`, e.g. `"cs"` / `"ces"`.
+    ///   - name: Display name for `NAME`; defaults to the language tag.
+    ///   - isForced: Marks the rendition `FORCED=YES`.
+    public func addExternalSubtitle(
+        url: URL,
+        language: String? = nil,
+        name: String? = nil,
+        isForced: Bool = false
+    ) throws {
+        guard !started else { throw SessionError.alreadyStarted }
+        remuxer.subtitles.addExternalFile(
+            .init(url: url, language: language, name: name, isForced: isForced)
+        )
+    }
+
+    /// The WebVTT subtitle renditions this session serves, in declaration order
+    /// (embedded text tracks first, then registered external files).
+    ///
+    /// Populated once the remux has opened the source, i.e. any time after
+    /// `start()` returns. Feed them to `MasterPlaylistBuilder` — a `SUBTITLES`
+    /// group only exists in a master playlist, so a session served media-direct
+    /// produces the renditions on disk but nothing selects them.
+    public var subtitleRenditions: [MasterPlaylistBuilder.SubtitleRendition] {
+        remuxer.subtitles.renditions
     }
 
     /// Start the loopback server and the remux, and return the playlist URL
