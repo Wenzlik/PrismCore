@@ -1,0 +1,377 @@
+import Foundation
+
+/// Builds the HLS **master** playlist that wraps the remux's media playlist.
+///
+/// v0 hands AVPlayer the media playlist directly, which is enough to play but
+/// says nothing about the stream: no `CODECS`, no `VIDEO-RANGE`, no
+/// `SUPPLEMENTAL-CODECS`. Those attributes are the only way to ask Apple's
+/// stack for HDR and to make AVKit engage Dolby Vision, so an HDR or DV source
+/// needs a master playlist in front of it.
+///
+/// Deliberately pure: values in, string out, no I/O and no libavformat. Every
+/// signaling rule is therefore pinned by a unit test instead of by a device.
+/// The rules themselves are unforgiving — a manifest that over-claims is worse
+/// than no manifest at all, because AVPlayer rejects the whole item
+/// (`-11868` no compatible alternates, `-11848` SDR-parked panel, `-1002` when
+/// every variant was filtered at parse time) rather than degrading.
+public enum MasterPlaylistBuilder {
+
+    // MARK: - Input
+
+    public struct Resolution: Sendable, Equatable {
+        public let width: Int
+        public let height: Int
+        public init(width: Int, height: Int) {
+            self.width = width
+            self.height = height
+        }
+    }
+
+    /// How the variant's video codec is declared.
+    public enum VideoCodec: Sendable, Equatable {
+        /// HEVC, declared from the source's own `hvcC` profile_tier_level.
+        case hevc(HEVCConfigurationRecord)
+        /// Anything else (H.264 `avc1.…`), where the caller already has the
+        /// RFC 6381 string. Phase 4's signaling work is HEVC/DV; H.264 is SDR
+        /// plumbing and gets to stay a passthrough.
+        case explicit(String)
+    }
+
+    /// The one audio rendition the v0 remuxer produces.
+    public struct AudioRendition: Sendable, Equatable {
+        public var groupID: String
+        public var name: String
+        /// BCP-47 / ISO-639 tag as it came out of the container metadata.
+        public var language: String?
+        /// RFC 6381 tag: `mp4a.40.2`, `ac-3`, `ec-3`, `fLaC`, `alac`.
+        public var codecString: String?
+        /// HLS `CHANNELS` value. Plain channel count for most codecs; EAC3
+        /// with object audio uses the `"16/JOC"` form, which is how Atmos is
+        /// advertised — hence a String, not an Int.
+        public var channels: String?
+        /// `nil` means the audio is muxed into the variant's own segments
+        /// (v0's shape: one fMP4 with both tracks). HLS reads a URI-less
+        /// `EXT-X-MEDIA` exactly that way, so the rendition still shows up as
+        /// a selectable `AVMediaSelectionOption`.
+        public var uri: String?
+        public var isDefault: Bool
+
+        public init(
+            groupID: String = "aud",
+            name: String,
+            language: String? = nil,
+            codecString: String? = nil,
+            channels: String? = nil,
+            uri: String? = nil,
+            isDefault: Bool = true
+        ) {
+            self.groupID = groupID
+            self.name = name
+            self.language = language
+            self.codecString = codecString
+            self.channels = channels
+            self.uri = uri
+            self.isDefault = isDefault
+        }
+    }
+
+    public struct VariantDescription: Sendable, Equatable {
+        /// Relative URI of the media playlist the remuxer writes.
+        public var mediaPlaylistURI: String
+        /// Peak bitrate estimate, in bits/s. Caller-provided: the remuxer
+        /// knows the source's bit rate, the builder does not measure.
+        public var bandwidth: Int
+        public var averageBandwidth: Int?
+        public var resolution: Resolution?
+        /// Required for `VIDEO-RANGE=PQ` / `HLG` (see `build`).
+        public var frameRate: Double?
+        public var dynamicRange: DynamicRange
+        public var videoCodec: VideoCodec
+        /// The source's DV configuration, when it has one.
+        public var dolbyVision: DolbyVisionConfiguration?
+        /// Whether the *display this session is going to* can present Dolby
+        /// Vision. Not a source property and not cacheable: the same file gets
+        /// a different manifest on a DV panel and on an HDR10 one, and
+        /// claiming DV to a non-DV display fails the item outright.
+        public var displayIsDolbyVisionCapable: Bool
+        public var audio: AudioRendition?
+
+        public init(
+            mediaPlaylistURI: String = "index.m3u8",
+            bandwidth: Int,
+            averageBandwidth: Int? = nil,
+            resolution: Resolution? = nil,
+            frameRate: Double? = nil,
+            dynamicRange: DynamicRange = .sdr,
+            videoCodec: VideoCodec,
+            dolbyVision: DolbyVisionConfiguration? = nil,
+            displayIsDolbyVisionCapable: Bool = false,
+            audio: AudioRendition? = nil
+        ) {
+            self.mediaPlaylistURI = mediaPlaylistURI
+            self.bandwidth = bandwidth
+            self.averageBandwidth = averageBandwidth
+            self.resolution = resolution
+            self.frameRate = frameRate
+            self.dynamicRange = dynamicRange
+            self.videoCodec = videoCodec
+            self.dolbyVision = dolbyVision
+            self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
+            self.audio = audio
+        }
+    }
+
+    public enum SignalingError: Error, Equatable {
+        /// AVPlayer filters a `VIDEO-RANGE=PQ`/`HLG` variant that carries no
+        /// `FRAME-RATE` out of the master while parsing it, then fails the
+        /// item with `-1002` without ever fetching the media playlist. A
+        /// source whose frame rate the demuxer couldn't determine therefore
+        /// must not be served a master at all — it plays media-direct.
+        case frameRateRequiredForHDR(DynamicRange)
+        /// Profile 5 has no base layer: `dvh1` is the only correct declaration
+        /// (without it the IPT-PQ chroma is read as YCbCr and the picture goes
+        /// green/purple), and a `dvh1` variant offered to a non-DV display is
+        /// rejected with `-11868`. So P5 + non-DV display has no valid master;
+        /// it plays media-direct.
+        case dolbyVisionProfile5RequiresCapableDisplay
+    }
+
+    // MARK: - Output
+
+    public static func build(_ variant: VariantDescription) throws -> String {
+        if variant.dynamicRange != .sdr, variant.frameRate == nil {
+            throw SignalingError.frameRateRequiredForHDR(variant.dynamicRange)
+        }
+        if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly,
+           !variant.displayIsDolbyVisionCapable {
+            throw SignalingError.dolbyVisionProfile5RequiresCapableDisplay
+        }
+
+        var lines = [
+            "#EXTM3U",
+            // 7 is the floor for fMP4 media segments (`EXT-X-MAP`), which is
+            // what every rendition below is.
+            "#EXT-X-VERSION:7",
+            // Every segment starts on a keyframe (the remux cuts on the
+            // source's own IDRs), which lets AVPlayer start on any of them.
+            "#EXT-X-INDEPENDENT-SEGMENTS",
+        ]
+
+        if let audio = variant.audio {
+            lines.append(mediaLine(for: audio))
+        }
+        lines.append(try streamInfLine(for: variant))
+        lines.append(variant.mediaPlaylistURI)
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func mediaLine(for audio: AudioRendition) -> String {
+        var attributes = [
+            "TYPE=AUDIO",
+            "GROUP-ID=\(quoted(audio.groupID))",
+            "NAME=\(quoted(audio.name))",
+        ]
+        if let language = audio.language, !language.isEmpty {
+            attributes.append("LANGUAGE=\(quoted(language))")
+        }
+        attributes.append("DEFAULT=\(audio.isDefault ? "YES" : "NO")")
+        attributes.append("AUTOSELECT=\(audio.isDefault ? "YES" : "NO")")
+        if let channels = audio.channels, !channels.isEmpty {
+            attributes.append("CHANNELS=\(quoted(channels))")
+        }
+        if let uri = audio.uri, !uri.isEmpty {
+            attributes.append("URI=\(quoted(uri))")
+        }
+        return "#EXT-X-MEDIA:" + attributes.joined(separator: ",")
+    }
+
+    private static func streamInfLine(for variant: VariantDescription) throws -> String {
+        var attributes = ["BANDWIDTH=\(variant.bandwidth)"]
+        if let average = variant.averageBandwidth {
+            attributes.append("AVERAGE-BANDWIDTH=\(average)")
+        }
+
+        var codecs = [primaryVideoCodecString(for: variant)]
+        if let audioCodec = variant.audio?.codecString, !audioCodec.isEmpty {
+            codecs.append(audioCodec)
+        }
+        attributes.append("CODECS=\(quoted(codecs.joined(separator: ",")))")
+
+        if let supplemental = supplementalCodecsString(for: variant) {
+            attributes.append("SUPPLEMENTAL-CODECS=\(quoted(supplemental))")
+        }
+        if let resolution = variant.resolution {
+            attributes.append("RESOLUTION=\(resolution.width)x\(resolution.height)")
+        }
+        // SDR variants are accepted without FRAME-RATE, so it stays optional
+        // there and is simply omitted rather than guessed.
+        if let frameRate = variant.frameRate {
+            attributes.append("FRAME-RATE=\(format(frameRate: frameRate))")
+        }
+        // VIDEO-RANGE is omitted for SDR: absent means SDR in HLS, and the
+        // shortest honest manifest is the one with the fewest claims.
+        if variant.dynamicRange != .sdr {
+            attributes.append("VIDEO-RANGE=\(variant.dynamicRange.rawValue)")
+        }
+        if let audio = variant.audio {
+            attributes.append("AUDIO=\(quoted(audio.groupID))")
+        }
+        return "#EXT-X-STREAM-INF:" + attributes.joined(separator: ",")
+    }
+
+    // MARK: - Codec strings
+
+    /// The primary `CODECS` entry for the video track.
+    static func primaryVideoCodecString(for variant: VariantDescription) -> String {
+        if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly {
+            // Profile 5: a bare `dvh1` tag, no HEVC tag anywhere. There is no
+            // base layer to declare, and the DV level (not the HEVC level)
+            // is what follows.
+            return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dv.level))"
+        }
+        switch variant.videoCodec {
+        case .hevc(let record):
+            return hevcCodecString(record)
+        case .explicit(let string):
+            return string
+        }
+    }
+
+    /// `SUPPLEMENTAL-CODECS`, or `nil` when this variant must not claim DV.
+    ///
+    /// Only the base-layer-compatible profiles can be signaled this way, and
+    /// only to a display that can actually present DV: a lone `hvc1` primary
+    /// plus a DV supplemental offered to a non-DV display is rejected with
+    /// `-11868`, and the same source plays perfectly as its plain HDR10 / HLG
+    /// base once the claim is dropped.
+    static func supplementalCodecsString(for variant: VariantDescription) -> String? {
+        guard let dv = variant.dolbyVision, variant.displayIsDolbyVisionCapable else { return nil }
+        // Profile 5 is fully declared by the primary tag; it has no base
+        // codec to supplement.
+        guard !dv.isSingleLayerDVOnly else { return nil }
+        guard let brand = dolbyVisionBrand(for: dv) else { return nil }
+        return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dv.level))/\(brand)"
+    }
+
+    /// The ISO brand that names the *base* layer's compatibility, which is the
+    /// half of the supplemental tag AVKit reads to decide what to do on a
+    /// non-DV fallback.
+    ///
+    /// - `db1p` — 8.1, HDR10 (PQ) base.
+    /// - `db4h` — 8.4, HLG base.
+    ///
+    /// Everything else returns `nil` on purpose:
+    /// - **8.2** carries a Rec.709 base no Apple platform can present as DV;
+    ///   it plays as plain SDR `hvc1`.
+    /// - **7** is dual-layer and has no Apple decoder. Phase 4 groundwork only
+    ///   reports it; once the RPU is converted to 8.1 during muxing the
+    ///   caller passes the *converted* configuration here and gets `db1p`.
+    /// - unknown profiles are never guessed at.
+    private static func dolbyVisionBrand(for dv: DolbyVisionConfiguration) -> String? {
+        guard dv.profile == 8 else { return nil }
+        switch dv.baseLayerSignalCompatibilityID {
+        case 1: return "db1p"
+        case 4: return "db4h"
+        default: return nil
+        }
+    }
+
+    /// `hvc1.<space><profile>.<compat>.<tier><level>.<constraints>` per
+    /// RFC 6381 / ISO 14496-15 Annex E.
+    ///
+    /// The one element everybody gets wrong is the compatibility flags: the
+    /// value printed is the stored `general_profile_compatibility_flags` in
+    /// **reverse bit order**. A real Main10 record stores `0x20000000`, whose
+    /// reversal is `0x4` — hence the familiar `hvc1.2.4.…`. Printing the
+    /// stored value instead would yield `hvc1.2.20000000`, which AVPlayer
+    /// checks against the init segment and refuses.
+    static func hevcCodecString(_ record: HEVCConfigurationRecord) -> String {
+        var element = "hvc1."
+
+        // profile_space 0 prints nothing; 1/2/3 print 'A'/'B'/'C'.
+        if record.profileSpace > 0 {
+            let scalar = UnicodeScalar(UInt8(ascii: "A") + record.profileSpace - 1)
+            element.append(Character(scalar))
+        }
+        element += "\(record.profileIDC)."
+        element += hexString(UInt64(reverseBits(record.profileCompatibilityFlags)))
+        element += "."
+        element += record.tierFlag == 0 ? "L" : "H"
+        element += "\(record.levelIDC)"
+
+        // The six constraint bytes, most significant first, each as two hex
+        // digits (what MP4Box and Dolby's reference manifests print), with
+        // trailing zero bytes omitted — a plain Main10 record ends `.B0`.
+        var constraintBytes: [UInt8] = (0..<6).map { index in
+            UInt8((record.constraintIndicatorFlags >> UInt64((5 - index) * 8)) & 0xFF)
+        }
+        while let last = constraintBytes.last, last == 0 {
+            constraintBytes.removeLast()
+        }
+        for byte in constraintBytes {
+            element += "." + String(format: "%02X", byte)
+        }
+        return element
+    }
+
+    /// RFC 6381 tags for the audio codecs the v0 remuxer stream-copies.
+    /// `nil` for anything the phase-3 bridge would have to touch — by then the
+    /// caller declares the *bridged* codec (`ec-3`), not the source's.
+    public static func audioCodecString(forCodecName name: String, profileName: String? = nil) -> String? {
+        switch name {
+        case "aac":
+            // HE-AAC is object type 5, HE-AACv2 is 29; everything else the
+            // remuxer copies is plain AAC-LC (2).
+            switch profileName {
+            case "HE-AAC": return "mp4a.40.5"
+            case "HE-AACv2": return "mp4a.40.29"
+            default: return "mp4a.40.2"
+            }
+        case "ac3": return "ac-3"
+        case "eac3": return "ec-3"
+        case "flac": return "fLaC"
+        case "alac": return "alac"
+        case "opus": return "Opus"
+        default: return nil
+        }
+    }
+
+    // MARK: - Formatting helpers
+
+    /// Reverses the bit order of a 32-bit value (LSB↔MSB).
+    static func reverseBits(_ value: UInt32) -> UInt32 {
+        var input = value
+        var output: UInt32 = 0
+        for _ in 0..<32 {
+            output = (output << 1) | (input & 1)
+            input >>= 1
+        }
+        return output
+    }
+
+    /// Uppercase hex, no leading zeros ("0" stays "0").
+    private static func hexString(_ value: UInt64) -> String {
+        String(value, radix: 16, uppercase: true)
+    }
+
+    private static func twoDigits(_ value: UInt8) -> String {
+        String(format: "%02d", Int(value))
+    }
+
+    /// Three decimals is enough for every real rate (23.976, 29.97, 59.94)
+    /// and trailing zeros are trimmed so integral rates print as "25" / "60".
+    static func format(frameRate: Double) -> String {
+        var text = String(format: "%.3f", frameRate)
+        while text.contains("."), text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+
+    /// Quoted-string attribute values can't contain a double quote, so any in
+    /// a track name (which came from container metadata) is folded to a
+    /// single quote rather than emitted and breaking the parse.
+    private static func quoted(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\"", with: "'") + "\""
+    }
+}
