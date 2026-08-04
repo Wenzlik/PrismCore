@@ -80,6 +80,11 @@ Prism, and Prism retires only at parity.
 4. **DV + HDR signaling** — master playlist with honest `CODECS` /
    `SUPPLEMENTAL-CODECS`, `hvcC` normalization, P7→8.1 RPU conversion
    (Libdovi ships inside MPVKit already), panel-readiness gating.
+   *Groundwork landed:* `SourceProbe` (what the source is, and whether
+   PrismCore can take it) and `MasterPlaylistBuilder` (the signaling rules, as
+   pure value-in/string-out logic with the rules pinned by unit tests). Still
+   open in this phase: `hvcC` normalization, the P7 conversion, and wiring the
+   master playlist into `PrismCoreSession` behind the panel-readiness read.
 5. **Seek & cache** — keyframe-aligned segment plan, demand-driven producer
    with restart timeline continuity, byte-budgeted retention.
 6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay; bitmap
