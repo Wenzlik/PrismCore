@@ -1,5 +1,10 @@
 # Notices
 
+PrismCore was written by **Václav Zmrhal** ([zmrhal.cz](https://zmrhal.cz)) for
+[Aether](https://aetherplayer.com).
+
+Copyright © 2026 Václav Zmrhal.
+
 PrismCore is licensed under the **GNU Lesser General Public License, version 2.1
 or later** — see [`LICENSE`](LICENSE).
 

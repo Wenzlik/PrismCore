@@ -6,6 +6,8 @@
 
 Aether's native playback engine core: **FFmpeg demuxes, Apple plays.**
 
+Built by **[Václav Zmrhal](https://zmrhal.cz)** for [Aether](https://aetherplayer.com).
+
 Any container libavformat can read (MKV, MPEG-TS, AVI, …) is remuxed on the
 fly into **HLS-fMP4**, served from a loopback HTTP server on `127.0.0.1`, and
 handed to a plain `AVPlayer` as a playlist URL. Apple's stack then does what
@@ -417,7 +419,17 @@ gotcha if that host vendors its own MPVKit fork: SPM derives a path dependency's
 identity from its *directory name*, so the fork's directory has to be called
 `MPVKit` for it to override the `mpvkit` identity PrismCore asks for.
 
+## Author
+
+**Václav Zmrhal** — [zmrhal.cz](https://zmrhal.cz)
+
+Written for [Aether](https://aetherplayer.com), a native media player for Apple
+platforms, where PrismCore is the engine that lets an MKV keep its Dolby Atmos and
+Dolby Vision instead of losing both on the way to the screen.
+
 ## Licence
+
+Copyright © 2026 Václav Zmrhal.
 
 **LGPL-2.1-or-later** — see [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md).
 
