@@ -22,9 +22,33 @@ has all of the above but only Apple's containers; Prism (libmpv) plays
 everything but renders its own frames and decodes audio to PCM, so Atmos and
 DV die at its door. PrismCore exists to close that gap.
 
-## v0 shape: a remux proxy
+## Two engines, one entry point
 
-The first integration is deliberately narrow — a *service*, not a player:
+`PrismCoreEngine.open(url:)` probes the source, picks the engine and hands back
+something already started:
+
+```swift
+switch try await PrismCoreEngine.open(url: mkvURL) {
+case .remux(let session, let playlist):
+    player.replaceCurrentItem(with: AVPlayerItem(url: playlist))   // AVPlayer plays it
+    …
+    await session.stop()
+case .software(let pipeline):
+    hostView.layer.addSublayer(pipeline.displayLayer!)             // we play it
+    pipeline.play()
+    …
+    pipeline.stop()
+}
+```
+
+The remux path is the one that matters — it is what buys hardware decode, Atmos
+passthrough and Dolby Vision — and everything below describes it. The software
+path exists for containers whose *video* AVPlayer cannot decode at all (VP9,
+MPEG-2, VC-1), where there is no URL to hand anywhere; see phase 7.
+
+## The remux path: a service, not a player
+
+Deliberately narrow — no view, no transport, no published state:
 
 ```swift
 let session = try PrismCoreSession(url: mkvURL)   // or with HTTP headers
@@ -224,7 +248,7 @@ Prism, and Prism retires only at parity.
    here: `SourceProbe` reports them (`SourceInfo.bitmapSubtitleTracks`) so the
    host can render them in its own overlay, and an OCR-fed rendition is a later
    idea, not this phase.
-7. **Software decode path** *(skeleton implemented; no session integration yet)*
+7. **Software decode path** *(implemented and routed; needs a device)*
    — libavcodec → `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer`
    under an `AVSampleBufferRenderSynchronizer` for what the HLS-fMP4 pipeline
    can't carry (VP9/VP8, MPEG-2/VC-1/MPEG-4 ASP, interlaced H.264 +
@@ -237,8 +261,28 @@ Prism, and Prism retires only at parity.
    timestamps come from a running sample count, not from container-quantized
    PTS — see `AudioClock`), and `SoftwarePlaybackPipeline` (demux + both
    decoders + renderers + master clock, with `load/play/pause/seek/stop`).
-   Still open in this phase: wiring it into `PrismCoreSession` and the host's
-   routing, deinterlacing, subtitles, track switching, and frame-accurate seek.
+
+   **Routing** is `PrismCoreEngine.open(url:)` — one call that probes, decides
+   and hands back a started engine (`.remux(session:playlist:)` or
+   `.software(pipeline:)`). Deliberately *not* folded into `PrismCoreSession`
+   the way this line used to promise: a session is a work directory, a loopback
+   server, a segmenting remuxer, a demand coordinator and a disk budget, and the
+   software path needs none of them — putting it there would allocate a temp
+   directory and bind a port per software-decoded title, and make `start()`
+   return a URL that doesn't exist for half its cases. `decide(for:)` is exposed
+   separately so the rules are testable without standing up either engine.
+
+   One case got *better* rather than merely possible: a source whose audio all
+   needs the missing EAC3 encoder (TrueHD, DTS-HD MA) used to have only bad
+   answers — remux it and serve silent video, or hand it back. The software path
+   decodes that audio itself, so it now plays with sound. No passthrough, so no
+   Atmos, but sound; and when a build *does* have the encoder, the bridge keeps
+   the native path instead.
+
+   Still open in this phase: deinterlacing (so interlaced H.264 is deliberately
+   still routed to the native path rather than here — no point claiming a
+   deinterlace that doesn't exist), subtitles, track switching, and
+   frame-accurate seek.
 
 ## Dependencies
 
