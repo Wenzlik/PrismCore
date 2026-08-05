@@ -506,6 +506,7 @@ struct SourceInfoRoutingTests {
             frameRateSource: .averageFrameRate,
             hevcConfiguration: nil,
             avcConfiguration: nil,
+            nalUnitLengthSize: nil,
             dolbyVision: nil,
             dynamicRange: .pq,
             copyability: copyability
