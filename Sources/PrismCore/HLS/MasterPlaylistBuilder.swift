@@ -34,6 +34,8 @@ public enum MasterPlaylistBuilder {
         case hevc(HEVCConfigurationRecord)
         /// H.264, declared from the source's own `avcC` three PTL bytes.
         case avc(AVCConfigurationRecord)
+        /// AV1, declared from the source's own `av1C`.
+        case av1(AV1ConfigurationRecord)
         /// Anything else, where the caller already has the RFC 6381 string.
         case explicit(String)
     }
@@ -334,6 +336,8 @@ public enum MasterPlaylistBuilder {
             return hevcCodecString(record)
         case .avc(let record):
             return avcCodecString(record)
+        case .av1(let record):
+            return av1CodecString(record)
         case .explicit(let string):
             return string
         }
@@ -446,6 +450,24 @@ public enum MasterPlaylistBuilder {
         if isObjectAudio { return "16/JOC" }
         guard let channelCount, channelCount > 0 else { return nil }
         return String(channelCount)
+    }
+
+    /// `av01.<profile>.<level><tier>.<bitDepth>` per the AV1 codec-string spec:
+    /// profile as one digit, `seq_level_idx` as two, tier as `M`/`H`, luma bit
+    /// depth as two. Level 4.0 Main tier 10-bit reads `av01.0.08M.10`.
+    ///
+    /// The optional tail (monochrome, chroma subsampling, colour description) is
+    /// omitted deliberately — every field there has a default that matches what a
+    /// remux of ordinary content carries, and a shorter honest tag is better than
+    /// a longer one with a guess in it.
+    static func av1CodecString(_ record: AV1ConfigurationRecord) -> String {
+        String(
+            format: "av01.%d.%02d%@.%02d",
+            Int(record.profile),
+            Int(record.levelIndex),
+            record.tier == 0 ? "M" : "H",
+            Int(record.bitDepth)
+        )
     }
 
     /// RFC 6381 tags for the audio codecs the v0 remuxer stream-copies.

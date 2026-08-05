@@ -101,8 +101,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// programme (see `MasterPlaylistBuilder` on why not one group per codec).
     static let audioGroupID = "aud"
 
-    /// Codecs AVPlayer's HLS-fMP4 pipeline accepts via stream-copy.
-    private static let copyableVideo: Set<AVCodecID> = [AV_CODEC_ID_H264, AV_CODEC_ID_HEVC]
+    // The video-copyability question lives in `SourceProbe.isVideoStreamCopyable`.
+    // There used to be a second copy of the codec set here; it had no readers, and
+    // an unread duplicate of a rule is exactly how the audio sets drifted apart.
     /// Audio that can be stream-copied into fMP4 and decoded (or passed
     /// through) by the system. TrueHD/DTS need the phase-3 bridge.
     private static let copyableAudio: Set<AVCodecID> = [
@@ -1157,6 +1158,7 @@ final class HLSRemuxer: @unchecked Sendable {
     ) -> MasterPlaylistBuilder.VideoCodec? {
         if let hevc = video.hevcConfiguration { return .hevc(hevc) }
         if let avc = video.avcConfiguration { return .avc(avc) }
+        if let av1 = video.av1Configuration { return .av1(av1) }
         return nil
     }
 

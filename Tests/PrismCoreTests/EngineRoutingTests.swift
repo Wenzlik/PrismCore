@@ -85,6 +85,7 @@ struct EngineRoutingTests {
                 frameRateSource: .averageFrameRate,
                 hevcConfiguration: nil,
                 avcConfiguration: nil,
+                av1Configuration: nil,
                 nalUnitLengthSize: nil,
                 dolbyVision: nil,
                 dynamicRange: .sdr,
@@ -252,6 +253,110 @@ struct BridgeableAgreementTests {
                 SourceProbe.isBridgeableForTesting(codecID) == hasDecoder,
                 "\(String(cString: avcodec_get_name(codecID))) disagrees"
             )
+        }
+    }
+}
+
+/// AV1 is the one codec whose native-path eligibility depends on the *device*:
+/// Apple's hardware AV1 decoder arrived with the A17 Pro and M3, and there is no
+/// software decoder behind VideoToolbox — so on an M1 or M2 (Vision Pro included)
+/// an AV1 variant offered to AVPlayer doesn't play slowly, it doesn't play.
+@Suite("AV1 depends on the device")
+struct AV1RoutingTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    @Test("with hardware AV1 the source stream-copies; without it, it does not")
+    func copyabilityFollowsTheDevice() {
+        #expect(
+            SourceProbe.isVideoStreamCopyable(AV_CODEC_ID_AV1, isAV1HardwareSupported: true)
+        )
+        #expect(
+            SourceProbe.isVideoStreamCopyable(AV_CODEC_ID_AV1, isAV1HardwareSupported: false)
+                == false
+        )
+        // The two that never depend on the device.
+        for codec in [AV_CODEC_ID_H264, AV_CODEC_ID_HEVC] {
+            #expect(SourceProbe.isVideoStreamCopyable(codec, isAV1HardwareSupported: false))
+        }
+    }
+
+    @Test("an AV1 source's av1C is read, so it can be declared honestly")
+    func readsTheConfigurationRecord() throws {
+        let info = try SourceProbe.probe(url: try fixture("av1_aac.mkv"))
+        let video = try #require(info.video)
+        #expect(video.codecName == "av1")
+        let record = try #require(
+            video.av1Configuration, "no av1C — an AV1 source with no record can't be declared"
+        )
+        #expect(record.profile == 0)          // Main
+        #expect(record.bitDepth == 8)
+        // The CODECS string AVPlayer would be given.
+        let codecString = MasterPlaylistBuilder.av1CodecString(record)
+        #expect(codecString.hasPrefix("av01.0."))
+        #expect(codecString.hasSuffix(".08"))
+    }
+
+    @Test("the AV1 codec string follows the spec's shape")
+    func codecStringShape() {
+        #expect(
+            MasterPlaylistBuilder.av1CodecString(
+                .init(profile: 0, levelIndex: 8, tier: 0, bitDepth: 10, isMonochrome: false)
+            ) == "av01.0.08M.10"
+        )
+        // High tier, and a two-digit level that must not lose its leading zero.
+        #expect(
+            MasterPlaylistBuilder.av1CodecString(
+                .init(profile: 1, levelIndex: 5, tier: 1, bitDepth: 8, isMonochrome: false)
+            ) == "av01.1.05H.08"
+        )
+        // Professional profile carries the only twelve-bit case.
+        #expect(
+            MasterPlaylistBuilder.av1CodecString(
+                .init(profile: 2, levelIndex: 16, tier: 0, bitDepth: 12, isMonochrome: false)
+            ) == "av01.2.16M.12"
+        )
+    }
+
+    @Test("twelve-bit is only read for the Professional profile")
+    func bitDepthRules() throws {
+        func record(profile: UInt8, highBitDepth: Bool, twelveBit: Bool) throws -> AV1ConfigurationRecord {
+            var byte2: UInt8 = 0
+            if highBitDepth { byte2 |= 0x40 }
+            if twelveBit { byte2 |= 0x20 }
+            let bytes: [UInt8] = [0x81, (profile << 5) | 8, byte2, 0]
+            return try #require(AV1ConfigurationRecord.parse(av1C: Data(bytes)))
+        }
+        #expect(try record(profile: 0, highBitDepth: false, twelveBit: false).bitDepth == 8)
+        #expect(try record(profile: 0, highBitDepth: true, twelveBit: false).bitDepth == 10)
+        // twelve_bit set outside Professional is not a twelve-bit stream.
+        #expect(try record(profile: 0, highBitDepth: true, twelveBit: true).bitDepth == 10)
+        #expect(try record(profile: 2, highBitDepth: true, twelveBit: true).bitDepth == 12)
+    }
+
+    @Test("a record with the wrong marker or version is refused, not guessed at")
+    func refusesBadRecords() {
+        #expect(AV1ConfigurationRecord.parse(av1C: Data([0x01, 0x08, 0x00, 0x00])) == nil)  // no marker
+        #expect(AV1ConfigurationRecord.parse(av1C: Data([0x82, 0x08, 0x00, 0x00])) == nil)  // version 2
+        #expect(AV1ConfigurationRecord.parse(av1C: Data([0x81, 0x08])) == nil)              // too short
+    }
+
+    @Test("routing sends AV1 to the native path only where the hardware is")
+    func routingFollowsTheDevice() throws {
+        let info = try SourceProbe.probe(url: try fixture("av1_aac.mkv"))
+        // This machine's real answer decides which of the two the probe reported,
+        // so assert the pairing rather than one fixed outcome.
+        if SourceProbe.isVideoStreamCopyable(AV_CODEC_ID_AV1) {
+            #expect(info.nativeReadiness == .streamCopy)
+            #expect(try PrismCoreEngine.decide(for: info).engine == .remux)
+        } else {
+            #expect(info.nativeReadiness == .unsupported)
+            // libdav1d is what makes AV1 play at all on such a device.
+            #expect(try PrismCoreEngine.decide(for: info).engine == .software)
         }
     }
 }
