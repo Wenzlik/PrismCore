@@ -34,7 +34,7 @@ enum HVCCNormalizer {
 
     /// VPS, SPS, PPS: the only NAL types a `hvc1` sample entry carries, in the
     /// order they are written.
-    private static let keptNALTypes: [UInt8] = [32, 33, 34]
+    static let keptNALTypes: [UInt8] = [32, 33, 34]
 
     /// The fixed part of an `HEVCDecoderConfigurationRecord`: version byte,
     /// 12 PTL bytes, then the eight bytes of chroma/depth/frame-rate fields,
@@ -204,5 +204,84 @@ enum HVCCNormalizer {
             }
         }
         return seen == keptNALTypes.filter(seen.contains)
+    }
+}
+
+// MARK: - Filling in a parameter-set-less record
+
+extension HVCCNormalizer {
+
+    /// Whether a record carries no parameter sets at all.
+    ///
+    /// Some MP4 and MPEG-TS sources ship a 23-byte `hvcC` with `numOfArrays = 0`
+    /// because their VPS/SPS/PPS travel in band, with the samples. The record
+    /// parses — its profile_tier_level is real, so a `CODECS` string can be
+    /// derived from it — but a `hvc1` sample entry built from it promises
+    /// parameter sets that aren't there, and FFmpeg writes an empty `hvcC` box
+    /// besides. AVPlayer has nothing to configure a decoder from.
+    static func carriesNoParameterSets(hvcC data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 23, bytes[0] == 1 else { return false }
+        return bytes[22] == 0
+    }
+
+    /// Build a complete record from a parameter-set-less one plus parameter sets
+    /// harvested from the bitstream.
+    ///
+    /// The 22-byte header is kept verbatim: it is the profile_tier_level the
+    /// `CODECS` string is printed from, so filling in the arrays cannot change
+    /// what the manifest already claimed.
+    ///
+    /// `nil` when the header can't be trusted or no SPS was harvested — a record
+    /// without an SPS is no more usable than the empty one it replaces.
+    static func record(
+        fillingIn data: Data, withParameterSets sets: [UInt8: [[UInt8]]]
+    ) -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 23, bytes[0] == 1 else { return nil }
+        guard sets[33]?.isEmpty == false else { return nil }
+
+        var output = Array(bytes[0..<22])
+        let present = keptNALTypes.filter { sets[$0]?.isEmpty == false }
+        output.append(UInt8(present.count))
+        for nalType in present {
+            guard let units = sets[nalType] else { continue }
+            // array_completeness = 1: this record now really does hold them all,
+            // which is what `hvc1` asserts.
+            output.append(0x80 | nalType)
+            output.append(UInt8((units.count >> 8) & 0xFF))
+            output.append(UInt8(units.count & 0xFF))
+            for unit in units {
+                output.append(UInt8((unit.count >> 8) & 0xFF))
+                output.append(UInt8(unit.count & 0xFF))
+                output.append(contentsOf: unit)
+            }
+        }
+        return Data(output)
+    }
+
+    /// Fill in the `hvcC` of a produced init segment, growing the box tree.
+    ///
+    /// Separate from `patch(initSegment:)` because they answer different
+    /// questions: that one normalizes a record that has parameter sets, this one
+    /// supplies the parameter sets a record never had.
+    /// - Parameter sourceRecord: the source's own record, which donates the
+    ///   22-byte profile_tier_level header. Required because FFmpeg writes an
+    ///   *empty* box for a parameter-set-less record — there is no header left in
+    ///   the segment to keep, and inventing one would mean inventing a profile.
+    static func patch(
+        initSegment data: Data,
+        sourceRecord: Data,
+        withParameterSets sets: [UInt8: [[UInt8]]]
+    ) -> Data? {
+        guard let location = ISOBMFFPatch.locate("hvcC", in: data) else { return nil }
+        let existing = data.subdata(in: location.payload)
+        // Only ever fills a gap: a record that already carries parameter sets is
+        // `patch(initSegment:)`'s business.
+        guard existing.isEmpty || carriesNoParameterSets(hvcC: existing) else { return nil }
+        guard let filled = record(fillingIn: sourceRecord, withParameterSets: sets) else {
+            return nil
+        }
+        return ISOBMFFPatch.replacePayload(at: location, in: data, with: filled)
     }
 }

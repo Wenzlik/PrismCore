@@ -165,6 +165,14 @@ final class FMP4SegmentWriter {
             : "+delay_moov+frag_custom+default_base_moof"
         av_dict_set(&options, "movflags", flags, 0)
         av_dict_set(&options, "avoid_negative_ts", "disabled", 0)
+        // Without this movenc refuses to write the Dolby Vision configuration
+        // box and says so: "Not writing 'dvcC'/'dvvC' box. Requires -strict
+        // unofficial." The boxes are Dolby's specification rather than ISO's,
+        // hence the gate — but they are also the only thing that tells
+        // AVFoundation a track is Dolby Vision, so a DV source without them is
+        // just HDR10 with extra bytes. Found on a real Profile 7 file; no
+        // synthetic fixture carries DV, so nothing here could have caught it.
+        av_dict_set(&options, "strict", "unofficial", 0)
 
         try FFmpegError.check(
             avformat_write_header(output, &options),

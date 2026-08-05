@@ -116,6 +116,32 @@ final class DolbyVisionRPUConverter {
     }
 }
 
+/// What a Profile 7 → 8.1 conversion did over the course of a session.
+///
+/// Exposed because "did it work" has no other observable answer: a P7 source
+/// whose RPUs all failed to convert still plays — as plain HDR10 — so the only
+/// other symptom is a viewer reporting that Dolby Vision never engaged.
+public struct DolbyVisionConversionStats: Sendable, Equatable {
+    /// RPU NALs rewritten into single-layer 8.1 form.
+    public let convertedRPUs: Int
+    /// RPU NALs libdovi refused. Left in the stream unconverted (see the
+    /// converter): a non-zero count here means the 8.1 declaration is not
+    /// describing every frame, which is worth a host's log line.
+    public let failedRPUs: Int
+    /// Enhancement-layer NALs dropped — the other half of making a dual-layer
+    /// stream single-layer.
+    public let droppedEnhancementLayerNALs: Int
+
+    public init(convertedRPUs: Int, failedRPUs: Int, droppedEnhancementLayerNALs: Int) {
+        self.convertedRPUs = convertedRPUs
+        self.failedRPUs = failedRPUs
+        self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
+    }
+
+    /// Every RPU converted, none refused.
+    public var isClean: Bool { failedRPUs == 0 && convertedRPUs > 0 }
+}
+
 extension DolbyVisionConfiguration {
 
     /// The configuration a converted stream should be *declared* as: same DV

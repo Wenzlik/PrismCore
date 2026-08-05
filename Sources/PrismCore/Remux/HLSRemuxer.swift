@@ -141,6 +141,32 @@ final class HLSRemuxer: @unchecked Sendable {
     /// read the produced renditions for the master playlist.
     let subtitles: SubtitleRenditionSet
 
+    /// What the Profile 7 → 8.1 conversion actually did, once the remux has run.
+    ///
+    /// Written from the copy loop's thread, read by the session's actor, hence the
+    /// lock. `nil` for every source that isn't a converted P7.
+    ///
+    /// This is not diagnostics for their own sake. A P7 source whose RPUs all
+    /// failed to convert is indistinguishable at playback from one that converted
+    /// cleanly — both play, one as Dolby Vision and one as plain HDR10 — so
+    /// without a count the only symptom of a broken conversion is a viewer saying
+    /// the DV logo never appeared.
+    private let conversionStatsLock = NSLock()
+    private var storedConversionStats: DolbyVisionConversionStats?
+
+    var dolbyVisionConversionStats: DolbyVisionConversionStats? {
+        conversionStatsLock.withLock { storedConversionStats }
+    }
+
+    private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
+        let stats = DolbyVisionConversionStats(
+            convertedRPUs: converter.convertedRPUs,
+            failedRPUs: converter.failedRPUs,
+            droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs
+        )
+        conversionStatsLock.withLock { storedConversionStats = stats }
+    }
+
     init(
         sourceURL: URL,
         httpHeaders: [String: String] = [:],
@@ -431,6 +457,36 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
 
+        // The muxed shape's Atmos track, if it has one. Only a stream-copied
+        // E-AC-3 track qualifies: the bridge's output carries no JOC.
+        let muxedAtmosTrack: AudioTrackInfo? = {
+            guard case .muxed(let audio) = shape, let audio, audio.mode == .streamCopy
+            else { return nil }
+            return info.audioTracks.first {
+                $0.streamIndex == Int(audio.index) && $0.isObjectAudio && $0.codecName == "eac3"
+            }
+        }()
+        /// `complexity_index_type_a` read out of the first readable syncframe.
+        /// Captured by `writeInitSegmentIfAbsent`, which needs it by the time the
+        /// first cut mints the moov — by then plenty of audio packets have gone
+        /// past, so it is there.
+        var muxedAtmosComplexityIndex: Int?
+
+        // Sources whose VPS/SPS/PPS travel in band ship a 23-byte `hvcC` with no
+        // arrays, and FFmpeg then writes an empty box — an `hvc1` entry promising
+        // parameter sets that aren't there. Harvest them from the bitstream and
+        // fill the record in when the init segment is written.
+        let videoExtradata: Data? = {
+            let par = input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee
+            guard let extradata = par.extradata, par.extradata_size > 0 else { return nil }
+            return Data(bytes: extradata, count: Int(par.extradata_size))
+        }()
+        let needsParameterSetHarvest = videoTrack.codecName == "hevc"
+            && videoTrack.nalUnitLengthSize != nil
+            && videoExtradata.map(HVCCNormalizer.carriesNoParameterSets(hvcC:)) == true
+        /// NAL type → units, deduplicated. VPS/SPS/PPS only.
+        var harvestedParameterSets: [UInt8: [[UInt8]]] = [:]
+
         /// Write the init segment the first time one is minted.
         ///
         /// Two things happen here. The `hvcC` gets its final correction: the muxer
@@ -443,7 +499,25 @@ final class HLSRemuxer: @unchecked Sendable {
         func writeInitSegmentIfAbsent(_ initSegment: Data) throws {
             let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
             guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
-            let bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            var bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            // Fill in parameter sets the source never put in its record.
+            if needsParameterSetHarvest, let sourceRecord = videoExtradata,
+               let filled = HVCCNormalizer.patch(
+                   initSegment: bytes,
+                   sourceRecord: sourceRecord,
+                   withParameterSets: harvestedParameterSets
+               ) {
+                bytes = filled
+            }
+            // And the JOC declaration FFmpeg leaves out of `dec3` — the
+            // difference between Atmos and plain DD+ at the speaker. Muxed shape
+            // only; a rendition patches its own init segment.
+            if let index = muxedAtmosComplexityIndex,
+               let withAtmos = EAC3Configuration.patch(
+                   initSegment: bytes, atmosComplexityIndex: index
+               ) {
+                bytes = withAtmos
+            }
             try bytes.write(to: initURL, options: .atomic)
         }
 
@@ -481,6 +555,10 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             demand?.setProducing(index: segmentIndex)
             recordAndEvict(index: segmentIndex - 1, videoBytes: media.count)
+            // Refreshed per segment rather than once at EOF: a host that wants to
+            // log "Dolby Vision engaged" can read it as soon as playback starts,
+            // and a session that is cancelled halfway still leaves a real count.
+            if let dolbyVisionConverter { recordConversionStats(dolbyVisionConverter) }
         }
 
         /// Demand-driven jump: abandon the in-flight fragment, seek the
@@ -608,6 +686,24 @@ final class HLSRemuxer: @unchecked Sendable {
                             try Self.replacePayload(of: packet, with: converted)
                         }
                     }
+                    if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
+                       let lengthSize = videoTrack.nalUnitLengthSize,
+                       let data = packet.pointee.data, packet.pointee.size > 0 {
+                        // Keyframes carry the sets; a non-keyframe simply yields
+                        // nothing and the next packet gets a turn.
+                        let bytes = [UInt8](
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                        for unit in HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) ?? []
+                        where HVCCNormalizer.keptNALTypes.contains(unit.type) && unit.layerID == 0 {
+                            let value = Array(unit.bytes)
+                            var existing = harvestedParameterSets[unit.type] ?? []
+                            if !existing.contains(value) {
+                                existing.append(value)
+                                harvestedParameterSets[unit.type] = existing
+                            }
+                        }
+                    }
                     if let mapped = streamMap[streamIndex] {
                         try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
                     }
@@ -629,6 +725,18 @@ final class HLSRemuxer: @unchecked Sendable {
                         try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
                     }
                     continue
+                }
+
+                if let muxedAtmosTrack, muxedAtmosComplexityIndex == nil,
+                   streamIndex == muxedAtmosTrack.streamIndex,
+                   let data = packet.pointee.data, packet.pointee.size > 0 {
+                    // A partial first frame simply doesn't answer; the next one
+                    // usually does, so the sniff stays open until it succeeds.
+                    muxedAtmosComplexityIndex = EAC3Syncframe.atmosComplexityIndex(
+                        in: [UInt8](
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                    )
                 }
 
                 try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
@@ -832,8 +940,22 @@ final class HLSRemuxer: @unchecked Sendable {
             "avcodec_parameters_copy"
         )
         let par = outStream.pointee.codecpar!
-        // Zero lets the muxer pick the fourcc, which for stream-copied HEVC is
-        // `hvc1` — right for everything except Dolby Vision Profile 5.
+        // The sample entry's fourcc, and it has to be said explicitly.
+        //
+        // FFmpeg's mp4 muxer defaults HEVC to **`hev1`**, not `hvc1` — a default
+        // this code previously trusted to be `hvc1`, which was simply wrong.
+        // Two things went wrong because of it, and only a real Matroska file
+        // showed either:
+        //
+        // 1. Apple's HLS authoring rules want `hvc1`. `hev1` means parameter sets
+        //    may arrive in band, which an HLS init segment is not supposed to
+        //    rely on.
+        // 2. `HVCCNormalizer` asserts `array_completeness = 1` — "every parameter
+        //    set is in this entry" — which directly contradicts `hev1`, and
+        //    movenc resolves that contradiction by writing **no `hvcC` box at
+        //    all**. The record didn't just stay unnormalized; it disappeared. The
+        //    synthetic fixture never caught it because its record already had
+        //    completeness set, so the normalizer left it alone.
         //
         // P5 has no base layer: its picture is IPT-PQc2, not YCbCr, and the
         // *sample entry* is the only thing that tells a decoder so. An `hvc1`
@@ -847,7 +969,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // the fallback that makes 8.1 worth having.
         par.pointee.codec_tag = declaredDolbyVision?.isSingleLayerDVOnly == true
             ? Self.fourCC("dvh1")
-            : 0
+            : (par.pointee.codec_id == AV_CODEC_ID_HEVC ? Self.fourCC("hvc1") : 0)
 
         // `hvcC` → `hvc1`-correct form. Only HEVC has the problem (an `avcC`
         // carries no arrays to normalize), and `normalize` returns nil when the

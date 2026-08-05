@@ -232,8 +232,10 @@ Prism, and Prism retires only at parity.
    - `SourceProbe` reports what the source is and whether PrismCore can take it;
      `MasterPlaylistBuilder` holds the signaling rules as pure
      value-in/string-out logic pinned by unit tests.
-   - **`hvcC` normalization** (`HVCCNormalizer`) — a stream-copied HEVC track
-     gets a `hvc1` sample entry, which asserts every parameter set lives in that
+   - **`hvcC` normalization** (`HVCCNormalizer`) — a stream-copied HEVC track is
+     given a `hvc1` sample entry **explicitly** (`codec_tag`), because FFmpeg's
+     mp4 muxer defaults HEVC to `hev1` and Apple's HLS rules want `hvc1`. That
+     matters twice over: `hvc1` asserts every parameter set lives in that
      entry. Matroska `CodecPrivate` routinely says otherwise
      (`array_completeness=0`) and carries SEI arrays besides, so the record is
      rewritten to VPS/SPS/PPS in order with completeness asserted. This runs
@@ -246,6 +248,51 @@ Prism, and Prism retires only at parity.
      profile_tier_level header is copied verbatim either way — it is what the
      `CODECS` string is printed from, so the declaration keeps matching the init
      segment.
+
+     A real Matroska file later showed the fourcc and the normalization to be one
+     problem rather than two: `array_completeness = 1` contradicts `hev1`, and
+     movenc resolves that by writing **no `hvcC` box at all** — so before the tag
+     was set explicitly, normalizing a real record deleted it. The synthetic
+     fixture couldn't catch it: its record already had completeness set, so the
+     normalizer left it alone.
+   - **Atmos needs the `dec3` box written by us.** FFmpeg's mp4 muxer drops the
+     TS 103 420 type-A extension on a stream copy (plain `ffmpeg -c copy` does
+     the same), and that extension is the only thing that makes AVFoundation
+     take the Dolby/MAT route — without it a real Atmos track plays as plain
+     DD+. So `EAC3Syncframe` reads `complexity_index_type_a` out of the
+     bitstream's `addbsi` and `EAC3Configuration.patch` appends it to the box in
+     the produced init segment, re-framing every enclosing box's size. Only for
+     stream-copied tracks the probe called object audio: the bridge decodes to
+     PCM and its encoder produces no JOC, so declaring Atmos there would promise
+     what the bridge destroyed. Verified on Dolby's Atmos demo — the served
+     `dec3` now declares complexity index 16.
+
+     Field placement follows libavcodec's `ac3_parser.c`, not a reading of the
+     spec, and that mattered three times over: the JOC signal can sit in a
+     **dependent** substream (Blu-ray-style DD+ puts it there, behind an AC-3
+     core frame, so a reader that parses only offset zero finds nothing), a
+     dependent substream carries a `chanmap` field an independent one doesn't,
+     and both the converter-sync bit and the whole mixing-substream block exist
+     on independent substreams only. Each omission shifted the walk by a bit or
+     two — and a shifted walk does not fail, it returns a confident wrong
+     number. An early version reported a plausible index from a misaligned read;
+     only matching the reference implementation field for field made it right.
+   - **Parameter sets get harvested when the source keeps them in band.** Some
+     MP4 and MPEG-TS sources ship a 23-byte `hvcC` with `numOfArrays = 0` — their
+     VPS/SPS/PPS travel with the samples. The record parses, so a `CODECS` string
+     can be derived from it, but FFmpeg writes an **empty** `hvcC` box and an
+     `hvc1` entry then promises parameter sets that aren't there, leaving AVPlayer
+     nothing to configure a decoder from. So they are collected off the first
+     keyframes and filled into the record when the init segment is written
+     (`HVCCNormalizer.record(fillingIn:withParameterSets:)`), keeping the
+     22-byte profile_tier_level header verbatim so the manifest's claim still
+     describes the media.
+   - **The Dolby Vision box needs `-strict unofficial`.** `dvcC`/`dvvC` are
+     Dolby's specification rather than ISO's, so movenc refuses to write them by
+     default ("Not writing 'dvcC'/'dvvC' box. Requires -strict unofficial") — and
+     they are the only thing that tells AVFoundation a track is Dolby Vision. A
+     DV source without them is HDR10 with extra bytes. Also invisible to every
+     fixture, since none carries DV.
    - **P7 → 8.1 RPU conversion** (`DolbyVisionRPUConverter`) — Profile 7 is
      dual-layer with an HDR10 base no Apple platform decodes as DV. libdovi
      (already linked into MPVKit's `_FFmpeg`) rewrites each RPU NAL to its
