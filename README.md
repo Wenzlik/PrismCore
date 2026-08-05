@@ -188,8 +188,37 @@ Prism, and Prism retires only at parity.
    landed here rather than later: every viable audio track is served as an
    alternate rendition behind a master playlist, because a host whose track menu
    can only offer one track is not at parity with the player it replaces.
-2. **Aether integration** — `PlayerTransport` routing behind a developer
-   toggle; HTTP headers for server sources; teardown discipline.
+2. **Aether integration** *(attempted 2026-08-05, parked on two build-level
+   prerequisites)* — `PlayerTransport` routing behind a developer toggle; HTTP
+   headers for server sources; teardown discipline. The routing itself is
+   straightforward and was written (Aether branch `feature/prismcore-routing`,
+   unmerged): every *automatic* tier-3 libmpv route offers the source to
+   PrismCore first and falls back to exactly the route it would have taken, so
+   the phase is additive. What stopped it is entirely about how the two packages
+   share MPVKit, and both prerequisites belong to the host, not here:
+
+   - **SPM package identity.** PrismCore depends on
+     `github.com/mpvkit/MPVKit.git` → identity `mpvkit`. Aether overrides MPVKit
+     with a local fork at `Vendor/MPVKitLocal` → identity `mpvkitlocal`, taken
+     from the *directory name*. A local package only overrides a remote one of
+     the **same** identity, so resolution fails outright with `unable to
+     override package 'MPVKit' because its identity 'mpvkit' doesn't match
+     override's identity (directory name) 'mpvkitlocal'`. The host's fork
+     directory has to be named `MPVKit` (or PrismCore has to be vendored beside
+     it with its own path dependency, which sidesteps identity entirely).
+   - **A stale module map in the pinned FFmpeg build.** MPVKit's
+     `Libavutil.framework` module map excludes the platform `hwcontext_*.h`
+     headers it can't build — but the list predates AMF, so `hwcontext_amf.h`
+     survives and `#include <AMF/core/Factory.h>` fails. Nothing in Aether ever
+     imported `Libavutil` as a module, so it never noticed; PrismCore does, and
+     the module then can't be built at all. Aether pins the FFmpeg xcframeworks
+     from MPVKit release `0.41.0`; release `1.0.0` (still mpv v0.41.0) is what
+     PrismCore's own tests run against, and it does not have the problem.
+     Bumping those pins is a change to every libmpv playback in the host, which
+     is why it is the host's call and not a detail of this phase.
+
+   The agreed sequence is therefore: let PrismCore mature standalone, and do the
+   wiring — including the MPVKit bump — in a dedicated test build of the host.
 3. **Audio bridge** *(implemented, needs a media fixture + a device)* — TrueHD /
    DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 (decode +
    re-encode, 128 kbps per channel) so non-streamable audio still surrounds on
