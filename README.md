@@ -202,16 +202,7 @@ Prism, and Prism retires only at parity.
    Still open in this phase: wiring it into `PrismCoreSession` and the host's
    routing, deinterlacing, subtitles, track switching, and frame-accurate seek.
 
-## Prior art & rules
-
-The architecture follows the approach proven by
-an established external engine (LGPL),
-whose docs generously describe both the mechanism and the potholes
-(AVPlayer's HLS-fMP4 quirks, the `-12889` media watchdog, `tfdt` timeline
-continuity across producer restarts, DV profile signaling). **We study how it
-does things and build our own similarly; no code is copied from it.** If a
-piece of it is ever wanted verbatim, the correct route is depending on the
-LGPL package, not transplanting source.
+## Dependencies
 
 FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s LGPL
 dynamic xcframeworks — the same dependency Aether already ships, with the

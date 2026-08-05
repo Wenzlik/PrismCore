@@ -199,8 +199,8 @@ final class HLSRemuxer: @unchecked Sendable {
         let videoIndex = Int32(videoTrack.streamIndex)
 
         // Subtitle renditions are set up before the muxer: their packets never
-        // reach it (in-band timed text is not HLS-conformant — the prior art
-        // tried and AVPlayer rejected the stream), they become WebVTT files
+        // reach it (in-band timed text is not HLS-conformant — muxing it in
+        // gets the whole stream rejected by AVPlayer), they become WebVTT files
         // alongside the fMP4 segments.
         let subtitleStreams = try subtitles.prepare(input: input)
 
