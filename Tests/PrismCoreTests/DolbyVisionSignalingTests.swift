@@ -505,3 +505,61 @@ struct DisplayCapabilitiesTests {
         }
     }
 }
+
+// MARK: - Atmos declaration
+
+@Suite("Atmos / CHANNELS=16/JOC")
+struct ObjectAudioDeclarationTests {
+
+    @Test("object audio prints the JOC form, not the bed's channel count")
+    func jocWinsOverCount() {
+        // An Atmos EAC3 track's ch_layout really does read 6; 16 is the fixed
+        // figure HLS asks for, so the count must NOT win here.
+        #expect(
+            MasterPlaylistBuilder.channelsAttribute(channelCount: 6, isObjectAudio: true)
+                == "16/JOC"
+        )
+        #expect(
+            MasterPlaylistBuilder.channelsAttribute(channelCount: nil, isObjectAudio: true)
+                == "16/JOC"
+        )
+    }
+
+    @Test("without object audio it is the plain count, and nothing when unknown")
+    func plainCount() {
+        #expect(MasterPlaylistBuilder.channelsAttribute(channelCount: 6, isObjectAudio: false) == "6")
+        #expect(MasterPlaylistBuilder.channelsAttribute(channelCount: 2, isObjectAudio: false) == "2")
+        #expect(MasterPlaylistBuilder.channelsAttribute(channelCount: nil, isObjectAudio: false) == nil)
+        // A container that reports zero channels knows nothing; CHANNELS is
+        // optional, and omitting it beats declaring a lie.
+        #expect(MasterPlaylistBuilder.channelsAttribute(channelCount: 0, isObjectAudio: false) == nil)
+    }
+
+    @Test("an Atmos rendition reaches the master as CHANNELS=\"16/JOC\"")
+    func masterCarriesJOC() throws {
+        let record = try #require(
+            HEVCConfigurationRecord.parse(
+                hvcC: hvcC(arrays: [(type: 33, complete: true, units: [sps])])
+            )
+        )
+        let variant = MasterPlaylistBuilder.VariantDescription(
+            bandwidth: 30_000_000,
+            frameRate: 23.976,
+            videoCodec: .hevc(record),
+            audioRenditions: [
+                .init(
+                    name: "English",
+                    codecString: "ec-3",
+                    channels: MasterPlaylistBuilder.channelsAttribute(
+                        channelCount: 6, isObjectAudio: true
+                    ),
+                    uri: "audio0/index.m3u8"
+                )
+            ]
+        )
+        let master = try MasterPlaylistBuilder.build(variant)
+        #expect(master.contains("CHANNELS=\"16/JOC\""))
+        // The codec tag stays plain EAC3 — JOC is not a codec, it rides inside.
+        #expect(master.contains("ec-3"))
+    }
+}

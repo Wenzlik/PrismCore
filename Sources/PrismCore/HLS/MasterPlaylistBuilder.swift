@@ -428,6 +428,26 @@ public enum MasterPlaylistBuilder {
         return element
     }
 
+    /// The `CHANNELS` value for a rendition — `"16/JOC"` for Dolby Atmos, the
+    /// plain channel count otherwise.
+    ///
+    /// `16/JOC` is not a channel count, it is HLS's *declaration* that the
+    /// rendition carries joint object coding: 16 is the fixed figure Apple's
+    /// authoring rules require, whatever the underlying bed is (an Atmos EAC3
+    /// track's `ch_layout` reads 6). Without it the objects still reach an AVR —
+    /// the stream is copied untouched, and the receiver is what decodes JOC — but
+    /// AVFoundation has no way to know the rendition is Atmos, so it can't prefer
+    /// it in a selection group and tvOS won't badge it.
+    ///
+    /// - Parameter isObjectAudio: must be true **only** for a stream-copied
+    ///   EAC3+JOC track. Declaring JOC over the audio bridge's output would be a
+    ///   lie: the bridge decodes to PCM and re-encodes, so the objects are gone.
+    public static func channelsAttribute(channelCount: Int?, isObjectAudio: Bool) -> String? {
+        if isObjectAudio { return "16/JOC" }
+        guard let channelCount, channelCount > 0 else { return nil }
+        return String(channelCount)
+    }
+
     /// RFC 6381 tags for the audio codecs the v0 remuxer stream-copies.
     /// `nil` for anything the phase-3 bridge would have to touch — by then the
     /// caller declares the *bridged* codec (`ec-3`), not the source's.

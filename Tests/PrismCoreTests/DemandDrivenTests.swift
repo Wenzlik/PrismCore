@@ -240,3 +240,96 @@ struct DemandDrivenTests {
         #expect(served)
     }
 }
+
+// MARK: - Subtitle segments for unproduced ranges
+
+@Suite("Planned subtitle serves")
+struct PlannedSubtitleServeTests {
+
+    private func plannedCoordinator() -> DemandCoordinator {
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<10).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex,
+            timeBaseNum: 1,
+            timeBaseDen: 1000
+        ))
+        return coordinator
+    }
+
+    private func temporaryRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    @Test("a subtitle segment that lands while we wait is served with its cues")
+    func waitsForCuesRatherThanAnsweringEmpty() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("subs0"), withIntermediateDirectories: true
+        )
+        let provider = PlanSegmentProvider(root: root, coordinator: plannedCoordinator())
+
+        // The producer cuts the segment shortly after the fetch arrives — which
+        // is the ordinary case on a seek, since the media fetch for the same
+        // index is what re-anchored it.
+        let cued = "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:02.000\nAhoj\n"
+        let writer = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            try? Data(cued.utf8).write(
+                to: root.appendingPathComponent("subs0/seg00004.vtt"), options: .atomic
+            )
+        }
+        defer { writer.cancel() }
+
+        let result = await provider.data(forPath: "subs0/seg00004.vtt")
+        guard case .pending(let pending) = result else {
+            Issue.record("an unproduced subtitle segment must wait, not answer immediately")
+            return
+        }
+        guard case .data(let data, let contentType) = await pending.resolve() else {
+            Issue.record("the produced segment should have been served")
+            return
+        }
+        #expect(String(decoding: data, as: UTF8.self).contains("Ahoj"))
+        #expect(contentType == "text/vtt")
+    }
+
+    @Test("a subtitle segment that never lands degrades to empty cues, not a failure")
+    func degradesToEmptySegment() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var provider = PlanSegmentProvider(root: root, coordinator: plannedCoordinator())
+        // The real window is 8 s; shortening it keeps the suite quick without
+        // changing which branch is taken.
+        provider.subtitleProductionTimeout = .milliseconds(200)
+
+        let result = await provider.data(forPath: "subs0/seg00004.vtt")
+        guard case .pending(let pending) = result else {
+            Issue.record("expected a pending serve")
+            return
+        }
+        // Empty is the only acceptable degradation: aborting the connection
+        // (.notFound) would fail the whole subtitle rendition.
+        guard case .data(let data, let contentType) = await pending.resolve() else {
+            Issue.record("a timed-out subtitle serve must still answer with a valid segment")
+            return
+        }
+        #expect(String(decoding: data, as: UTF8.self) == "WEBVTT\n\n")
+        #expect(contentType == "text/vtt")
+    }
+
+    @Test("without a published plan nothing is invented — a missing .vtt is a miss")
+    func noPlanNoFabrication() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = PlanSegmentProvider(root: root, coordinator: DemandCoordinator())
+        guard case .notFound = await provider.data(forPath: "subs0/seg00004.vtt") else {
+            Issue.record("a sequential session has no planned segments to stand in for")
+            return
+        }
+    }
+}
