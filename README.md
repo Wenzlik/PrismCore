@@ -28,11 +28,11 @@ The first integration is deliberately narrow — a *service*, not a player:
 
 ```swift
 let session = try PrismCoreSession(url: mkvURL)   // or with HTTP headers
-let playlistURL = try await session.start()       // http://127.0.0.1:<port>/master.m3u8
 
 // optional, before start(): a sidecar joins the WebVTT renditions (phase 6)
 try await session.addExternalSubtitle(url: srtURL, language: "cs", name: "Čeština")
-let playlistURL = try await session.start()       // http://127.0.0.1:<port>/index.m3u8
+
+let playlistURL = try await session.start()       // .../master.m3u8 or .../index.m3u8
 // hand playlistURL to AVPlayer (Aether: the Lumen path plays it)
 …
 await session.stop()
@@ -163,10 +163,6 @@ Prism, and Prism retires only at parity.
    on -11868 / -11848 / -1002, make a NEW session with it set. Still open:
    subtitle backfill after a re-anchor (a skipped range's `.vtt` serves as
    an honest empty segment — cues resume from the anchor).
-6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay (the
-   master + rendition plumbing multi-audio built is what they plug into); bitmap
-   (PGS/DVB) rendering for the fullscreen overlay.
-
 6. **Subtitles** *(text half implemented)* — every text subtitle stream
    (SubRip / ASS / SSA / WebVTT / mov_text) is converted during the remux read
    loop into a segmented WebVTT rendition (`subs<N>/seg%05d.vtt` +
@@ -180,12 +176,6 @@ Prism, and Prism retires only at parity.
    here: `SourceProbe` reports them (`SourceInfo.bitmapSubtitleTracks`) so the
    host can render them in its own overlay, and an OCR-fed rendition is a later
    idea, not this phase.
-7. **Software decode path** — libavcodec →
-   `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer` for what the
-   HLS-fMP4 pipeline can't carry (VP9/VP8, MPEG-2/VC-1/MPEG-4 ASP,
-   interlaced H.264 + deinterlace). This is the phase that lets Prism —
-   and with it the entire libmpv dependency — retire.
-
 7. **Software decode path** *(skeleton implemented; no session integration yet)*
    — libavcodec → `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer`
    under an `AVSampleBufferRenderSynchronizer` for what the HLS-fMP4 pipeline
@@ -211,21 +201,15 @@ same LGPL obligations already met.
 ## Status
 
 Early scaffold. `swift build` / `swift test` on macOS exercise the playlists,
-server, and audio-bridge pieces (the bridge's decode → resample → FIFO →
-encode chain runs end to end in tests over synthesized LPCM), plus end-to-end
-remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces) is
-served over the loopback, re-probed through libavformat's hls demuxer with both
-codecs and both languages intact, and reaches `.readyToPlay` in a real
+server, subtitle-rendition, and audio-bridge pieces (the bridge's decode →
+resample → FIFO → encode chain runs end to end in tests over synthesized LPCM),
+plus end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng +
+AC3 ces) is served over the loopback, re-probed through libavformat's hls demuxer
+with both codecs and both languages intact, and reaches `.readyToPlay` in a real
 `AVPlayer`. What fixtures can't carry still needs a device: the Atmos and Dolby
 Vision claims, actual track *switching* in AVKit's audio menu, and the EAC3
 output the bridge produces (which needs an FFmpeg build with that encoder
 enabled).
-
-Early scaffold. `swift build` / `swift test` on macOS exercise the playlist,
-server, subtitle-rendition, and audio-bridge pieces (the bridge's decode → resample → FIFO →
-encode chain runs end to end in tests over synthesized LPCM); the remux path
-needs a real media fixture and a device for the Atmos/DV claims, and the EAC3
-output itself needs an FFmpeg build with that encoder enabled.
 
 The software path (phase 7) is exercised headless as far as it can be: the VP9
 fixture decodes to `CVPixelBuffer`s of the right shape on a monotonic,
