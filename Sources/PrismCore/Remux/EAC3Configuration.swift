@@ -125,3 +125,104 @@ struct EAC3Configuration: Equatable {
         }
     }
 }
+
+// MARK: - Patching a produced init segment
+
+extension EAC3Configuration {
+
+    /// Add the TS 103 420 type-A (JOC / Atmos) declaration to the `dec3` box of a
+    /// produced fMP4 init segment.
+    ///
+    /// Returns `nil` when there is nothing to do — no `dec3`, or a box that
+    /// already declares the extension — so the caller keeps the muxer's bytes.
+    ///
+    /// The tail is two bytes: `reserved(7) + flag_ec3_extension_type_a(1)` then
+    /// `complexity_index_type_a(8)`. Two bytes that a box tree has to be told
+    /// about, which is the whole reason this isn't a one-line splice: every
+    /// ancestor's `size` field has to grow with it, or the tree stops parsing at
+    /// the first stale length.
+    static func patch(initSegment data: Data, atmosComplexityIndex index: Int) -> Data? {
+        guard (0...255).contains(index) else { return nil }
+        guard let located = locateDec3(in: data) else { return nil }
+
+        // Already declared: leave it be. This is what makes the patch idempotent
+        // and what will make it a no-op if FFmpeg ever starts carrying the
+        // extension itself.
+        if let existing = parse(dec3: [UInt8](data[located.payload])), existing.declaresAtmos {
+            return nil
+        }
+
+        var patched = data
+        // Append the tail to the payload first — the offsets below are still
+        // valid because insertion happens at the payload's END, so every
+        // ancestor's start offset is unchanged.
+        patched.insert(
+            contentsOf: [0x01, UInt8(index)],
+            at: located.payload.upperBound
+        )
+        // 0x01 is reserved(7)=0 + flag=1; the next byte is the index.
+
+        // Grow every enclosing box, innermost last so earlier writes don't move.
+        for boxStart in located.ancestorStarts + [located.boxStart] {
+            let current = Int(patched[boxStart]) << 24 | Int(patched[boxStart + 1]) << 16
+                | Int(patched[boxStart + 2]) << 8 | Int(patched[boxStart + 3])
+            let grown = current + 2
+            patched[boxStart] = UInt8((grown >> 24) & 0xFF)
+            patched[boxStart + 1] = UInt8((grown >> 16) & 0xFF)
+            patched[boxStart + 2] = UInt8((grown >> 8) & 0xFF)
+            patched[boxStart + 3] = UInt8(grown & 0xFF)
+        }
+        return patched
+    }
+
+    /// Where the `dec3` box is, and which boxes enclose it.
+    ///
+    /// The ancestor list is what makes growing the box safe: an fMP4 sample entry
+    /// is nested six deep (`moov/trak/mdia/minf/stbl/stsd/ec-3/dec3`) and each
+    /// level carries its own byte count.
+    private static func locateDec3(
+        in data: Data
+    ) -> (boxStart: Int, payload: Range<Int>, ancestorStarts: [Int])? {
+        func walk(
+            _ range: Range<Int>, ancestors: [Int]
+        ) -> (Int, Range<Int>, [Int])? {
+            var cursor = range.lowerBound
+            while cursor + 8 <= range.upperBound {
+                let size = Int(data[cursor]) << 24 | Int(data[cursor + 1]) << 16
+                    | Int(data[cursor + 2]) << 8 | Int(data[cursor + 3])
+                let type = String(decoding: data[(cursor + 4)..<(cursor + 8)], as: UTF8.self)
+                guard size >= 8, cursor + size <= range.upperBound else { return nil }
+                let payload = (cursor + 8)..<(cursor + size)
+
+                if type == "dec3" { return (cursor, payload, ancestors) }
+                switch type {
+                case "moov", "trak", "mdia", "minf", "stbl":
+                    if let found = walk(payload, ancestors: ancestors + [cursor]) { return found }
+                case "stsd":
+                    // version+flags(4) + entry_count(4) precede the entries.
+                    if payload.count > 8,
+                       let found = walk(
+                           (payload.lowerBound + 8)..<payload.upperBound,
+                           ancestors: ancestors + [cursor]
+                       ) {
+                        return found
+                    }
+                case "ec-3", "ac-3":
+                    // AudioSampleEntry's 28 fixed bytes precede its children.
+                    if payload.count > 28,
+                       let found = walk(
+                           (payload.lowerBound + 28)..<payload.upperBound,
+                           ancestors: ancestors + [cursor]
+                       ) {
+                        return found
+                    }
+                default:
+                    break
+                }
+                cursor += size
+            }
+            return nil
+        }
+        return walk(0..<data.count, ancestors: [])
+    }
+}

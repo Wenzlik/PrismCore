@@ -45,6 +45,16 @@ final class AudioRenditionWriter {
     /// matching the video's.
     private var pendingDuration: Double = 0
 
+    /// `complexity_index_type_a` sniffed out of this track's first readable
+    /// E-AC-3 syncframe, for the `dec3` box the muxer writes without it.
+    ///
+    /// Read from the bitstream rather than assumed from the probe's
+    /// `isObjectAudio`: the probe knows the track *claims* Atmos, but the index
+    /// is a number only the frame carries, and the box needs the number.
+    private var atmosComplexityIndex: Int?
+    /// Stop paying for the walk once it has answered.
+    private var atmosSniffDone = false
+
     static let initFileName = "init.mp4"
 
     init(route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL) {
@@ -114,6 +124,7 @@ final class AudioRenditionWriter {
 
     /// Push one source packet for this track through copy or bridge.
     func write(_ packet: UnsafeMutablePointer<AVPacket>, sourceTimeBase: AVRational) throws {
+        sniffAtmosIfNeeded(packet)
         if let bridge {
             // Timestamps arrive in the source stream's base (the bridge's
             // decoder is configured for it) and come back out on the encoder's.
@@ -132,6 +143,41 @@ final class AudioRenditionWriter {
         try bridge.flush { encoded in
             try self.emit(encoded, from: bridge.timeBase)
         }
+    }
+
+    /// Write the init segment, adding the JOC declaration the muxer omits.
+    ///
+    /// FFmpeg writes a `dec3` without the TS 103 420 extension even for a
+    /// stream-copied Atmos track, and that omission is the difference between
+    /// Atmos and plain DD+ at the speaker.
+    private func writeInitSegment(_ initSegment: Data) throws {
+        let bytes = atmosComplexityIndex.flatMap {
+            EAC3Configuration.patch(initSegment: initSegment, atmosComplexityIndex: $0)
+        } ?? initSegment
+        try bytes.write(
+            to: directory.appendingPathComponent(Self.initFileName),
+            options: .atomic
+        )
+    }
+
+    /// Look for the JOC declaration in the first readable E-AC-3 syncframe.
+    ///
+    /// Stream-copy only, and only when the probe already said this track claims
+    /// object audio — a bridged track's output is the encoder's and carries no
+    /// JOC, so declaring it there would promise Atmos that the bridge destroyed.
+    private func sniffAtmosIfNeeded(_ packet: UnsafeMutablePointer<AVPacket>) {
+        guard !atmosSniffDone, route.mode == .streamCopy,
+              track.isObjectAudio, track.codecName == "eac3",
+              let data = packet.pointee.data, packet.pointee.size > 0
+        else { return }
+        let bytes = [UInt8](UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)))
+        if let index = EAC3Syncframe.atmosComplexityIndex(in: bytes) {
+            atmosComplexityIndex = index
+            atmosSniffDone = true
+        }
+        // A frame that didn't answer leaves the sniff open: the first packet of a
+        // stream-copied track can be a partial frame, and the next one usually
+        // isn't.
     }
 
     /// Rescale onto this rendition's single output stream and mux.
@@ -164,10 +210,7 @@ final class AudioRenditionWriter {
         // The first cut mints the init segment; write it BEFORE the playlist
         // entry that references it.
         if let initSegment, !initSegment.isEmpty {
-            try initSegment.write(
-                to: directory.appendingPathComponent(Self.initFileName),
-                options: .atomic
-            )
+            try writeInitSegment(initSegment)
         }
         guard !media.isEmpty else {
             // Nothing to carry for this boundary (audio lagging the video's
@@ -193,10 +236,7 @@ final class AudioRenditionWriter {
     func finish(durationSeconds: Double, endList: Bool) throws {
         let (initSegment, media) = try writer.cutSegment()
         if let initSegment, !initSegment.isEmpty {
-            try initSegment.write(
-                to: directory.appendingPathComponent(Self.initFileName),
-                options: .atomic
-            )
+            try writeInitSegment(initSegment)
         }
         var finalSegment = media
         finalSegment.append(try writer.finish())

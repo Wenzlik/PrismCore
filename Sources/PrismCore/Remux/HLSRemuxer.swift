@@ -457,6 +457,21 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
 
+        // The muxed shape's Atmos track, if it has one. Only a stream-copied
+        // E-AC-3 track qualifies: the bridge's output carries no JOC.
+        let muxedAtmosTrack: AudioTrackInfo? = {
+            guard case .muxed(let audio) = shape, let audio, audio.mode == .streamCopy
+            else { return nil }
+            return info.audioTracks.first {
+                $0.streamIndex == Int(audio.index) && $0.isObjectAudio && $0.codecName == "eac3"
+            }
+        }()
+        /// `complexity_index_type_a` read out of the first readable syncframe.
+        /// Captured by `writeInitSegmentIfAbsent`, which needs it by the time the
+        /// first cut mints the moov — by then plenty of audio packets have gone
+        /// past, so it is there.
+        var muxedAtmosComplexityIndex: Int?
+
         /// Write the init segment the first time one is minted.
         ///
         /// Two things happen here. The `hvcC` gets its final correction: the muxer
@@ -469,7 +484,16 @@ final class HLSRemuxer: @unchecked Sendable {
         func writeInitSegmentIfAbsent(_ initSegment: Data) throws {
             let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
             guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
-            let bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            var bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            // And the JOC declaration FFmpeg leaves out of `dec3` — the
+            // difference between Atmos and plain DD+ at the speaker. Muxed shape
+            // only; a rendition patches its own init segment.
+            if let index = muxedAtmosComplexityIndex,
+               let withAtmos = EAC3Configuration.patch(
+                   initSegment: bytes, atmosComplexityIndex: index
+               ) {
+                bytes = withAtmos
+            }
             try bytes.write(to: initURL, options: .atomic)
         }
 
@@ -659,6 +683,18 @@ final class HLSRemuxer: @unchecked Sendable {
                         try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
                     }
                     continue
+                }
+
+                if let muxedAtmosTrack, muxedAtmosComplexityIndex == nil,
+                   streamIndex == muxedAtmosTrack.streamIndex,
+                   let data = packet.pointee.data, packet.pointee.size > 0 {
+                    // A partial first frame simply doesn't answer; the next one
+                    // usually does, so the sniff stays open until it succeeds.
+                    muxedAtmosComplexityIndex = EAC3Syncframe.atmosComplexityIndex(
+                        in: [UInt8](
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                    )
                 }
 
                 try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
