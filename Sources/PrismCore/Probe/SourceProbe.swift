@@ -222,6 +222,14 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let hevcConfiguration: HEVCConfigurationRecord?
     /// The `avcC` bytes, for H.264 sources (`nil` for anything else).
     public let avcConfiguration: AVCConfigurationRecord?
+    /// How many bytes each NAL unit's length prefix occupies in this stream's
+    /// packets (`lengthSizeMinusOne + 1`), read from the configuration record.
+    ///
+    /// Needed by anything that has to walk the packets' NAL units rather than
+    /// pass them through — today that is the Profile 7 → 8.1 RPU conversion.
+    /// `nil` for Annex-B sources and non-HEVC/AVC codecs, which is also exactly
+    /// when that conversion can't run.
+    public let nalUnitLengthSize: Int?
     public let dolbyVision: DolbyVisionConfiguration?
     public let dynamicRange: DynamicRange
     public let copyability: StreamCopyability
@@ -467,6 +475,23 @@ public enum SourceProbe {
             return AVCConfigurationRecord.parse(avcC: data)
         }()
 
+        // Both configuration records put `lengthSizeMinusOne` in their last two
+        // bits, at different offsets: byte 21 of an `hvcC`, byte 4 of an `avcC`.
+        let nalUnitLengthSize: Int? = {
+            guard let extradata = par.extradata, par.extradata_size > 0 else { return nil }
+            let data = Data(bytes: extradata, count: Int(par.extradata_size))
+            switch par.codec_id {
+            case AV_CODEC_ID_HEVC:
+                guard hevcConfiguration != nil else { return nil }
+                return HEVCNALUnits.lengthSize(fromHVCC: data)
+            case AV_CODEC_ID_H264:
+                guard avcConfiguration != nil, data.count > 4 else { return nil }
+                return Int(data[4] & 0x03) + 1
+            default:
+                return nil
+            }
+        }()
+
         let dolbyVision = readDolbyVisionConfiguration(stream.pointee.codecpar)
 
         // Frame rate: avg_frame_rate is the honest average over the whole
@@ -530,6 +555,7 @@ public enum SourceProbe {
             frameRateSource: frameRateSource,
             hevcConfiguration: hevcConfiguration,
             avcConfiguration: avcConfiguration,
+            nalUnitLengthSize: nalUnitLengthSize,
             dolbyVision: dolbyVision,
             dynamicRange: dynamicRange,
             copyability: copyableVideo.contains(par.codec_id) ? .streamCopy : .unsupported
