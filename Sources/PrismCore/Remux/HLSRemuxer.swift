@@ -278,7 +278,12 @@ final class HLSRemuxer: @unchecked Sendable {
                     outStream,
                     input: input,
                     videoIndex: videoIndex,
-                    dolbyVision: dolbyVisionConverter != nil ? outputDolbyVision : nil
+                    // The DV configuration to *declare*. Passed even when we are
+                    // not converting: it decides the sample entry's fourcc, and a
+                    // Profile 5 stream needs `dvh1` whatever else is true.
+                    declaredDolbyVision: outputDolbyVision,
+                    // Only a conversion has to replace the source's own record.
+                    rewriteDolbyVisionRecord: dolbyVisionConverter != nil
                 )
             }
         ]
@@ -818,7 +823,8 @@ final class HLSRemuxer: @unchecked Sendable {
         _ outStream: UnsafeMutablePointer<AVStream>,
         input: UnsafeMutablePointer<AVFormatContext>,
         videoIndex: Int32,
-        dolbyVision: DolbyVisionConfiguration?
+        declaredDolbyVision: DolbyVisionConfiguration?,
+        rewriteDolbyVisionRecord: Bool
     ) throws {
         let inStream = input.pointee.streams[Int(videoIndex)]!
         try FFmpegError.check(
@@ -826,7 +832,22 @@ final class HLSRemuxer: @unchecked Sendable {
             "avcodec_parameters_copy"
         )
         let par = outStream.pointee.codecpar!
-        par.pointee.codec_tag = 0
+        // Zero lets the muxer pick the fourcc, which for stream-copied HEVC is
+        // `hvc1` — right for everything except Dolby Vision Profile 5.
+        //
+        // P5 has no base layer: its picture is IPT-PQc2, not YCbCr, and the
+        // *sample entry* is the only thing that tells a decoder so. An `hvc1`
+        // entry over P5 decodes to the familiar green-and-purple picture, and it
+        // also contradicts the `dvh1.05.xx` the master playlist declares — a
+        // mismatch AVPlayer checks the manifest against. Declaring it in the
+        // manifest alone was the bug; the fourcc is the other half.
+        //
+        // 8.x deliberately keeps `hvc1`: its base layer IS plain-HEVC-compatible,
+        // and the `dvvC` box is what upgrades it. Saying `dvh1` there would deny
+        // the fallback that makes 8.1 worth having.
+        par.pointee.codec_tag = declaredDolbyVision?.isSingleLayerDVOnly == true
+            ? Self.fourCC("dvh1")
+            : 0
 
         // `hvcC` → `hvc1`-correct form. Only HEVC has the problem (an `avcC`
         // carries no arrays to normalize), and `normalize` returns nil when the
@@ -840,12 +861,25 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
 
-        // A converted P7 must be *declared* 8.1: movenc writes the `dvvC` box
-        // from this side data, and a box that still said profile 7 would send an
+        // A converted P7 must be *declared* 8.1: movenc writes the `dvcC`/`dvvC`
+        // box from this side data (picking the fourcc by profile — `dvcC` through
+        // 7, `dvvC` from 8), and a box that still said profile 7 would send an
         // Apple TV looking for an enhancement layer that is no longer there.
-        if let dolbyVision {
-            try Self.setDolbyVisionConfiguration(dolbyVision, on: par)
+        // Unconverted sources keep the record `avcodec_parameters_copy` brought
+        // across, which is already theirs.
+        if rewriteDolbyVisionRecord, let declaredDolbyVision {
+            try Self.setDolbyVisionConfiguration(declaredDolbyVision, on: par)
         }
+    }
+
+    /// A big-endian fourcc as libavcodec's `codec_tag` wants it: first character
+    /// in the low byte (what FFmpeg's `MKTAG` macro builds, and the macro doesn't
+    /// survive the C importer).
+    static func fourCC(_ code: String) -> UInt32 {
+        let bytes = Array(code.utf8)
+        precondition(bytes.count == 4, "a fourcc is four ASCII characters")
+        return UInt32(bytes[0]) | UInt32(bytes[1]) << 8
+            | UInt32(bytes[2]) << 16 | UInt32(bytes[3]) << 24
     }
 
     /// Replace a codecpar's extradata with `data`.

@@ -98,6 +98,29 @@ for stream-copied EAC3+JOC, never for the audio bridge's output: that path
 decoded to PCM and re-encoded with an encoder that produces no JOC, so it is
 surround, not Atmos.
 
+The playlist attribute is necessary but it is **not what engages Atmos**.
+AVFoundation takes the Dolby/MAT route only when the **`dec3` box** in the init
+segment carries the TS 103 420 type-A extension (`flag_ec3_extension_type_a` +
+`complexity_index_type_a`); without it the same bitstream plays as plain DD+.
+That is a device finding rather than a spec reading — Aether's own remuxer paid
+for it (#976 step-0) — and PrismCore doesn't write the box itself, FFmpeg's
+`movenc` does, from frames it accumulates while muxing. Under `delay_moov` the
+moov is written after only the first few frames, which is exactly where a
+frame-accumulating writer can come up short, so `EAC3Configuration` reads the
+box back out of the produced init segment instead of trusting it. What a
+synthetic fixture can prove is pinned by a test (the box exists, frames
+correctly, describes the right bed); that the extension survives a stream-copy
+needs a real Atmos file and a device.
+
+Dolby Vision Profile 5 gets `dvh1` as its **sample entry fourcc**, not just in
+the manifest's `CODECS`. P5 has no base layer — the picture is IPT-PQc2, not
+YCbCr — and the sample entry is the only thing that tells a decoder so, which is
+why an `hvc1` entry over P5 renders the familiar green-and-purple picture. It
+would also contradict the `dvh1.05.xx` the master declares, a mismatch AVPlayer
+checks the manifest against. Profile 8.x deliberately keeps `hvc1`: its base
+layer really is plain-HEVC-compatible and the `dvvC` box is what upgrades it, so
+claiming `dvh1` there would deny the very fallback that makes 8.1 worth having.
+
 A source whose master playlist can't be written honestly (no derivable `CODECS`
 string, or a dynamic range this display hasn't been vouched for — see
 `PrismCoreSession`'s `displayIsHDRReady`) falls back to v0's shape: one audio
