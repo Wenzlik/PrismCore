@@ -370,18 +370,38 @@ public enum SourceProbe {
     }
 
     /// Codecs AVPlayer's HLS-fMP4 pipeline accepts via stream-copy.
-    /// Deliberately the same sets `HLSRemuxer` enforces — the probe's verdict
+    /// Deliberately the same set `HLSRemuxer` enforces — the probe's verdict
     /// has to match what the remuxer will actually accept.
     private static let copyableVideo: Set<AVCodecID> = [AV_CODEC_ID_H264, AV_CODEC_ID_HEVC]
     private static let copyableAudio: Set<AVCodecID> = [
         AV_CODEC_ID_AAC, AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3,
         AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC,
     ]
-    /// Lossless/high-bitrate audio the fMP4 pipeline can't carry but the
-    /// phase-3 bridge can re-encode to EAC3.
-    private static let bridgeableAudio: Set<AVCodecID> = [
-        AV_CODEC_ID_TRUEHD, AV_CODEC_ID_DTS, AV_CODEC_ID_MLP,
-    ]
+    /// Audio the fMP4 pipeline can't carry but the phase-3 bridge can re-encode
+    /// to EAC3.
+    ///
+    /// Deliberately `AudioBridge`'s own set rather than a copy of it. It used to
+    /// be a copy, and the copy drifted: the bridge grew MP3/MP2/Opus/Vorbis/PCM
+    /// while this list stayed at the three lossless codecs, so the probe reported
+    /// an MP3-audio MKV as `.unsupported` — a verdict the remuxer disagreed with,
+    /// since its own routing asks `AudioBridge.canBridge`. The drift was invisible
+    /// only because the EAC3 encoder is absent from stock MPVKit, which makes
+    /// *everything* unbridgeable; it would have surfaced the day the fork enables
+    /// the encoder. One set, no synchronizing.
+    private static func isBridgeable(_ codecID: AVCodecID) -> Bool {
+        // A decoder has to exist too — a codec in the bridgeable class that this
+        // build can't decode is not bridgeable, it is unsupported. The *encoder*
+        // question deliberately stays out: `.requiresAudioBridge` describes the
+        // stream, and whether the bridge can run today is the router's call (see
+        // `PrismCoreEngine.decide`, which takes it as a parameter).
+        AudioBridge.bridgeableAudio.contains(codecID) && avcodec_find_decoder(codecID) != nil
+    }
+
+    /// `isBridgeable` for the test that pins it against `AudioBridge`'s set.
+    /// Exists so the classifier itself can stay private.
+    static func isBridgeableForTesting(_ codecID: AVCodecID) -> Bool {
+        isBridgeable(codecID)
+    }
 
     public static func probe(url: URL, httpHeaders: [String: String] = [:]) throws -> SourceInfo {
         var input: UnsafeMutablePointer<AVFormatContext>?
@@ -609,7 +629,7 @@ public enum SourceProbe {
         let copyability: StreamCopyability
         if copyableAudio.contains(par.codec_id) {
             copyability = .streamCopy
-        } else if bridgeableAudio.contains(par.codec_id) {
+        } else if isBridgeable(par.codec_id) {
             copyability = .requiresAudioBridge
         } else {
             copyability = .unsupported

@@ -37,8 +37,8 @@ let package = Package(
             dependencies: ["PrismCore"],
             resources: [
                 // Synthetic A/V fixtures (ffmpeg-generated testsrc2 + sine,
-                // seconds long, ~KBs each) — enough to prove the remux
-                // round-trip. The claims fixtures CAN'T carry — Atmos
+                // seconds long) — enough to prove the remux round-trip and to
+                // pin each routing outcome to a real container. The claims fixtures CAN'T carry — Atmos
                 // (EAC3+JOC needs a real object-audio encode) and Dolby
                 // Vision (real RPUs) — stay manual smoke tests on real media.
                 .copy("Fixtures"),
