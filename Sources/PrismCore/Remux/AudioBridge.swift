@@ -804,6 +804,20 @@ struct BridgeClock {
     /// continuous.
     private var expectedInputPTS: Int64?
 
+    /// Spelled out rather than left to the memberwise initializer.
+    ///
+    /// A struct with `private` stored properties gets a `private` memberwise
+    /// init, and `private` means *this declaration's scope* — not the file. So
+    /// `AudioBridge`, a different type a few hundred lines up in this same file,
+    /// could not call it. Xcode 26.6 rejects that outright; a newer Swift lets it
+    /// through, which is how it reached a release: every local build here runs on
+    /// the beta toolchain, and Xcode Cloud — on the stable one — failed the
+    /// archive (Aether build 358).
+    init(sampleRate: Int32, gapTolerance: Int64) {
+        self.sampleRate = sampleRate
+        self.gapTolerance = gapTolerance
+    }
+
     /// Record a decoded frame *before* its samples enter the FIFO.
     ///
     /// - Parameters:
