@@ -472,6 +472,21 @@ final class HLSRemuxer: @unchecked Sendable {
         /// past, so it is there.
         var muxedAtmosComplexityIndex: Int?
 
+        // Sources whose VPS/SPS/PPS travel in band ship a 23-byte `hvcC` with no
+        // arrays, and FFmpeg then writes an empty box — an `hvc1` entry promising
+        // parameter sets that aren't there. Harvest them from the bitstream and
+        // fill the record in when the init segment is written.
+        let videoExtradata: Data? = {
+            let par = input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee
+            guard let extradata = par.extradata, par.extradata_size > 0 else { return nil }
+            return Data(bytes: extradata, count: Int(par.extradata_size))
+        }()
+        let needsParameterSetHarvest = videoTrack.codecName == "hevc"
+            && videoTrack.nalUnitLengthSize != nil
+            && videoExtradata.map(HVCCNormalizer.carriesNoParameterSets(hvcC:)) == true
+        /// NAL type → units, deduplicated. VPS/SPS/PPS only.
+        var harvestedParameterSets: [UInt8: [[UInt8]]] = [:]
+
         /// Write the init segment the first time one is minted.
         ///
         /// Two things happen here. The `hvcC` gets its final correction: the muxer
@@ -485,6 +500,15 @@ final class HLSRemuxer: @unchecked Sendable {
             let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
             guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
             var bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            // Fill in parameter sets the source never put in its record.
+            if needsParameterSetHarvest, let sourceRecord = videoExtradata,
+               let filled = HVCCNormalizer.patch(
+                   initSegment: bytes,
+                   sourceRecord: sourceRecord,
+                   withParameterSets: harvestedParameterSets
+               ) {
+                bytes = filled
+            }
             // And the JOC declaration FFmpeg leaves out of `dec3` — the
             // difference between Atmos and plain DD+ at the speaker. Muxed shape
             // only; a rendition patches its own init segment.
@@ -660,6 +684,24 @@ final class HLSRemuxer: @unchecked Sendable {
                         )
                         if let converted = dolbyVisionConverter.convert(packet: original) {
                             try Self.replacePayload(of: packet, with: converted)
+                        }
+                    }
+                    if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
+                       let lengthSize = videoTrack.nalUnitLengthSize,
+                       let data = packet.pointee.data, packet.pointee.size > 0 {
+                        // Keyframes carry the sets; a non-keyframe simply yields
+                        // nothing and the next packet gets a turn.
+                        let bytes = [UInt8](
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                        for unit in HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) ?? []
+                        where HVCCNormalizer.keptNALTypes.contains(unit.type) && unit.layerID == 0 {
+                            let value = Array(unit.bytes)
+                            var existing = harvestedParameterSets[unit.type] ?? []
+                            if !existing.contains(value) {
+                                existing.append(value)
+                                harvestedParameterSets[unit.type] = existing
+                            }
                         }
                     }
                     if let mapped = streamMap[streamIndex] {

@@ -277,6 +277,16 @@ Prism, and Prism retires only at parity.
      two — and a shifted walk does not fail, it returns a confident wrong
      number. An early version reported a plausible index from a misaligned read;
      only matching the reference implementation field for field made it right.
+   - **Parameter sets get harvested when the source keeps them in band.** Some
+     MP4 and MPEG-TS sources ship a 23-byte `hvcC` with `numOfArrays = 0` — their
+     VPS/SPS/PPS travel with the samples. The record parses, so a `CODECS` string
+     can be derived from it, but FFmpeg writes an **empty** `hvcC` box and an
+     `hvc1` entry then promises parameter sets that aren't there, leaving AVPlayer
+     nothing to configure a decoder from. So they are collected off the first
+     keyframes and filled into the record when the init segment is written
+     (`HVCCNormalizer.record(fillingIn:withParameterSets:)`), keeping the
+     22-byte profile_tier_level header verbatim so the manifest's claim still
+     describes the media.
    - **The Dolby Vision box needs `-strict unofficial`.** `dvcC`/`dvvC` are
      Dolby's specification rather than ISO's, so movenc refuses to write them by
      default ("Not writing 'dvcC'/'dvvC' box. Requires -strict unofficial") — and

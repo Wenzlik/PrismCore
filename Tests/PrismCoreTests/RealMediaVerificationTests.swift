@@ -167,22 +167,12 @@ struct RealMediaVerificationTests {
         // hvcC: nothing left to normalize, and the PTL unchanged from the source.
         if let record = findBoxPayload("hvcC", in: initSegment) {
             print("served hvcC: \(record.count) bytes")
-            if record.isEmpty {
-                // KNOWN GAP. Some MP4/TS sources carry a parameter-set-LESS
-                // configuration record (23 bytes, numOfArrays = 0) because their
-                // VPS/SPS/PPS live in band. FFmpeg's mp4 muxer then writes an
-                // empty `hvcC`, which an `hvc1` sample entry contradicts — the
-                // entry promises parameter sets that aren't there, and AVPlayer
-                // has nothing to configure a decoder from. Reproduced with plain
-                // `ffmpeg -c copy`, so it is the muxer's behaviour rather than
-                // ours, but it is ours to handle: such a source should either be
-                // declined or have its parameter sets harvested from the
-                // bitstream.
-                withKnownIssue("source has no parameter sets in its configuration record") {
-                    Issue.record("served hvcC is empty — this source is not playable as served")
-                }
-                return
-            }
+            // Not empty, even when the source's own record carried no parameter
+            // sets: those get harvested from the bitstream and filled in, because
+            // FFmpeg writes an empty box for such a source and an `hvc1` entry
+            // then promises parameter sets that aren't there.
+            #expect(!record.isEmpty, "served hvcC is empty — nothing to configure a decoder from")
+            guard !record.isEmpty else { return }
             #expect(
                 HVCCNormalizer.normalize(hvcC: record) == nil,
                 "the served hvcC still needs normalizing"

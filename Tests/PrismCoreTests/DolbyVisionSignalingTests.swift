@@ -711,3 +711,96 @@ private struct BitAccumulator {
         }
     }
 }
+
+// MARK: - Filling in a parameter-set-less record
+
+@Suite("Parameter-set harvesting")
+struct ParameterSetFillTests {
+
+    /// The shape some MP4/TS sources ship: a valid 23-byte header, no arrays.
+    private func emptyRecord() -> Data {
+        var bytes = [UInt8](repeating: 0, count: 23)
+        bytes[0] = 1
+        bytes[1] = 2        // profile_space 0, tier 0, profile_idc 2
+        bytes[2] = 0x20     // compatibility flags 0x20000000
+        bytes[6] = 0xB0
+        bytes[12] = 153     // level 5.1
+        bytes[21] = 3       // lengthSizeMinusOne
+        bytes[22] = 0       // numOfArrays
+        return Data(bytes)
+    }
+
+    @Test("a record with no arrays is recognized as carrying no parameter sets")
+    func recognizesEmptyRecord() {
+        #expect(HVCCNormalizer.carriesNoParameterSets(hvcC: emptyRecord()))
+        let withSets = hvcC(arrays: [(type: 33, complete: true, units: [sps])])
+        #expect(HVCCNormalizer.carriesNoParameterSets(hvcC: withSets) == false)
+    }
+
+    @Test("filling in keeps the profile_tier_level byte for byte")
+    func keepsHeader() throws {
+        let source = emptyRecord()
+        let filled = try #require(
+            HVCCNormalizer.record(
+                fillingIn: source, withParameterSets: [32: [vps], 33: [sps], 34: [pps]]
+            )
+        )
+        // The CODECS string is printed from this header, so filling arrays must
+        // not change what the manifest already claimed.
+        #expect(filled.prefix(22) == source.prefix(22))
+        #expect(HEVCConfigurationRecord.parse(hvcC: filled) == HEVCConfigurationRecord.parse(hvcC: source))
+    }
+
+    @Test("the filled record is already in hvc1 form")
+    func fillsInNormalizedForm() throws {
+        let filled = try #require(
+            HVCCNormalizer.record(
+                fillingIn: emptyRecord(), withParameterSets: [32: [vps], 33: [sps], 34: [pps]]
+            )
+        )
+        // Nothing left for the normalizer to do: arrays in VPS/SPS/PPS order,
+        // completeness asserted.
+        #expect(HVCCNormalizer.normalize(hvcC: filled) == nil)
+        #expect(arrays(of: filled).map(\.type) == [32, 33, 34])
+    }
+
+    @Test("without an SPS there is nothing worth filling in")
+    func refusesWithoutSPS() {
+        #expect(
+            HVCCNormalizer.record(fillingIn: emptyRecord(), withParameterSets: [32: [vps]]) == nil
+        )
+        #expect(HVCCNormalizer.record(fillingIn: emptyRecord(), withParameterSets: [:]) == nil)
+    }
+
+    @Test("growing a box re-frames every enclosing size")
+    func reframesAncestors() throws {
+        // moov > trak > mdia > minf > stbl > stsd > hvc1 > hvcC, the real depth.
+        func box(_ type: String, _ payload: [UInt8]) -> [UInt8] {
+            let size = payload.count + 8
+            return [
+                UInt8((size >> 24) & 0xFF), UInt8((size >> 16) & 0xFF),
+                UInt8((size >> 8) & 0xFF), UInt8(size & 0xFF),
+            ] + Array(type.utf8) + payload
+        }
+        let hvcCBox = box("hvcC", [1, 2, 3])
+        let entry = box("hvc1", [UInt8](repeating: 0, count: 78) + hvcCBox)
+        let stsd = box("stsd", [0, 0, 0, 0, 0, 0, 0, 1] + entry)
+        let tree = box("moov", box("trak", box("mdia", box("minf", box("stbl", stsd)))))
+
+        let data = Data(tree)
+        let location = try #require(ISOBMFFPatch.locate("hvcC", in: data))
+        // moov, trak, mdia, minf, stbl, stsd, hvc1 — the real nesting depth.
+        #expect(location.ancestorStarts.count == 7)
+        let grown = ISOBMFFPatch.replacePayload(
+            at: location, in: data, with: Data([1, 2, 3, 4, 5])
+        )
+        #expect(grown.count == data.count + 2)
+        // Every level has to agree with the new length, or the tree stops parsing
+        // at the first stale one — which is exactly how an empty box appears.
+        let relocated = try #require(ISOBMFFPatch.locate("hvcC", in: grown))
+        #expect(grown.subdata(in: relocated.payload) == Data([1, 2, 3, 4, 5]))
+        let outerSize = Int(grown[0]) << 24 | Int(grown[1]) << 16
+            | Int(grown[2]) << 8 | Int(grown[3])
+        #expect(outerSize == grown.count)
+    }
+}
