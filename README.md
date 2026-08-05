@@ -154,12 +154,15 @@ Prism, and Prism retires only at parity.
    panel. Still open in this phase: `hvcC` normalization, the P7 conversion,
    the actual panel read, and the master-rejection fallback (reload the media
    playlist when AVPlayer refuses a master, `-11868` / `-11848` / `-1002`).
-5. **Seek & cache** *(seek implemented)* — keyframe-aligned `SegmentPlan`,
+5. **Seek & cache** *(implemented)* — keyframe-aligned `SegmentPlan`,
    planned VOD playlists, demand-driven producer with re-anchoring and
-   absolute-`tfdt` restart continuity, EOF parking. Still open:
-   byte-budgeted retention (segments currently accumulate for the session's
-   lifetime) and subtitle backfill after a re-anchor (a skipped range's
-   `.vtt` serves as an honest empty segment — cues resume from the anchor).
+   absolute-`tfdt` restart continuity, EOF parking, byte-budgeted retention
+   (`segmentCacheBytes`, default 1 GiB; planned mode only — an evicted
+   segment is reproduced on demand, so the budget bounds disk, not
+   seekability). `forceMuxedShape` is the host's master-rejection fallback:
+   on -11868 / -11848 / -1002, make a NEW session with it set. Still open:
+   subtitle backfill after a re-anchor (a skipped range's `.vtt` serves as
+   an honest empty segment — cues resume from the anchor).
 6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay (the
    master + rendition plumbing multi-audio built is what they plug into); bitmap
    (PGS/DVB) rendering for the fullscreen overlay.

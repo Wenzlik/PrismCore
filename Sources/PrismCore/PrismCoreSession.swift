@@ -51,11 +51,23 @@ public actor PrismCoreSession {
     ///     read instead of a parameter.
     ///   - displayIsDolbyVisionCapable: whether that display can present Dolby
     ///     Vision. Same reasoning; `false` simply omits the DV claims.
+    ///   - segmentCacheBytes: disk budget for produced segments. Only
+    ///     enforced when the source got a demand-driven plan — there a deleted
+    ///     segment is reproduced on the next fetch, so the budget bounds disk,
+    ///     not seekability. `nil` keeps everything for the session's lifetime.
+    ///   - forceMuxedShape: skip the master/renditions shape and mux the one
+    ///     best audio track into the variant (v0 shape). This is the host's
+    ///     fallback when AVPlayer refuses a served master (-11868 / -11848 /
+    ///     -1002): make a NEW session with this set — the rejected master's
+    ///     variant alone would be silent video, renditions live only in
+    ///     masters.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
         displayIsHDRReady: Bool = false,
-        displayIsDolbyVisionCapable: Bool = false
+        displayIsDolbyVisionCapable: Bool = false,
+        segmentCacheBytes: Int? = 1 << 30,
+        forceMuxedShape: Bool = false
     ) throws {
         self.sourceURL = url
         self.httpHeaders = httpHeaders
@@ -79,7 +91,9 @@ public actor PrismCoreSession {
             outputDirectory: directory,
             displayIsHDRReady: displayIsHDRReady,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable,
-            demand: demand
+            demand: demand,
+            segmentCacheBytes: segmentCacheBytes,
+            forceMuxed: forceMuxedShape
         )
     }
 
