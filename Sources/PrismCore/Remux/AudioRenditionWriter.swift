@@ -238,7 +238,10 @@ final class AudioRenditionWriter {
             name: renditionName,
             language: sourceLanguage,
             codecString: outputCodecString,
-            channels: outputChannelCount.map(String.init),
+            channels: MasterPlaylistBuilder.channelsAttribute(
+                channelCount: outputChannelCount,
+                isObjectAudio: outputCarriesObjectAudio
+            ),
             uri: playlistURI,
             isDefault: isDefault
         )
@@ -282,6 +285,23 @@ final class AudioRenditionWriter {
             return track.channelCount > 0 ? track.channelCount : nil
         case .bridge:
             return bridge?.outputChannelCount
+        }
+    }
+
+    /// Whether the bits this rendition actually serves carry object audio, which
+    /// is what earns `CHANNELS="16/JOC"`.
+    ///
+    /// True only for a **stream-copied** Atmos EAC3 track. The bridge is excluded
+    /// on principle rather than by measurement: it decodes to PCM and re-encodes
+    /// with an encoder that produces no JOC, so a bridged TrueHD-Atmos source
+    /// comes out as plain surround. Declaring otherwise would promise an Atmos
+    /// rendition that isn't one.
+    private var outputCarriesObjectAudio: Bool {
+        switch route.mode {
+        case .streamCopy:
+            return track.isObjectAudio && track.codecName == "eac3"
+        case .bridge:
+            return false
         }
     }
 }

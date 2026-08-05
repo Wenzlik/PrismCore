@@ -523,6 +523,7 @@ struct SourceInfoRoutingTests {
             sampleRate: 48_000,
             language: "eng",
             title: nil,
+            isObjectAudio: false,
             copyability: copyability
         )
     }

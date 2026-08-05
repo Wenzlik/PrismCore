@@ -16,6 +16,11 @@ struct PlanSegmentProvider: SegmentProvider {
     /// connection (truncated transfer → AVPlayer retries). A re-anchor is a
     /// demuxer seek + fresh muxers — seconds, not minutes.
     var productionTimeout: Duration = .seconds(15)
+    /// How long a subtitle segment may wait. Shorter than a media segment's
+    /// window: the cues arrive when the segment carrying them is cut, so if that
+    /// hasn't happened by now the producer went somewhere else entirely and
+    /// waiting longer buys nothing.
+    var subtitleProductionTimeout: Duration = .seconds(8)
 
     private let directory: DirectorySegmentProvider
 
@@ -47,13 +52,25 @@ struct PlanSegmentProvider: SegmentProvider {
             return .pending(waitForFile(path: path))
         }
         if path.hasSuffix(".vtt") {
-            // A subtitle segment for a range nobody produced yet. Cues only
-            // exist once their range has been demuxed, and blocking the whole
-            // item on subtitles would be backwards — serve an honest empty
-            // segment. AVPlayer re-fetches nothing (segments are cached), so
-            // a seek-ahead's subtitles start at the NEXT segment; recorded as
-            // a known phase-6.1 gap in the README.
-            return .data(Data("WEBVTT\n\n".utf8), contentType: "text/vtt")
+            // A subtitle segment for a range nobody has demuxed yet. Serving the
+            // empty segment immediately is safe but wrong in the common case: the
+            // fetch that arrives with it is AVPlayer asking for the *media*
+            // segment of the same index, which re-anchors the producer, and the
+            // cues land the moment that segment is cut — a second or two away.
+            // AVPlayer caches segments and never re-fetches, so answering empty
+            // straight away is what made subtitles resume only from the segment
+            // AFTER a seek.
+            //
+            // So wait, then degrade. Unlike a media segment, a subtitle segment
+            // that never arrives must not abort the connection: empty cues are a
+            // far better outcome than a failed rendition.
+            return .pending(
+                waitForFile(
+                    path: path,
+                    timeout: subtitleProductionTimeout,
+                    onTimeout: .data(Self.emptyWebVTT, contentType: "text/vtt")
+                )
+            )
         }
         return .notFound
     }
@@ -65,10 +82,20 @@ struct PlanSegmentProvider: SegmentProvider {
         return Int(name.dropFirst(3).dropLast(4))
     }
 
-    private func waitForFile(path: String) -> PendingResult {
+    /// A header-only WebVTT segment: valid, parseable, no cues.
+    static let emptyWebVTT = Data("WEBVTT\n\n".utf8)
+
+    /// - Parameter onTimeout: what to answer when the file never lands.
+    ///   `.notFound` aborts the connection, which is right for media (a truncated
+    ///   transfer makes AVPlayer retry) and wrong for subtitles.
+    private func waitForFile(
+        path: String,
+        timeout: Duration? = nil,
+        onTimeout: ProviderResult = .notFound
+    ) -> PendingResult {
         let fileURL = root.appendingPathComponent(path)
         let contentType = LoopbackHTTPServer.contentType(for: fileURL)
-        let timeout = productionTimeout
+        let timeout = timeout ?? productionTimeout
         return PendingResult {
             // Clock starts when the SERVE runs, not when the miss was seen —
             // a queued pending must get its full window.
@@ -79,7 +106,7 @@ struct PlanSegmentProvider: SegmentProvider {
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            return .notFound
+            return onTimeout
         }
     }
 }

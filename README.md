@@ -65,6 +65,15 @@ switch on — parity with the libmpv player PrismCore replaces, whose track menu
 the host app already exposes. Audio cuts follow the **video's** segment
 boundaries so the renditions stay comparable, which is what HLS asks of them.
 
+An Atmos track declares `CHANNELS="16/JOC"` rather than its bed's channel count
+(which reads 6). The declaration is not cosmetic: the objects reach an AVR either
+way, since the stream is copied untouched and the receiver is what decodes JOC —
+but without it AVFoundation cannot know the rendition is Atmos, so it can't
+prefer it in a selection group and tvOS won't badge it. It is claimed **only**
+for stream-copied EAC3+JOC, never for the audio bridge's output: that path
+decoded to PCM and re-encoded with an encoder that produces no JOC, so it is
+surround, not Atmos.
+
 A source whose master playlist can't be written honestly (no derivable `CODECS`
 string, or a dynamic range this display hasn't been vouched for — see
 `PrismCoreSession`'s `displayIsHDRReady`) falls back to v0's shape: one audio
@@ -189,9 +198,19 @@ Prism, and Prism retires only at parity.
    (`segmentCacheBytes`, default 1 GiB; planned mode only — an evicted
    segment is reproduced on demand, so the budget bounds disk, not
    seekability). `forceMuxedShape` is the host's master-rejection fallback:
-   on -11868 / -11848 / -1002, make a NEW session with it set. Still open:
-   subtitle backfill after a re-anchor (a skipped range's `.vtt` serves as
-   an honest empty segment — cues resume from the anchor).
+   on -11868 / -11848 / -1002, make a NEW session with it set.
+
+   Subtitles across a re-anchor were the last open item here and are now closed.
+   A planned `.vtt` for a range nobody has demuxed used to be answered with an
+   empty segment *immediately*, which was safe but wrong in the common case: the
+   fetch that arrives alongside it is AVPlayer asking for the media segment of
+   the same index, which re-anchors the producer, so the cues are a second or two
+   away — and because AVPlayer caches segments and never re-fetches, answering
+   empty straight away is what made subtitles resume only from the segment
+   *after* a seek. `PlanSegmentProvider` now waits
+   (`subtitleProductionTimeout`, 8 s) and degrades to the empty segment only if
+   the range genuinely never lands. A subtitle serve never aborts the connection
+   the way a media serve does: empty cues beat a failed rendition.
 6. **Subtitles** *(text half implemented)* — every text subtitle stream
    (SubRip / ASS / SSA / WebVTT / mov_text) is converted during the remux read
    loop into a segmented WebVTT rendition (`subs<N>/seg%05d.vtt` +
@@ -239,6 +258,18 @@ with both codecs and both languages intact, and reaches `.readyToPlay` in a real
 Vision claims, actual track *switching* in AVKit's audio menu, and the EAC3
 output the bridge produces (which needs an FFmpeg build with that encoder
 enabled).
+
+Worth being precise about those two headline claims, because "implemented" and
+"working" are not the same thing here. **Atmos**: EAC3+JOC stream-copies (proved
+on a fixture — the codec survives the remux round-trip) and the rendition now
+declares `CHANNELS="16/JOC"` (the rule is unit-tested). Whether the objects
+actually reach a receiver over HDMI is untested; no synthetic fixture can carry
+JOC. **Dolby Vision**: the whole signaling path exists — `SUPPLEMENTAL-CODECS`,
+the `dvvC` box, the P5 `dvh1` primary, P7→8.1 conversion, panel-readiness gating
+— and every rule is pinned by a unit test, but **no RPU has ever passed through
+libdovi here**: the library links and the code compiles, and that is all a
+fixture can establish. Both claims need a device, and Dolby Vision needs a real
+Profile 7 file.
 
 The software path (phase 7) is exercised headless as far as it can be: the VP9
 fixture decodes to `CVPixelBuffer`s of the right shape on a monotonic,
