@@ -117,30 +117,34 @@ enum EAC3Syncframe {
             if lfeon == 1, reader.read(1) == 1 {
                 guard reader.skip(5) else { return nil }                       // lfemixlevcod
             }
-            // strmtyp == 0: mixing info for downstream mixers.
-            for _ in 0..<(acmod == 0 ? 2 : 1) {
-                if reader.read(1) == 1 { guard reader.skip(6) else { return nil } }  // pgmscl
-            }
-            if reader.read(1) == 1 { guard reader.skip(6) else { return nil } }      // extpgmscl
-            switch reader.read(2) {                                           // mixdef
-            case 1: guard reader.skip(5) else { return nil }
-            case 2: guard reader.skip(12) else { return nil }
-            case 3:
-                guard let mixdeflen = reader.read(5),
-                      reader.skip((mixdeflen + 2) * 8) else { return nil }
-            default: break
-            }
-            if acmod < 2 {                                                    // pan info
+            // Everything from here to the end of the mixing block exists on
+            // INDEPENDENT substreams only. Reading it on a dependent one walks
+            // straight off the rails — this was the last misalignment keeping the
+            // JOC flag out of reach, and `ac3_parser.c` is where the guard is
+            // visible (`if (hdr->frame_type == EAC3_FRAME_TYPE_INDEPENDENT)`).
+            if !isDependent {
                 for _ in 0..<(acmod == 0 ? 2 : 1) {
-                    if reader.read(1) == 1 { guard reader.skip(14) else { return nil } }
+                    if reader.read(1) == 1 { guard reader.skip(6) else { return nil } }  // pgmscl
                 }
-            }
-            if reader.read(1) == 1 {                                          // frmmixcfginfoe
-                if numblks == 1 {
-                    guard reader.skip(5) else { return nil }
-                } else {
+                if reader.read(1) == 1 { guard reader.skip(6) else { return nil } }      // extpgmscl
+                switch reader.read(2) {                                       // mixdef
+                case 1: guard reader.skip(5) else { return nil }
+                case 2: guard reader.skip(12) else { return nil }
+                case 3:
+                    guard let mixdeflen = reader.read(5),
+                          reader.skip((mixdeflen + 2) * 8) else { return nil }
+                default: break
+                }
+                if acmod < 2 {                                                // pan info
+                    for _ in 0..<(acmod == 0 ? 2 : 1) {
+                        if reader.read(1) == 1 { guard reader.skip(14) else { return nil } }
+                    }
+                }
+                if reader.read(1) == 1 {                                      // frmmixcfginfoe
                     for _ in 0..<numblks {
-                        if reader.read(1) == 1 { guard reader.skip(5) else { return nil } }
+                        if numblks == 1 || reader.read(1) == 1 {
+                            guard reader.skip(5) else { return nil }
+                        }
                     }
                 }
             }
@@ -157,8 +161,15 @@ enum EAC3Syncframe {
             guard reader.skip(1) else { return nil }             // sourcefscod (fscod != 3)
         }
 
-        // Converter sync flag, on independent streams shorter than six blocks.
-        if numblks != 6 { guard reader.skip(1) else { return nil } }
+        // Converter sync flag — INDEPENDENT streams only, and only when they are
+        // shorter than six blocks (RFC 4598 frame sets). Reading it for a
+        // dependent substream shifts everything after it by one bit, and a
+        // one-bit shift is what produced a confident, consistent, *wrong*
+        // complexity index the first time this accepted dependent substreams.
+        // Field placement follows libavcodec's `ac3_parser.c` rather than a
+        // reading of the spec, because that is the code whose answer ffprobe
+        // prints.
+        if !isDependent, numblks != 6 { guard reader.skip(1) else { return nil } }
 
         // addbsi: first byte is reserved(7) + flag_ec3_extension_type_a(1),
         // second is complexity_index_type_a.

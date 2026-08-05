@@ -227,21 +227,17 @@ struct RealMediaVerificationTests {
             let dec3 = try #require(dec3Payload, "an Atmos source produced no dec3 box")
             let config = try #require(EAC3Configuration.parse(dec3: [UInt8](dec3)))
             print("\nserved dec3: \(config)\n")
-            // KNOWN GAP, and the most consequential one this harness found.
-            // FFmpeg's mp4 muxer does not carry the TS 103 420 type-A extension
-            // through a stream copy — verified against plain `ffmpeg -c copy`,
-            // which produces the same 6-byte extension-less `dec3`. The objects
-            // are still inside the copied elementary stream, but nothing tells
-            // AVFoundation so, and it plays the track as plain Dolby Digital
-            // Plus. Closing this means writing the box ourselves from the first
-            // syncframe's BSI (`addbsi` → `complexity_index_type_a`), which is
-            // exactly what Aether's own remuxer had to do.
-            withKnownIssue("movenc drops the JOC extension on stream-copy") {
-                #expect(
-                    config.declaresAtmos,
-                    "the source is Atmos but the served dec3 does not declare it"
-                )
-            }
+            // FFmpeg's mp4 muxer drops the TS 103 420 type-A extension on a
+            // stream copy (plain `ffmpeg -c copy` produces the same
+            // extension-less box), so PrismCore reads the signal out of the
+            // bitstream itself and patches the box — `EAC3Syncframe` plus
+            // `EAC3Configuration.patch`. Without that this reads false and
+            // AVFoundation plays a real Atmos track as plain Dolby Digital Plus,
+            // which is the single most consequential thing this harness found.
+            #expect(
+                config.declaresAtmos,
+                "the source is Atmos but the served dec3 does not declare it"
+            )
         }
     }
 
