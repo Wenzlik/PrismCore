@@ -125,3 +125,35 @@ struct EAC3Configuration: Equatable {
         }
     }
 }
+
+// MARK: - Patching a produced init segment
+
+extension EAC3Configuration {
+
+    /// Add the TS 103 420 type-A (JOC / Atmos) declaration to the `dec3` box of a
+    /// produced fMP4 init segment.
+    ///
+    /// Returns `nil` when there is nothing to do — no `dec3`, or a box that
+    /// already declares the extension — so the caller keeps the muxer's bytes.
+    ///
+    /// The tail is two bytes: `reserved(7) + flag_ec3_extension_type_a(1)` then
+    /// `complexity_index_type_a(8)`. Two bytes that a box tree has to be told
+    /// about, which is the whole reason this isn't a one-line splice: every
+    /// ancestor's `size` field has to grow with it, or the tree stops parsing at
+    /// the first stale length.
+    static func patch(initSegment data: Data, atmosComplexityIndex index: Int) -> Data? {
+        guard (0...255).contains(index) else { return nil }
+        guard let location = ISOBMFFPatch.locate("dec3", in: data) else { return nil }
+        let payload = data.subdata(in: location.payload)
+
+        // Already declared: leave it be. Keeps the patch idempotent, and makes it
+        // a no-op if FFmpeg ever starts carrying the extension itself.
+        if let existing = parse(dec3: [UInt8](payload)), existing.declaresAtmos { return nil }
+
+        // The tail is `reserved(7) + flag_ec3_extension_type_a(1)` — hence 0x01 —
+        // then `complexity_index_type_a(8)`.
+        var grown = payload
+        grown.append(contentsOf: [0x01, UInt8(index)])
+        return ISOBMFFPatch.replacePayload(at: location, in: data, with: grown)
+    }
+}
