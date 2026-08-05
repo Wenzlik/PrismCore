@@ -141,6 +141,32 @@ final class HLSRemuxer: @unchecked Sendable {
     /// read the produced renditions for the master playlist.
     let subtitles: SubtitleRenditionSet
 
+    /// What the Profile 7 → 8.1 conversion actually did, once the remux has run.
+    ///
+    /// Written from the copy loop's thread, read by the session's actor, hence the
+    /// lock. `nil` for every source that isn't a converted P7.
+    ///
+    /// This is not diagnostics for their own sake. A P7 source whose RPUs all
+    /// failed to convert is indistinguishable at playback from one that converted
+    /// cleanly — both play, one as Dolby Vision and one as plain HDR10 — so
+    /// without a count the only symptom of a broken conversion is a viewer saying
+    /// the DV logo never appeared.
+    private let conversionStatsLock = NSLock()
+    private var storedConversionStats: DolbyVisionConversionStats?
+
+    var dolbyVisionConversionStats: DolbyVisionConversionStats? {
+        conversionStatsLock.withLock { storedConversionStats }
+    }
+
+    private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
+        let stats = DolbyVisionConversionStats(
+            convertedRPUs: converter.convertedRPUs,
+            failedRPUs: converter.failedRPUs,
+            droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs
+        )
+        conversionStatsLock.withLock { storedConversionStats = stats }
+    }
+
     init(
         sourceURL: URL,
         httpHeaders: [String: String] = [:],
@@ -481,6 +507,10 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             demand?.setProducing(index: segmentIndex)
             recordAndEvict(index: segmentIndex - 1, videoBytes: media.count)
+            // Refreshed per segment rather than once at EOF: a host that wants to
+            // log "Dolby Vision engaged" can read it as soon as playback starts,
+            // and a session that is cancelled halfway still leaves a real count.
+            if let dolbyVisionConverter { recordConversionStats(dolbyVisionConverter) }
         }
 
         /// Demand-driven jump: abandon the in-flight fragment, seek the
@@ -832,8 +862,22 @@ final class HLSRemuxer: @unchecked Sendable {
             "avcodec_parameters_copy"
         )
         let par = outStream.pointee.codecpar!
-        // Zero lets the muxer pick the fourcc, which for stream-copied HEVC is
-        // `hvc1` — right for everything except Dolby Vision Profile 5.
+        // The sample entry's fourcc, and it has to be said explicitly.
+        //
+        // FFmpeg's mp4 muxer defaults HEVC to **`hev1`**, not `hvc1` — a default
+        // this code previously trusted to be `hvc1`, which was simply wrong.
+        // Two things went wrong because of it, and only a real Matroska file
+        // showed either:
+        //
+        // 1. Apple's HLS authoring rules want `hvc1`. `hev1` means parameter sets
+        //    may arrive in band, which an HLS init segment is not supposed to
+        //    rely on.
+        // 2. `HVCCNormalizer` asserts `array_completeness = 1` — "every parameter
+        //    set is in this entry" — which directly contradicts `hev1`, and
+        //    movenc resolves that contradiction by writing **no `hvcC` box at
+        //    all**. The record didn't just stay unnormalized; it disappeared. The
+        //    synthetic fixture never caught it because its record already had
+        //    completeness set, so the normalizer left it alone.
         //
         // P5 has no base layer: its picture is IPT-PQc2, not YCbCr, and the
         // *sample entry* is the only thing that tells a decoder so. An `hvc1`
@@ -847,7 +891,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // the fallback that makes 8.1 worth having.
         par.pointee.codec_tag = declaredDolbyVision?.isSingleLayerDVOnly == true
             ? Self.fourCC("dvh1")
-            : 0
+            : (par.pointee.codec_id == AV_CODEC_ID_HEVC ? Self.fourCC("hvc1") : 0)
 
         // `hvcC` → `hvc1`-correct form. Only HEVC has the problem (an `avcC`
         // carries no arrays to normalize), and `normalize` returns nil when the

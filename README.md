@@ -232,8 +232,10 @@ Prism, and Prism retires only at parity.
    - `SourceProbe` reports what the source is and whether PrismCore can take it;
      `MasterPlaylistBuilder` holds the signaling rules as pure
      value-in/string-out logic pinned by unit tests.
-   - **`hvcC` normalization** (`HVCCNormalizer`) — a stream-copied HEVC track
-     gets a `hvc1` sample entry, which asserts every parameter set lives in that
+   - **`hvcC` normalization** (`HVCCNormalizer`) — a stream-copied HEVC track is
+     given a `hvc1` sample entry **explicitly** (`codec_tag`), because FFmpeg's
+     mp4 muxer defaults HEVC to `hev1` and Apple's HLS rules want `hvc1`. That
+     matters twice over: `hvc1` asserts every parameter set lives in that
      entry. Matroska `CodecPrivate` routinely says otherwise
      (`array_completeness=0`) and carries SEI arrays besides, so the record is
      rewritten to VPS/SPS/PPS in order with completeness asserted. This runs
@@ -246,6 +248,19 @@ Prism, and Prism retires only at parity.
      profile_tier_level header is copied verbatim either way — it is what the
      `CODECS` string is printed from, so the declaration keeps matching the init
      segment.
+
+     A real Matroska file later showed the fourcc and the normalization to be one
+     problem rather than two: `array_completeness = 1` contradicts `hev1`, and
+     movenc resolves that by writing **no `hvcC` box at all** — so before the tag
+     was set explicitly, normalizing a real record deleted it. The synthetic
+     fixture couldn't catch it: its record already had completeness set, so the
+     normalizer left it alone.
+   - **The Dolby Vision box needs `-strict unofficial`.** `dvcC`/`dvvC` are
+     Dolby's specification rather than ISO's, so movenc refuses to write them by
+     default ("Not writing 'dvcC'/'dvvC' box. Requires -strict unofficial") — and
+     they are the only thing that tells AVFoundation a track is Dolby Vision. A
+     DV source without them is HDR10 with extra bytes. Also invisible to every
+     fixture, since none carries DV.
    - **P7 → 8.1 RPU conversion** (`DolbyVisionRPUConverter`) — Profile 7 is
      dual-layer with an HDR10 base no Apple platform decodes as DV. libdovi
      (already linked into MPVKit's `_FFmpeg`) rewrites each RPU NAL to its

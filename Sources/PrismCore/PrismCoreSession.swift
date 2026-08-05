@@ -49,6 +49,16 @@ public actor PrismCoreSession {
     private var remuxTask: Task<Void, Error>?
     private var started = false
 
+    /// What the Profile 7 → 8.1 conversion did, or `nil` when this source isn't a
+    /// converted P7. Populated from the first produced segment onwards, so it can
+    /// be read as soon as playback starts.
+    ///
+    /// Worth logging rather than ignoring: `isClean` false means the master's
+    /// `dvh1.08.xx/db1p` claim doesn't describe every frame.
+    public var dolbyVisionConversion: DolbyVisionConversionStats? {
+        remuxer.dolbyVisionConversionStats
+    }
+
     /// The remux's terminal error, if it failed after startup. Hosts can poll
     /// this when AVPlayer reports a stalled item.
     public private(set) var remuxError: Error?
