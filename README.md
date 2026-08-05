@@ -141,19 +141,41 @@ Prism, and Prism retires only at parity.
    MPVKit ships only the ac3/eac3 decoders, so until Aether's MPVKit fork adds
    `--enable-encoder=eac3` the bridge reports itself unavailable and routing
    keeps v0's fallback to a copyable audio track.
-4. **DV + HDR signaling** — master playlist with honest `CODECS` /
-   `SUPPLEMENTAL-CODECS`, `hvcC` normalization, P7→8.1 RPU conversion
-   (Libdovi ships inside MPVKit already), panel-readiness gating.
-   *Groundwork landed:* `SourceProbe` (what the source is, and whether
-   PrismCore can take it) and `MasterPlaylistBuilder` (the signaling rules, as
-   pure value-in/string-out logic with the rules pinned by unit tests). The
-   master playlist is now written and served (multi-audio needs it), with the
-   panel-readiness read still a caller-supplied `displayIsHDRReady` /
-   `displayIsDolbyVisionCapable` pair rather than a real display query: an HDR
-   or DV source keeps the media-direct shape until a host vouches for the
-   panel. Still open in this phase: `hvcC` normalization, the P7 conversion,
-   the actual panel read, and the master-rejection fallback (reload the media
-   playlist when AVPlayer refuses a master, `-11868` / `-11848` / `-1002`).
+4. **DV + HDR signaling** *(implemented; the DV claims need a device)* — the
+   master playlist carries honest `CODECS` / `SUPPLEMENTAL-CODECS`, and all four
+   of the phase's parts are in:
+   - `SourceProbe` reports what the source is and whether PrismCore can take it;
+     `MasterPlaylistBuilder` holds the signaling rules as pure
+     value-in/string-out logic pinned by unit tests.
+   - **`hvcC` normalization** (`HVCCNormalizer`) — a stream-copied HEVC track
+     gets a `hvc1` sample entry, which asserts every parameter set lives in that
+     entry. Matroska `CodecPrivate` routinely says otherwise
+     (`array_completeness=0`) and carries SEI arrays besides, so the record is
+     rewritten to VPS/SPS/PPS in order with completeness asserted. The 22-byte
+     profile_tier_level header is copied verbatim — it is what the `CODECS`
+     string is printed from, so the declaration keeps matching the init segment.
+   - **P7 → 8.1 RPU conversion** (`DolbyVisionRPUConverter`) — Profile 7 is
+     dual-layer with an HDR10 base no Apple platform decodes as DV. libdovi
+     (already linked into MPVKit's `_FFmpeg`) rewrites each RPU NAL to its
+     single-layer 8.1 form and the enhancement layer's NALs are dropped, so the
+     stream becomes a `dvh1.08.xx/db1p` claim over its own untouched base
+     pictures. Behind `canImport(Libdovi)`: a build without the module reports
+     the converter unavailable and P7 keeps routing to Prism.
+   - **The panel read** (`DisplayCapabilities.current()`) — `AVPlayer
+     .availableHDRModes` on iOS/tvOS/visionOS, `NSScreen`'s potential EDR
+     headroom on macOS, replacing the caller-supplied `displayIsHDRReady` /
+     `displayIsDolbyVisionCapable` guess. Use
+     `PrismCoreSession.readingCurrentDisplay(url:)`. macOS never claims DV on
+     purpose (no HDMI handshake to engage, and the 8.1 base already plays
+     through EDR).
+   - **Master-rejection fallback** (`MasterRejection`) — `-11868` / `-11848` /
+     `-1002`, matched across error domains and through
+     `NSUnderlyingErrorKey`. `PrismCoreSession.isMasterRejection(_:)` tells a
+     refused master apart from an unplayable source, and
+     `makeMuxedFallbackSession()` mints the media-direct retry (external
+     subtitle registrations replayed). This is the half that catches the panel
+     read being optimistic: no API distinguishes a Match-Content display from an
+     HDR-capable one parked in SDR.
 5. **Seek & cache** *(implemented)* — keyframe-aligned `SegmentPlan`,
    planned VOD playlists, demand-driven producer with re-anchoring and
    absolute-`tfdt` restart continuity, EOF parking, byte-budgeted retention

@@ -28,8 +28,21 @@ public actor PrismCoreSession {
         case alreadyStarted
     }
 
-    private let sourceURL: URL
-    private let httpHeaders: [String: String]
+    /// Everything the session was built from, kept verbatim so
+    /// `makeMuxedFallbackSession()` can mint a faithful clone. A session is
+    /// single-use, so "retry differently" has to mean "a new session with the
+    /// same inputs".
+    private struct Configuration {
+        var url: URL
+        var httpHeaders: [String: String]
+        var display: DisplayCapabilities
+        var segmentCacheBytes: Int?
+        var forceMuxedShape: Bool
+    }
+
+    private let configuration: Configuration
+    /// External subtitle registrations, replayed onto a fallback session.
+    private var externalSubtitles: [(url: URL, language: String?, name: String?, isForced: Bool)] = []
     private let workDirectory: URL
     private let server: LoopbackHTTPServer
     private let remuxer: HLSRemuxer
@@ -69,8 +82,39 @@ public actor PrismCoreSession {
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false
     ) throws {
-        self.sourceURL = url
-        self.httpHeaders = httpHeaders
+        try self.init(
+            url: url,
+            httpHeaders: httpHeaders,
+            display: DisplayCapabilities(
+                isHDRReady: displayIsHDRReady,
+                isDolbyVisionCapable: displayIsDolbyVisionCapable
+            ),
+            segmentCacheBytes: segmentCacheBytes,
+            forceMuxedShape: forceMuxedShape
+        )
+    }
+
+    /// The same session, taking the display's capabilities as one value.
+    ///
+    /// Prefer this over the two booleans: `DisplayCapabilities.current()` reads
+    /// them from the display the host is actually playing to, which is what phase
+    /// 4 set out to replace the caller-supplied guess with. The booleans stay for
+    /// callers that genuinely know better than the read — a host mirroring to an
+    /// external panel, or a test pinning a shape.
+    public init(
+        url: URL,
+        httpHeaders: [String: String] = [:],
+        display: DisplayCapabilities,
+        segmentCacheBytes: Int? = 1 << 30,
+        forceMuxedShape: Bool = false
+    ) throws {
+        self.configuration = Configuration(
+            url: url,
+            httpHeaders: httpHeaders,
+            display: display,
+            segmentCacheBytes: segmentCacheBytes,
+            forceMuxedShape: forceMuxedShape
+        )
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PrismCore-\(UUID().uuidString)", isDirectory: true)
@@ -89,12 +133,83 @@ public actor PrismCoreSession {
             sourceURL: url,
             httpHeaders: httpHeaders,
             outputDirectory: directory,
-            displayIsHDRReady: displayIsHDRReady,
-            displayIsDolbyVisionCapable: displayIsDolbyVisionCapable,
+            displayIsHDRReady: display.isHDRReady,
+            displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             forceMuxed: forceMuxedShape
         )
+    }
+
+    /// A session for the display the host is playing to right now.
+    ///
+    /// `@MainActor` because the display read is (see `DisplayCapabilities`), and
+    /// the host's playback code is there already. This is the initializer Aether's
+    /// routing should use: it is what makes an HDR or Dolby Vision source get a
+    /// master playlist at all, since the caller-supplied defaults are `false`.
+    @MainActor
+    public static func readingCurrentDisplay(
+        url: URL,
+        httpHeaders: [String: String] = [:],
+        segmentCacheBytes: Int? = 1 << 30,
+        forceMuxedShape: Bool = false
+    ) throws -> PrismCoreSession {
+        try PrismCoreSession(
+            url: url,
+            httpHeaders: httpHeaders,
+            display: .current(),
+            segmentCacheBytes: segmentCacheBytes,
+            forceMuxedShape: forceMuxedShape
+        )
+    }
+
+    // MARK: - Master rejection (phase 4)
+
+    /// Does this `AVPlayerItem.error` mean AVPlayer refused the master playlist,
+    /// rather than that the source is unplayable?
+    ///
+    /// See `MasterRejection` for the three codes and why they are what they are.
+    /// A host that gets `true` should stop this session, take
+    /// `makeMuxedFallbackSession()`, and play that — *not* fall back to another
+    /// engine, because the source itself was never the problem.
+    public static func isMasterRejection(_ error: Error?) -> Bool {
+        MasterRejection.matches(error)
+    }
+
+    /// A fresh session over the same source with `forceMuxedShape` set: no
+    /// master, the one best audio track muxed into the variant, media playlist
+    /// served directly.
+    ///
+    /// This is the recovery path for a refused master, and it has to be a *new*
+    /// session because the shape is decided before the first packet and the
+    /// output layout follows from it — there is nothing to re-negotiate in place.
+    /// Registered external subtitles are replayed onto the clone so the host
+    /// doesn't have to remember them, though in this shape nothing selects them:
+    /// a `SUBTITLES` group exists only inside a master.
+    ///
+    /// Calling this on a session that is *already* muxed-shape returns an
+    /// equivalent new session rather than refusing — a rejection here means
+    /// something other than the shape was wrong, and the caller's own retry
+    /// policy is the right place to stop, not this factory.
+    /// `async` only because replaying the subtitle registrations means calling
+    /// into the new session's actor.
+    public func makeMuxedFallbackSession() async throws -> PrismCoreSession {
+        let fallback = try PrismCoreSession(
+            url: configuration.url,
+            httpHeaders: configuration.httpHeaders,
+            display: configuration.display,
+            segmentCacheBytes: configuration.segmentCacheBytes,
+            forceMuxedShape: true
+        )
+        for subtitle in externalSubtitles {
+            try await fallback.addExternalSubtitle(
+                url: subtitle.url,
+                language: subtitle.language,
+                name: subtitle.name,
+                isForced: subtitle.isForced
+            )
+        }
+        return fallback
     }
 
     // MARK: - Subtitles (phase 6)
@@ -126,6 +241,8 @@ public actor PrismCoreSession {
         remuxer.subtitles.addExternalFile(
             .init(url: url, language: language, name: name, isForced: isForced)
         )
+        // Remembered so a muxed fallback session can be a faithful clone.
+        externalSubtitles.append((url: url, language: language, name: name, isForced: isForced))
     }
 
     /// The WebVTT subtitle renditions this session serves, in declaration order

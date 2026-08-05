@@ -44,8 +44,12 @@ import Libavutil
 ///   falling back to v0's single muxed track is strictly better than serving
 ///   silence.
 ///
-/// Not in v0 (by design, see README roadmap): demand-driven seeking, `hvcC`
-/// normalization, P7→8.1 RPU conversion.
+/// Phase 4 added two edits to the otherwise byte-for-byte video copy, both
+/// applied before the muxer sees anything: the `hvcC` is normalized into the form
+/// a `hvc1` sample entry has to have (`HVCCNormalizer`), and a Dolby Vision
+/// Profile 7 source has its RPUs converted to 8.1 with the enhancement layer
+/// dropped (`DolbyVisionRPUConverter`) so a dual-layer file Apple can't decode
+/// arrives as a single-layer one it can. Neither touches picture data.
 final class HLSRemuxer: @unchecked Sendable {
 
     /// How a selected audio stream reaches the output.
@@ -214,7 +218,23 @@ final class HLSRemuxer: @unchecked Sendable {
         // renditions are added once their encoders are up (a bridged rendition's
         // CHANNELS comes from the encoder), and they can't change the verdict —
         // every `SignalingError` is about the video.
-        let videoVariant = makeVideoVariant(input: input, video: videoTrack)
+        // Profile 7 is dual-layer and undecodable here, but its base layer is
+        // plain HDR10 — so rather than handing the source to Prism we convert its
+        // RPUs to 8.1 and drop the enhancement layer as the packets go past. The
+        // converter is nil for every other source (and when libdovi isn't in this
+        // build), and then nothing below changes.
+        let dolbyVisionConverter = makeDolbyVisionConverter(video: videoTrack)
+        // What the manifest may claim: the *converted* configuration when we are
+        // converting, the source's own otherwise. Declaring 8.1 for a stream
+        // whose RPUs are still P7 would be the one lie AVKit can't detect at
+        // parse time and can only fail on at the display.
+        let outputDolbyVision = dolbyVisionConverter != nil
+            ? videoTrack.dolbyVision?.convertedToProfile81
+            : videoTrack.dolbyVision
+
+        let videoVariant = makeVideoVariant(
+            input: input, video: videoTrack, dolbyVision: outputDolbyVision
+        )
         let masterIsPossible = videoVariant.map { (try? MasterPlaylistBuilder.build($0)) != nil } ?? false
 
         let shape: OutputShape = (!routes.isEmpty && masterIsPossible && !forceMuxed)
@@ -243,7 +263,20 @@ final class HLSRemuxer: @unchecked Sendable {
         defer { renditions.forEach { $0.close() } }
         var muxedBridge: AudioBridge?
         defer { muxedBridge?.close() }
-        var plan: [FMP4SegmentWriter.StreamPlan] = [.init(inputIndex: videoIndex)]
+        // The video stream is the one output stream we describe ourselves rather
+        // than mirroring: its `hvcC` needs normalizing for the `hvc1` sample
+        // entry, and a converted P7 has to carry an 8.1 `dvvC` instead of the
+        // source's own record.
+        var plan: [FMP4SegmentWriter.StreamPlan] = [
+            .init(inputIndex: videoIndex) { [self] outStream in
+                try configureVideoOutput(
+                    outStream,
+                    input: input,
+                    videoIndex: videoIndex,
+                    dolbyVision: dolbyVisionConverter != nil ? outputDolbyVision : nil
+                )
+            }
+        ]
 
         switch shape {
         case .renditions(let routes):
@@ -541,6 +574,19 @@ final class HLSRemuxer: @unchecked Sendable {
                         }
                         lastVideoEndPTS = pts + max(packet.pointee.duration, 0)
                     }
+                    // P7 → 8.1: rewrite the RPUs and drop the enhancement layer
+                    // before the bits reach the muxer. Returns nil for a packet
+                    // that needed neither, which is every packet of every other
+                    // source — the cost there is one NAL walk, no copy.
+                    if let dolbyVisionConverter, let data = packet.pointee.data,
+                       packet.pointee.size > 0 {
+                        let original = [UInt8](
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                        if let converted = dolbyVisionConverter.convert(packet: original) {
+                            try Self.replacePayload(of: packet, with: converted)
+                        }
+                    }
                     if let mapped = streamMap[streamIndex] {
                         try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
                     }
@@ -746,15 +792,168 @@ final class HLSRemuxer: @unchecked Sendable {
         return nil
     }
 
+    // MARK: - Video output stream
+
+    /// Describe the video output stream: mirror the source's parameters, then
+    /// make the two corrections a stream-copied HEVC track needs.
+    ///
+    /// Both edits have to happen here rather than after `write_header`, because
+    /// with `delay_moov` the sample entries are built from `codecpar` at
+    /// moov-flush time — the init segment is minted from whatever this closure
+    /// leaves behind.
+    private func configureVideoOutput(
+        _ outStream: UnsafeMutablePointer<AVStream>,
+        input: UnsafeMutablePointer<AVFormatContext>,
+        videoIndex: Int32,
+        dolbyVision: DolbyVisionConfiguration?
+    ) throws {
+        let inStream = input.pointee.streams[Int(videoIndex)]!
+        try FFmpegError.check(
+            avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar),
+            "avcodec_parameters_copy"
+        )
+        let par = outStream.pointee.codecpar!
+        par.pointee.codec_tag = 0
+
+        // `hvcC` → `hvc1`-correct form. Only HEVC has the problem (an `avcC`
+        // carries no arrays to normalize), and `normalize` returns nil when the
+        // record was already right, so the common case keeps the source's own
+        // extradata pointer.
+        if par.pointee.codec_id == AV_CODEC_ID_HEVC,
+           let extradata = par.pointee.extradata, par.pointee.extradata_size > 0 {
+            let current = Data(bytes: extradata, count: Int(par.pointee.extradata_size))
+            if let normalized = HVCCNormalizer.normalize(hvcC: current) {
+                try Self.setExtradata(normalized, on: par)
+            }
+        }
+
+        // A converted P7 must be *declared* 8.1: movenc writes the `dvvC` box
+        // from this side data, and a box that still said profile 7 would send an
+        // Apple TV looking for an enhancement layer that is no longer there.
+        if let dolbyVision {
+            try Self.setDolbyVisionConfiguration(dolbyVision, on: par)
+        }
+    }
+
+    /// Replace a codecpar's extradata with `data`.
+    ///
+    /// The allocation rules are libavcodec's, not ours: the buffer must come from
+    /// `av_malloc` with `AV_INPUT_BUFFER_PADDING_SIZE` zeroed bytes past the end
+    /// (bitstream readers over-read by design), and the old buffer must be freed
+    /// with `av_free`. Getting either wrong is a crash inside FFmpeg, not a Swift
+    /// error.
+    private static func setExtradata(
+        _ data: Data,
+        on par: UnsafeMutablePointer<AVCodecParameters>
+    ) throws {
+        let padding = Int(AV_INPUT_BUFFER_PADDING_SIZE)
+        guard let buffer = av_malloc(data.count + padding) else {
+            throw FFmpegError(code: -1, operation: "av_malloc(extradata)")
+        }
+        data.withUnsafeBytes { source in
+            memcpy(buffer, source.baseAddress!, data.count)
+        }
+        memset(buffer.advanced(by: data.count), 0, padding)
+        av_free(par.pointee.extradata)
+        par.pointee.extradata = buffer.assumingMemoryBound(to: UInt8.self)
+        par.pointee.extradata_size = Int32(data.count)
+    }
+
+    /// Put an `AVDOVIDecoderConfigurationRecord` on the stream as
+    /// `AV_PKT_DATA_DOVI_CONF`, replacing whatever the source's own record said.
+    ///
+    /// `av_packet_side_data_add` takes ownership of the buffer (hence `av_malloc`)
+    /// and replaces an existing entry of the same type, which is exactly the
+    /// semantics wanted here: `avcodec_parameters_copy` already brought the P7
+    /// record across.
+    private static func setDolbyVisionConfiguration(
+        _ configuration: DolbyVisionConfiguration,
+        on par: UnsafeMutablePointer<AVCodecParameters>
+    ) throws {
+        let size = MemoryLayout<AVDOVIDecoderConfigurationRecord>.size
+        guard let buffer = av_malloc(size) else {
+            throw FFmpegError(code: -1, operation: "av_malloc(dovi conf)")
+        }
+        let record = buffer.assumingMemoryBound(to: AVDOVIDecoderConfigurationRecord.self)
+        record.pointee = AVDOVIDecoderConfigurationRecord()
+        record.pointee.dv_version_major = configuration.versionMajor
+        record.pointee.dv_version_minor = configuration.versionMinor
+        record.pointee.dv_profile = configuration.profile
+        record.pointee.dv_level = configuration.level
+        record.pointee.rpu_present_flag = configuration.rpuPresent ? 1 : 0
+        record.pointee.el_present_flag = configuration.enhancementLayerPresent ? 1 : 0
+        record.pointee.bl_present_flag = configuration.baseLayerPresent ? 1 : 0
+        record.pointee.dv_bl_signal_compatibility_id = configuration.baseLayerSignalCompatibilityID
+
+        guard av_packet_side_data_add(
+            &par.pointee.coded_side_data,
+            &par.pointee.nb_coded_side_data,
+            AV_PKT_DATA_DOVI_CONF,
+            buffer,
+            size,
+            0
+        ) != nil else {
+            av_free(buffer)
+            throw FFmpegError(code: -1, operation: "av_packet_side_data_add(DOVI_CONF)")
+        }
+    }
+
+    /// Swap a demuxed packet's payload for rewritten bytes, in place.
+    ///
+    /// `av_packet_make_writable` first: the packet the demuxer handed us may
+    /// share its buffer, and growing or writing through a shared buffer would
+    /// corrupt whatever else holds a reference.
+    private static func replacePayload(
+        of packet: UnsafeMutablePointer<AVPacket>,
+        with bytes: [UInt8]
+    ) throws {
+        try FFmpegError.check(av_packet_make_writable(packet), "av_packet_make_writable")
+        let current = Int(packet.pointee.size)
+        if bytes.count > current {
+            try FFmpegError.check(
+                av_grow_packet(packet, Int32(bytes.count - current)), "av_grow_packet"
+            )
+        } else if bytes.count < current {
+            av_shrink_packet(packet, Int32(bytes.count))
+        }
+        // After grow the buffer may have moved, so read `data` only now.
+        guard let destination = packet.pointee.data else {
+            throw FFmpegError(code: -1, operation: "packet has no data after resize")
+        }
+        bytes.withUnsafeBytes { source in
+            memcpy(destination, source.baseAddress!, bytes.count)
+        }
+    }
+
+    /// A converter for this source, or `nil` when there is nothing to convert.
+    ///
+    /// Only Profile 7 qualifies. P5 has no HDR10 base to fall back to (its
+    /// conversion target would be a different picture, not a different wrapper),
+    /// 8.x is already single-layer, and a source with no DV configuration has no
+    /// RPUs to rewrite.
+    private func makeDolbyVisionConverter(video: VideoTrackInfo) -> DolbyVisionRPUConverter? {
+        guard let dv = video.dolbyVision, dv.isDualLayer, dv.rpuPresent else { return nil }
+        guard video.hevcConfiguration != nil else { return nil }
+        // The prefix width comes from the record itself; a source whose hvcC we
+        // couldn't parse never gets here (no `CODECS` string either, so it plays
+        // media-direct).
+        return DolbyVisionRPUConverter(lengthSize: video.nalUnitLengthSize)
+    }
+
     // MARK: - Master playlist description
 
     /// The video half of the master's variant, or `nil` when this source can't
     /// be declared honestly (no `CODECS` string to be had, or a dynamic range
     /// this display isn't ready for). `nil` routes the session to the muxed
     /// shape — see the type's doc.
+    ///
+    /// - Parameter dolbyVision: the configuration to *declare*, which is the
+    ///   converted 8.1 record for a P7 source being converted and the source's
+    ///   own otherwise.
     private func makeVideoVariant(
         input: UnsafeMutablePointer<AVFormatContext>,
-        video: VideoTrackInfo
+        video: VideoTrackInfo,
+        dolbyVision: DolbyVisionConfiguration?
     ) -> MasterPlaylistBuilder.VariantDescription? {
         guard let codec = videoCodecDeclaration(for: video) else { return nil }
 
@@ -775,7 +974,7 @@ final class HLSRemuxer: @unchecked Sendable {
             frameRate: video.frameRate,
             dynamicRange: video.dynamicRange,
             videoCodec: codec,
-            dolbyVision: video.dolbyVision,
+            dolbyVision: dolbyVision,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
         )
     }
