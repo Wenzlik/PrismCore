@@ -395,11 +395,38 @@ Prism, and Prism retires only at parity.
    deinterlace that doesn't exist), subtitles, track switching, and
    frame-accurate seek.
 
+## Using it
+
+```swift
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "0.1.0")
+```
+
+Platform floors are iOS 16 / tvOS 17 / macOS 14 / visionOS 1. `swift build` and
+`swift test` work on macOS; the test suite is hermetic apart from an opt-in
+real-media harness (see Status).
+
 ## Dependencies
 
-FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s LGPL
-dynamic xcframeworks — the same dependency Aether already ships, with the
-same LGPL obligations already met.
+FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s **dynamic**
+xcframeworks — no FFmpeg source is redistributed here, and nothing needs building.
+Dolby Vision RPU work goes through [libdovi](https://github.com/quietvoid/dovi_tool),
+which MPVKit already links.
+
+A host that already ships MPVKit adds **zero new binary dependencies**. One
+gotcha if that host vendors its own MPVKit fork: SPM derives a path dependency's
+identity from its *directory name*, so the fork's directory has to be called
+`MPVKit` for it to override the `mpvkit` identity PrismCore asks for.
+
+## Licence
+
+**LGPL-2.1-or-later** — see [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md).
+
+The short version of why it isn't permissive: `EAC3Syncframe.swift`'s bitstream
+walk was written by reading FFmpeg's `ac3_parser.c`, because the placement of the
+Atmos signal in `addbsi` can't be derived reliably from the specification alone —
+attempts from the spec produced a confidently *wrong* answer three times. That
+makes the file a derivative of LGPL code, and `NOTICE.md` says so out loud rather
+than hoping nobody looks.
 
 ## Status
 
