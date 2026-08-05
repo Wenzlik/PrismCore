@@ -116,6 +116,13 @@ final class HLSRemuxer: @unchecked Sendable {
     /// upfront, publish complete VOD playlists, and re-anchor the producer
     /// wherever the loopback reports AVPlayer is fetching.
     private let demand: DemandCoordinator?
+    /// Disk budget for produced segments, planned mode only (`nil` keeps
+    /// everything). See `SegmentRetention` for the policy.
+    private let segmentCacheBytes: Int?
+    /// Skip the renditions shape even when a master is possible — the host's
+    /// answer to AVPlayer refusing a master (-11868/-11848/-1002): a fresh
+    /// session with the one best audio track muxed into the variant.
+    private let forceMuxed: Bool
 
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
@@ -132,7 +139,9 @@ final class HLSRemuxer: @unchecked Sendable {
         segmentSeconds: Int = 6,
         displayIsHDRReady: Bool = false,
         displayIsDolbyVisionCapable: Bool = false,
-        demand: DemandCoordinator? = nil
+        demand: DemandCoordinator? = nil,
+        segmentCacheBytes: Int? = nil,
+        forceMuxed: Bool = false
     ) {
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
@@ -142,6 +151,8 @@ final class HLSRemuxer: @unchecked Sendable {
         self.displayIsHDRReady = displayIsHDRReady
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
         self.demand = demand
+        self.segmentCacheBytes = segmentCacheBytes
+        self.forceMuxed = forceMuxed
     }
 
     func cancel() {
@@ -206,7 +217,7 @@ final class HLSRemuxer: @unchecked Sendable {
         let videoVariant = makeVideoVariant(input: input, video: videoTrack)
         let masterIsPossible = videoVariant.map { (try? MasterPlaylistBuilder.build($0)) != nil } ?? false
 
-        let shape: OutputShape = (!routes.isEmpty && masterIsPossible)
+        let shape: OutputShape = (!routes.isEmpty && masterIsPossible && !forceMuxed)
             ? .renditions(routes)
             : .muxed(Self.chooseAudio(candidates: candidates, best: bestAudio >= 0 ? bestAudio : nil))
 
@@ -344,6 +355,39 @@ final class HLSRemuxer: @unchecked Sendable {
             return plannedPlan.entries[index + 1].startPTS
         }
 
+        // Retention exists only where eviction is survivable: planned mode,
+        // where a deleted segment is reproduced on demand.
+        var retention: SegmentRetention? = (plannedPlan != nil)
+            ? segmentCacheBytes.map { SegmentRetention(budgetBytes: $0) }
+            : nil
+
+        /// Record a landed segment's disk cost (variant + every rendition
+        /// file of the same index) and delete whatever the policy evicts.
+        func recordAndEvict(index: Int, videoBytes: Int) {
+            guard retention != nil else { return }
+            let name = String(format: "seg%05d.m4s", index)
+            var bytes = videoBytes
+            for rendition in renditions {
+                let path = outputDirectory
+                    .appendingPathComponent(rendition.directoryName)
+                    .appendingPathComponent(name).path
+                bytes += ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.intValue ?? 0
+            }
+            for victim in retention!.record(index: index, bytes: bytes, producing: index) {
+                let victimName = String(format: "seg%05d.m4s", victim)
+                try? FileManager.default.removeItem(
+                    at: outputDirectory.appendingPathComponent(victimName)
+                )
+                for rendition in renditions {
+                    try? FileManager.default.removeItem(
+                        at: outputDirectory
+                            .appendingPathComponent(rendition.directoryName)
+                            .appendingPathComponent(victimName)
+                    )
+                }
+            }
+        }
+
         func emitSegment(endPTS: Int64) throws {
             let (initSegment, media) = try writer.cutSegment()
             // The first cut also mints the init segment (see cutSegment's
@@ -382,6 +426,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 try rendition.cut(durationSeconds: duration)
             }
             demand?.setProducing(index: segmentIndex)
+            recordAndEvict(index: segmentIndex - 1, videoBytes: media.count)
         }
 
         /// Demand-driven jump: abandon the in-flight fragment, seek the
@@ -555,6 +600,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
+                recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count)
                 if let start = segmentStartPTS {
                     try subtitles.flushSegment(
                         start: Double(start) * tickSeconds,
