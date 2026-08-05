@@ -250,6 +250,20 @@ public struct AudioTrackInfo: Sendable, Equatable {
     public let sampleRate: Int
     public let language: String?
     public let title: String?
+    /// Whether this track carries **object audio** — Dolby Atmos.
+    ///
+    /// Only meaningful for EAC3, where the objects ride as JOC inside a stream
+    /// PrismCore copies untouched, and where HLS has a way to say so
+    /// (`CHANNELS="16/JOC"`). It is reported for TrueHD and DTS-HD MA X too, but
+    /// there it is *informational only*: those need the audio bridge, and the
+    /// bridge decodes to PCM and re-encodes to EAC3, which destroys the objects.
+    /// A bridged track is surround, never Atmos — so nothing must ever declare
+    /// JOC on the bridge's output.
+    ///
+    /// Read from `AVCodecParameters.profile`, which libavformat only fills in
+    /// once the parser has seen real packets — hence after
+    /// `avformat_find_stream_info`, which `probe` always runs.
+    public let isObjectAudio: Bool
     public let copyability: StreamCopyability
 }
 
@@ -575,6 +589,23 @@ public enum SourceProbe {
             return written > 0 ? String(cString: buffer) : nil
         }()
 
+        // Object audio, by codec. The two constants happen to share the value 30
+        // — they are different codecs' profile enums, so they are matched
+        // separately rather than compared against one number.
+        let isObjectAudio: Bool = {
+            switch par.codec_id {
+            case AV_CODEC_ID_EAC3:
+                return par.profile == AV_PROFILE_EAC3_DDP_ATMOS
+            case AV_CODEC_ID_TRUEHD, AV_CODEC_ID_MLP:
+                return par.profile == AV_PROFILE_TRUEHD_ATMOS
+            case AV_CODEC_ID_DTS:
+                return par.profile == AV_PROFILE_DTS_HD_MA_X
+                    || par.profile == AV_PROFILE_DTS_HD_MA_X_IMAX
+            default:
+                return false
+            }
+        }()
+
         let copyability: StreamCopyability
         if copyableAudio.contains(par.codec_id) {
             copyability = .streamCopy
@@ -593,6 +624,7 @@ public enum SourceProbe {
             sampleRate: Int(par.sample_rate),
             language: avMetadataValue(stream.pointee.metadata, "language"),
             title: avMetadataValue(stream.pointee.metadata, "title"),
+            isObjectAudio: isObjectAudio,
             copyability: copyability
         )
     }
