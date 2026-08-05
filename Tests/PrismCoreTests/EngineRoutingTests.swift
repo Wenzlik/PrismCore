@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Libavcodec
 @testable import PrismCore
 
 /// Routing decisions, over the real fixtures and over synthesized `SourceInfo`
@@ -199,5 +200,58 @@ struct EngineRoutingTests {
         let (data, response) = try await URLSession.shared.data(from: playlist)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         #expect(String(decoding: data, as: UTF8.self).hasPrefix("#EXTM3U"))
+    }
+}
+
+/// The probe's bridgeable set used to be a hand-copied duplicate of
+/// `AudioBridge`'s, and it drifted — the bridge grew MP3/MP2/Opus/Vorbis/PCM
+/// while the copy stayed at the three lossless codecs. These pin the two
+/// together so a future addition to the bridge can't silently fail to reach
+/// routing again.
+@Suite("Probe and bridge agree on what is bridgeable")
+struct BridgeableAgreementTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    @Test("an MP3-audio MKV is reported as needing the bridge, not as unsupported")
+    func mp3NeedsTheBridge() throws {
+        // The regression this exists for: MP3 is in AudioBridge's set and the
+        // remuxer's own routing would bridge it, but the probe called the whole
+        // source `.unsupported` — so routing never saw the option. Invisible
+        // while the EAC3 encoder is missing (everything is unbridgeable then),
+        // and live the day the MPVKit fork enables it.
+        let info = try SourceProbe.probe(url: try fixture("h264_mp3.mkv"))
+        let audio = try #require(info.audioTracks.first)
+        #expect(audio.codecName == "mp3")
+        #expect(audio.copyability == .requiresAudioBridge)
+        #expect(info.nativeReadiness == .requiresAudioBridge)
+    }
+
+    @Test("with an encoder that source takes the native path; without one, software")
+    func mp3RoutesBothWays() throws {
+        let info = try SourceProbe.probe(url: try fixture("h264_mp3.mkv"))
+        #expect(
+            try PrismCoreEngine.decide(for: info, isAudioBridgeAvailable: true).engine == .remux
+        )
+        #expect(
+            try PrismCoreEngine.decide(for: info, isAudioBridgeAvailable: false).engine == .software
+        )
+    }
+
+    @Test("every codec the bridge accepts is a codec the probe calls bridgeable")
+    func setsCannotDrift() {
+        // Straight through the probe's own classifier, so adding a codec to
+        // AudioBridge.bridgeableAudio can never again leave the probe behind.
+        for codecID in AudioBridge.bridgeableAudio {
+            let hasDecoder = avcodec_find_decoder(codecID) != nil
+            #expect(
+                SourceProbe.isBridgeableForTesting(codecID) == hasDecoder,
+                "\(String(cString: avcodec_get_name(codecID))) disagrees"
+            )
+        }
     }
 }
