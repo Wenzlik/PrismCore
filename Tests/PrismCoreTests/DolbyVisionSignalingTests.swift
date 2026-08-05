@@ -563,3 +563,151 @@ struct ObjectAudioDeclarationTests {
         #expect(master.contains("ec-3"))
     }
 }
+
+// MARK: - dec3 / Atmos declaration in the served init segment
+
+/// Finds a box payload by type, descending the containers that lead to a sample
+/// entry. Handles both visual (children 78 bytes in) and audio (28 bytes in)
+/// sample entries.
+private func findBox(_ wanted: String, in data: Data) -> Data? {
+    func walk(_ range: Range<Int>) -> Data? {
+        var cursor = range.lowerBound
+        while cursor + 8 <= range.upperBound {
+            let size = Int(data[cursor]) << 24 | Int(data[cursor + 1]) << 16
+                | Int(data[cursor + 2]) << 8 | Int(data[cursor + 3])
+            let type = String(decoding: data[(cursor + 4)..<(cursor + 8)], as: UTF8.self)
+            guard size >= 8, cursor + size <= range.upperBound else { return nil }
+            let payload = (cursor + 8)..<(cursor + size)
+
+            if type == wanted { return data.subdata(in: payload) }
+            switch type {
+            case "moov", "trak", "mdia", "minf", "stbl":
+                if let found = walk(payload) { return found }
+            case "stsd":
+                if payload.count > 8, let found = walk((payload.lowerBound + 8)..<payload.upperBound) {
+                    return found
+                }
+            case "hvc1", "hev1", "dvh1", "dvhe":
+                if payload.count > 78, let found = walk((payload.lowerBound + 78)..<payload.upperBound) {
+                    return found
+                }
+            case "ec-3", "ac-3", "mp4a":
+                if payload.count > 28, let found = walk((payload.lowerBound + 28)..<payload.upperBound) {
+                    return found
+                }
+            default:
+                break
+            }
+            cursor += size
+        }
+        return nil
+    }
+    return walk(0..<data.count)
+}
+
+@Suite("dec3 in the served init segment")
+struct EAC3ConfigurationTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    // MARK: Parser rules
+
+    @Test("a plain DD+ box parses and declares no Atmos")
+    func plainBox() throws {
+        // data_rate=192, num_ind_sub-1=0, fscod=0, bsid=16, reserved, asvc,
+        // bsmod=0, acmod=7, lfeon=1, reserved, num_dep_sub=0, reserved.
+        var writer = BitAccumulator()
+        writer.write(192, 13); writer.write(0, 3)
+        writer.write(0, 2); writer.write(16, 5); writer.write(0, 1); writer.write(0, 1)
+        writer.write(0, 3); writer.write(7, 3); writer.write(1, 1)
+        writer.write(0, 3); writer.write(0, 4); writer.write(0, 1)
+        let config = try #require(EAC3Configuration.parse(dec3: writer.bytes))
+        #expect(config.declaresAtmos == false)
+        #expect(config.channelCount == 6)   // 5.1 — the bed, hence 16/JOC in HLS
+        #expect(config.dataRate == 192)
+    }
+
+    @Test("the TS 103 420 type-A tail is what declares Atmos")
+    func atmosBox() throws {
+        var writer = BitAccumulator()
+        writer.write(768, 13); writer.write(0, 3)
+        writer.write(0, 2); writer.write(16, 5); writer.write(0, 1); writer.write(0, 1)
+        writer.write(0, 3); writer.write(7, 3); writer.write(1, 1)
+        writer.write(0, 3); writer.write(0, 4); writer.write(0, 1)
+        writer.write(0, 7); writer.write(1, 1); writer.write(12, 8)
+        let config = try #require(EAC3Configuration.parse(dec3: writer.bytes))
+        #expect(config.declaresAtmos)
+        #expect(config.atmosComplexityIndex == 12)
+        // Still 5.1 in the box — the objects are not channels.
+        #expect(config.channelCount == 6)
+    }
+
+    @Test("a truncated box is unreadable, which is not the same as 'no Atmos'")
+    func truncatedBox() {
+        #expect(EAC3Configuration.parse(dec3: [0x00, 0x01]) == nil)
+    }
+
+    // MARK: The real thing
+
+    @Test("the served init segment carries a readable dec3 for a stream-copied EAC3 track")
+    func servedInitSegmentHasDec3() async throws {
+        let session = try PrismCoreSession(url: try fixture("hevc_eac3.mkv"))
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        // Muxed shape (no master for this fixture's shape) keeps audio in the
+        // variant's own init segment; a master would put it in audio0/.
+        let base = playlist.deletingLastPathComponent()
+        let candidates = ["init.mp4", "audio0/init.mp4"]
+        var box: Data?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while ContinuousClock.now < deadline, box == nil {
+            for candidate in candidates {
+                if let (data, response) = try? await URLSession.shared.data(
+                       from: base.appendingPathComponent(candidate)
+                   ),
+                   (response as? HTTPURLResponse)?.statusCode == 200,
+                   let found = findBox("dec3", in: data) {
+                    box = found
+                    break
+                }
+            }
+            if box == nil { try await Task.sleep(for: .milliseconds(100)) }
+        }
+
+        let payload = try #require(box, "no dec3 box in any served init segment")
+        let config = try #require(
+            EAC3Configuration.parse(dec3: [UInt8](payload)),
+            "the muxer wrote a dec3 we cannot read back"
+        )
+        // What a synthetic fixture can prove: the box exists, frames correctly,
+        // and describes the right bed. What it CANNOT prove is the Atmos path —
+        // ffmpeg-generated EAC3 carries no JOC, so this must read false here.
+        // Verifying the extension survives a stream-copy needs a real Atmos file
+        // and a device; that is the open item, and this parser is what the check
+        // will use.
+        #expect(config.declaresAtmos == false)
+        #expect(config.channelCount > 0)
+    }
+}
+
+/// Writes MSB-first bit fields — the mirror of the parser's reader, for building
+/// box payloads in tests.
+private struct BitAccumulator {
+    private(set) var bytes: [UInt8] = []
+    private var bitCount = 0
+
+    mutating func write(_ value: Int, _ width: Int) {
+        for shift in stride(from: width - 1, through: 0, by: -1) {
+            if bitCount % 8 == 0 { bytes.append(0) }
+            if (value >> shift) & 1 == 1 {
+                bytes[bytes.count - 1] |= 1 << (7 - UInt8(bitCount % 8))
+            }
+            bitCount += 1
+        }
+    }
+}
