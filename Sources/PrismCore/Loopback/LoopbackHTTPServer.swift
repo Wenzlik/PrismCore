@@ -19,7 +19,7 @@ import Network
 /// - **A provider seam** (`SegmentProvider`) instead of direct file reads, so a
 ///   payload that is still being produced can say so.
 ///
-/// The reason the seam exists is the prior art's most expensive war story:
+/// The reason the seam exists is an expensive AVPlayer lesson:
 /// AVPlayer's media watchdog logs `-12889 "No response for media file"` after
 /// roughly 3.5 s without response HEADERS — holding the socket open silently
 /// buys nothing — and a few of those in a row fail the item outright. So when a

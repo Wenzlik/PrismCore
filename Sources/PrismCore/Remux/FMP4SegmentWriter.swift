@@ -146,8 +146,8 @@ final class FMP4SegmentWriter {
         //                  EAC3: movenc builds the `dec3` sample entry from
         //                  parsed packets and refuses an up-front moov with
         //                  "Cannot write moov atom before EAC3 packets
-        //                  parsed" (found by the HEVC+EAC3 fixture; the
-        //                  prior art defers the moov for the same reason).
+        //                  parsed" (found by the HEVC+EAC3 fixture — the
+        //                  moov has to wait until the packets did arrive).
         // frag_custom    → fragments cut exactly when we flush, nowhere else.
         // default_base_moof → offsets relative to the moof, which is what
         //                  HLS-fMP4 players (AVPlayer included) require of

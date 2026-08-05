@@ -228,7 +228,7 @@ enum TextSubtitleConverter {
 
         // ASS override blocks (`{\i1}`, `{\pos(…)}`) carry styling the
         // rendition deliberately drops — AVPlayer renders it in the system
-        // caption style (the same trade the prior art documents).
+        // caption style — the usual trade for HLS timed text.
         result = stripBracedBlocks(result)
         // ASS line breaks and hard spaces, in their literal escaped form.
         result = result.replacingOccurrences(of: "\\N", with: "\n")

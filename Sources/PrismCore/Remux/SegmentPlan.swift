@@ -159,8 +159,8 @@ struct SegmentPlan: Equatable {
     }
 
     /// Fixed-stride fallback. Anchored at 0 — a late-starting title is rare
-    /// enough that v1 doesn't special-case it (the prior art anchors segment
-    /// 0 at the content start; noted for the hardening pass).
+    /// enough that v1 doesn't special-case it (anchoring segment 0 at the
+    /// real content start is noted for the hardening pass).
     static func uniformPlan(
         durationSeconds: Double,
         tickSeconds: Double,

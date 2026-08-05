@@ -25,7 +25,7 @@ import Libavutil
 ///
 /// Both renderers publish `isReadyForMoreMediaData` and both call back through
 /// `requestMediaDataWhenReady`. The obvious loop — one cursor, paced on the
-/// *video* renderer's readiness — is the one the prior art warns about: as soon
+/// *video* renderer's readiness — is a classic pipeline trap: as soon
 /// as video stops draining (a backgrounded app, a display layer off screen, a
 /// decode that briefly outruns the queue) the gate never reopens, and audio
 /// starves behind it even though its own renderer is begging for data. That is
@@ -37,7 +37,7 @@ import Libavutil
 /// decoded and enqueued; the cost is that chasing audio past a full video queue
 /// lets the video queue grow by roughly the container's interleave distance,
 /// which a hard cap bounds (see `Pacing`). A pathological interleave stops reads
-/// instead of growing memory — the honest failure. The prior art's independent
+/// instead of growing memory — the honest failure. An independent
 /// audio look-ahead cursor is the refinement this shape leaves room for.
 ///
 /// ## Not here yet
