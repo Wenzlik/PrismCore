@@ -25,12 +25,26 @@ final class MediaPlaylistWriter {
         try write(ended: false)
     }
 
+    /// Write the COMPLETE playlist upfront from a segment plan — the
+    /// demand-driven shape (phase 5). Every planned segment is listed with
+    /// its planned duration and `EXT-X-ENDLIST` closes it immediately:
+    /// AVPlayer then knows every URI and duration before a single segment
+    /// exists, so a seek is just a fetch — the loopback's provider makes the
+    /// requested segment exist. `PLAYLIST-TYPE:VOD` because nothing will be
+    /// appended; the manifest is a promise the producer keeps on demand.
+    func writePlannedVOD(durations: [Double], fileName: (Int) -> String) throws {
+        entries = durations.enumerated().map { (index, duration) in
+            (duration, fileName(index))
+        }
+        try write(ended: true, playlistType: "VOD")
+    }
+
     /// Append `EXT-X-ENDLIST`, flipping the event into a finished VOD.
     func finish() throws {
         try write(ended: true)
     }
 
-    private func write(ended: Bool) throws {
+    private func write(ended: Bool, playlistType: String = "EVENT") throws {
         // TARGETDURATION must be ≥ every EXTINF rounded to the nearest int
         // (RFC 8216 §4.3.3.1) — ceil clears that bar for any duration mix.
         let target = max(1, Int((entries.map(\.duration).max() ?? 1).rounded(.up)))
@@ -39,7 +53,7 @@ final class MediaPlaylistWriter {
         #EXT-X-VERSION:7
         #EXT-X-TARGETDURATION:\(target)
         #EXT-X-MEDIA-SEQUENCE:0
-        #EXT-X-PLAYLIST-TYPE:EVENT
+        #EXT-X-PLAYLIST-TYPE:\(playlistType)
         #EXT-X-INDEPENDENT-SEGMENTS
 
         """

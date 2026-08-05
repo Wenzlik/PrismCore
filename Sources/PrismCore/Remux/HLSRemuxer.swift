@@ -112,6 +112,10 @@ final class HLSRemuxer: @unchecked Sendable {
     /// is `false`.
     private let displayIsHDRReady: Bool
     private let displayIsDolbyVisionCapable: Bool
+    /// Present = demand-driven session (phase 5): plan the segmentation
+    /// upfront, publish complete VOD playlists, and re-anchor the producer
+    /// wherever the loopback reports AVPlayer is fetching.
+    private let demand: DemandCoordinator?
 
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
@@ -127,7 +131,8 @@ final class HLSRemuxer: @unchecked Sendable {
         outputDirectory: URL,
         segmentSeconds: Int = 6,
         displayIsHDRReady: Bool = false,
-        displayIsDolbyVisionCapable: Bool = false
+        displayIsDolbyVisionCapable: Bool = false,
+        demand: DemandCoordinator? = nil
     ) {
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
@@ -136,6 +141,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory)
         self.displayIsHDRReady = displayIsHDRReady
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
+        self.demand = demand
     }
 
     func cancel() {
@@ -203,6 +209,22 @@ final class HLSRemuxer: @unchecked Sendable {
         let shape: OutputShape = (!routes.isEmpty && masterIsPossible)
             ? .renditions(routes)
             : .muxed(Self.chooseAudio(candidates: candidates, best: bestAudio >= 0 ? bestAudio : nil))
+
+        // Demand-driven mode needs a trustworthy upfront segmentation. Only a
+        // keyframe-based plan qualifies — uniform-plan boundaries are time
+        // targets, and a playlist that promises durations the producer can't
+        // hit at keyframes would drift against what AVPlayer fetched. The one
+        // shape excluded is muxed-with-bridge: re-anchoring would mean
+        // resetting an encoder mid-fragment, and that combination only occurs
+        // when a master was refused anyway.
+        let plannedPlan: SegmentPlan? = {
+            guard demand != nil else { return nil }
+            if case .muxed(let audio) = shape, audio?.mode == .bridge { return nil }
+            guard let built = SegmentPlan.build(
+                input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds
+            ), built.basis == .keyframeIndex else { return nil }
+            return built
+        }()
 
         // MARK: Output setup
 
@@ -282,10 +304,25 @@ final class HLSRemuxer: @unchecked Sendable {
             uniqueKeysWithValues: renditions.map { (Int($0.route.index), $0) }
         )
 
-        let writer = FMP4SegmentWriter()
+        var writer = FMP4SegmentWriter()
         _ = try writer.open(input: input, plan: plan)   // delay_moov: header emits nothing
-        let streamMap = writer.streamMap
+        var streamMap = writer.streamMap
         let playlist = MediaPlaylistWriter(directory: outputDirectory)
+
+        // Planned VOD: every playlist is complete before the first packet —
+        // from here on, playlists are read-only and segments land as files.
+        if let plannedPlan, let demand {
+            let durations = plannedPlan.entries.map(\.duration)
+            try playlist.writePlannedVOD(durations: durations) { index in
+                String(format: "seg%05d.m4s", index)
+            }
+            for rendition in renditions {
+                try rendition.writePlannedVOD(durations: durations)
+            }
+            try subtitles.writePlannedVOD(durations: durations)
+            demand.publish(plan: plannedPlan)
+            demand.setProducing(index: 0)
+        }
 
         // Segmentation state, tracked on the INPUT video stream's time base
         // (the packet still carries it when the cut decision is made).
@@ -296,6 +333,16 @@ final class HLSRemuxer: @unchecked Sendable {
         var nextBoundaryPTS: Int64 = 0
         var lastVideoEndPTS: Int64?
         var segmentIndex = 0
+        /// Post-reanchor: discard packets until the anchor keyframe arrives
+        /// (a BACKWARD seek may land at an earlier keyframe than requested).
+        var droppingUntilPTS: Int64?
+
+        /// The planned end of segment `index` — the next entry's start — or
+        /// "never" past the last entry (EOF closes it).
+        func plannedBoundary(after index: Int) -> Int64 {
+            guard let plannedPlan, index + 1 < plannedPlan.entries.count else { return .max }
+            return plannedPlan.entries[index + 1].startPTS
+        }
 
         func emitSegment(endPTS: Int64) throws {
             let (initSegment, media) = try writer.cutSegment()
@@ -303,7 +350,12 @@ final class HLSRemuxer: @unchecked Sendable {
             // doc); write it BEFORE the playlist entry so a reader that saw
             // the manifest can always fetch what it references.
             if let initSegment, !initSegment.isEmpty {
-                try initSegment.write(to: outputDirectory.appendingPathComponent(Self.initFileName), options: .atomic)
+                let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
+                // A re-anchored muxer mints its moov again; the one already
+                // served must not change under AVPlayer's cached EXT-X-MAP.
+                if !FileManager.default.fileExists(atPath: initURL.path) {
+                    try initSegment.write(to: initURL, options: .atomic)
+                }
             }
             // A boundary that produced no video bytes writes nothing anywhere,
             // renditions included: skipping the cut on all of them together is
@@ -312,7 +364,9 @@ final class HLSRemuxer: @unchecked Sendable {
             let duration = max(0.001, Double(endPTS - start) * tickSeconds)
             let file = String(format: "seg%05d.m4s", segmentIndex)
             try media.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
-            try playlist.appendSegment(duration: duration, file: file)
+            if plannedPlan == nil {
+                try playlist.appendSegment(duration: duration, file: file)
+            }
             // Same wall-time window, so rendition segment N covers variant
             // segment N — cut only when a media segment really landed.
             try subtitles.flushSegment(
@@ -327,6 +381,32 @@ final class HLSRemuxer: @unchecked Sendable {
             for rendition in renditions {
                 try rendition.cut(durationSeconds: duration)
             }
+            demand?.setProducing(index: segmentIndex)
+        }
+
+        /// Demand-driven jump: abandon the in-flight fragment, seek the
+        /// demuxer to the anchor's keyframe, and stand up fresh muxers whose
+        /// tfdt carries absolute time (`restart` → frag_discont), so the
+        /// produced segment sits exactly where the planned playlist put it.
+        func reanchor(to anchor: Int) throws {
+            guard let plannedPlan else { return }
+            let target = plannedPlan.entries[anchor].startPTS
+            try FFmpegError.check(
+                av_seek_frame(input, videoIndex, target, AVSEEK_FLAG_BACKWARD),
+                "av_seek_frame"
+            )
+            writer = FMP4SegmentWriter()
+            _ = try writer.open(input: input, plan: plan, restart: true)
+            streamMap = writer.streamMap
+            for rendition in renditions {
+                try rendition.reanchor(input: input, segmentIndex: anchor)
+            }
+            subtitles.reanchor(segmentIndex: anchor, startSeconds: Double(target) * tickSeconds)
+            segmentIndex = anchor
+            segmentStartPTS = nil
+            nextBoundaryPTS = plannedBoundary(after: anchor)
+            droppingUntilPTS = target
+            demand?.setProducing(index: anchor)
         }
 
         var packet = av_packet_alloc()
@@ -334,123 +414,183 @@ final class HLSRemuxer: @unchecked Sendable {
         guard let packet else { return }
 
         // MARK: Copy loop
+        // In planned mode the producer never truly ends at EOF: an earlier
+        // re-anchor may have skipped segments nobody produced, and a seek back
+        // to one of them arrives AFTER the demuxer ran dry. So the produce
+        // loop parks at EOF and waits for anchor requests until the session
+        // is cancelled; sequential (v0) sessions run it exactly once.
         var reachedEOF = false
-        while !cancelled.isSet {
-            let readResult = av_read_frame(input, packet)
-            if readResult == swift_AVERROR_EOF() {
-                reachedEOF = true
-                break
-            }
-            if readResult < 0 {
-                // Transient read errors on network sources: the reconnect
-                // options above handle the socket; anything that still
-                // surfaces here ends the remux (the playlists stay valid up
-                // to the last written segment).
-                throw FFmpegError(code: readResult, operation: "av_read_frame")
-            }
-            defer { av_packet_unref(packet) }
+        produce: while true {
+            reachedEOF = false
+            while !cancelled.isSet {
+                let readResult = av_read_frame(input, packet)
+                if readResult == swift_AVERROR_EOF() {
+                    reachedEOF = true
+                    break
+                }
+                if readResult < 0 {
+                    // Transient read errors on network sources: the reconnect
+                    // options above handle the socket; anything that still
+                    // surfaces here ends the remux (the playlists stay valid up
+                    // to the last written segment).
+                    throw FFmpegError(code: readResult, operation: "av_read_frame")
+                }
+                defer { av_packet_unref(packet) }
 
-            // Subtitle packets are consumed here and never handed to the muxer.
-            if subtitleStreams.contains(Int32(packet.pointee.stream_index)) {
-                subtitles.ingest(packet)
-                continue
-            }
+                // A fetch outside the producer's window re-anchors it — checked
+                // once per packet; nil is the hot path.
+                if plannedPlan != nil, let anchor = demand?.takeAnchorRequest(),
+                   anchor != segmentIndex, anchor >= 0,
+                   anchor < (plannedPlan?.entries.count ?? 0) {
+                    try reanchor(to: anchor)
+                }
 
-            let streamIndex = Int(packet.pointee.stream_index)
-            let inStream = input.pointee.streams[streamIndex]!
-            let sourceTimeBase = inStream.pointee.time_base
-
-            if Int32(streamIndex) == videoIndex {
-                // Cut BEFORE writing a boundary keyframe, so the keyframe opens
-                // the next segment (every segment starts decodable on its own —
-                // what EXT-X-INDEPENDENT-SEGMENTS promises).
-                if packet.pointee.pts != swift_AV_NOPTS_VALUE() {
-                    let pts = packet.pointee.pts
-                    let isKey = packet.pointee.flags & AV_PKT_FLAG_KEY != 0
-                    if isKey {
-                        if segmentStartPTS == nil {
-                            segmentStartPTS = pts
-                            nextBoundaryPTS = pts + boundaryStep
-                            // The presentation origin: what the WebVTT timestamp
-                            // maps are anchored to (see WebVTTRenditionWriter).
-                            subtitles.setTimelineOrigin(seconds: Double(pts) * tickSeconds)
-                        } else if pts >= nextBoundaryPTS {
-                            try emitSegment(endPTS: pts)
-                            segmentStartPTS = pts
-                            nextBoundaryPTS = pts + boundaryStep
-                        }
+                // Between a seek and the anchor keyframe, everything is discard:
+                // the plan's PTS is an indexed keyframe, so it WILL arrive, and
+                // pre-anchor packets belong to a segment nobody asked for.
+                if let target = droppingUntilPTS {
+                    let isAnchorKeyframe = Int32(packet.pointee.stream_index) == videoIndex
+                        && packet.pointee.flags & AV_PKT_FLAG_KEY != 0
+                        && packet.pointee.pts != swift_AV_NOPTS_VALUE()
+                        && packet.pointee.pts >= target
+                    if isAnchorKeyframe {
+                        droppingUntilPTS = nil
+                    } else {
+                        continue
                     }
-                    lastVideoEndPTS = pts + max(packet.pointee.duration, 0)
                 }
-                if let mapped = streamMap[streamIndex] {
-                    try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
+
+                // Subtitle packets are consumed here and never handed to the muxer.
+                if subtitleStreams.contains(Int32(packet.pointee.stream_index)) {
+                    subtitles.ingest(packet)
+                    continue
                 }
-                continue
+
+                let streamIndex = Int(packet.pointee.stream_index)
+                let inStream = input.pointee.streams[streamIndex]!
+                let sourceTimeBase = inStream.pointee.time_base
+
+                if Int32(streamIndex) == videoIndex {
+                    // Cut BEFORE writing a boundary keyframe, so the keyframe opens
+                    // the next segment (every segment starts decodable on its own —
+                    // what EXT-X-INDEPENDENT-SEGMENTS promises).
+                    if packet.pointee.pts != swift_AV_NOPTS_VALUE() {
+                        let pts = packet.pointee.pts
+                        let isKey = packet.pointee.flags & AV_PKT_FLAG_KEY != 0
+                        if isKey {
+                            if segmentStartPTS == nil {
+                                segmentStartPTS = pts
+                                nextBoundaryPTS = plannedPlan != nil
+                                    ? plannedBoundary(after: segmentIndex)
+                                    : pts + boundaryStep
+                                // The presentation origin: what the WebVTT timestamp
+                                // maps are anchored to (see WebVTTRenditionWriter).
+                                subtitles.setTimelineOrigin(seconds: Double(pts) * tickSeconds)
+                            } else if pts >= nextBoundaryPTS {
+                                try emitSegment(endPTS: pts)
+                                segmentStartPTS = pts
+                                nextBoundaryPTS = plannedPlan != nil
+                                    ? plannedBoundary(after: segmentIndex)
+                                    : pts + boundaryStep
+                            }
+                        }
+                        lastVideoEndPTS = pts + max(packet.pointee.duration, 0)
+                    }
+                    if let mapped = streamMap[streamIndex] {
+                        try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
+                    }
+                    continue
+                }
+
+                if let rendition = renditionByInputIndex[streamIndex] {
+                    try rendition.write(packet, sourceTimeBase: sourceTimeBase)
+                    continue
+                }
+
+                guard let mapped = streamMap[streamIndex] else { continue }
+
+                if let muxedBridge, Int32(streamIndex) == muxedBridgeIndex {
+                    // Timestamps on the way in stay in the source stream's time
+                    // base — the bridge's decoder is configured for it — and come
+                    // back out on the encoder's, so only one rescale is left.
+                    try muxedBridge.feed(packet) { encoded in
+                        try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
+                    }
+                    continue
+                }
+
+                try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
             }
 
-            if let rendition = renditionByInputIndex[streamIndex] {
-                try rendition.write(packet, sourceTimeBase: sourceTimeBase)
-                continue
-            }
-
-            guard let mapped = streamMap[streamIndex] else { continue }
-
-            if let muxedBridge, Int32(streamIndex) == muxedBridgeIndex {
-                // Timestamps on the way in stay in the source stream's time
-                // base — the bridge's decoder is configured for it — and come
-                // back out on the encoder's, so only one rescale is left.
-                try muxedBridge.feed(packet) { encoded in
-                    try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
+            // A cancelled session is being torn down, so flushing the encoders would
+            // only add work; on EOF the tail is real audio the file has.
+            if reachedEOF {
+                if let muxedBridge, let mapped = muxedBridgeIndex.flatMap({ streamMap[Int($0)] }) {
+                    try muxedBridge.flush { encoded in
+                        try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
+                    }
                 }
-                continue
+                for rendition in renditions {
+                    try rendition.flushBridge()
+                }
             }
 
-            try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
-        }
-
-        // A cancelled session is being torn down, so flushing the encoders would
-        // only add work; on EOF the tail is real audio the file has.
-        if reachedEOF {
-            if let muxedBridge, let mapped = muxedBridgeIndex.flatMap({ streamMap[Int($0)] }) {
-                try muxedBridge.flush { encoded in
-                    try write(encoded, to: mapped, from: muxedBridge.timeBase, writer: writer)
+            // Final segment: whatever is buffered since the last cut, plus the
+            // trailer's tail bytes, is one segment. A sub-6s source cuts here for
+            // the first time, so this can also mint the init segment.
+            let closingPTS = lastVideoEndPTS ?? nextBoundaryPTS
+            let (initSegment, media) = try writer.cutSegment()
+            if let initSegment, !initSegment.isEmpty {
+                let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
+                if !FileManager.default.fileExists(atPath: initURL.path) {
+                    try initSegment.write(to: initURL, options: .atomic)
+                }
+            }
+            var finalSegment = media
+            finalSegment.append(try writer.finish())
+            let finalDuration = max(0.001, Double(closingPTS - (segmentStartPTS ?? closingPTS)) * tickSeconds)
+            if !finalSegment.isEmpty, segmentStartPTS != nil {
+                let file = String(format: "seg%05d.m4s", segmentIndex)
+                try finalSegment.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
+                if plannedPlan == nil {
+                    try playlist.appendSegment(duration: finalDuration, file: file)
+                }
+                if let start = segmentStartPTS {
+                    try subtitles.flushSegment(
+                        start: Double(start) * tickSeconds,
+                        end: Double(closingPTS) * tickSeconds
+                    )
                 }
             }
             for rendition in renditions {
-                try rendition.flushBridge()
+                try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF)
             }
-        }
+            if reachedEOF {
+                try subtitles.finish()
+                // ENDLIST only on a genuinely finished remux — a cancelled one leaves the
+                // event playlist open-ended, and the session dir dies with stop().
+                // (Planned playlists were born ended.)
+                if plannedPlan == nil {
+                    try playlist.finish()
+                }
+            }
 
-        // Final segment: whatever is buffered since the last cut, plus the
-        // trailer's tail bytes, is one segment. A sub-6s source cuts here for
-        // the first time, so this can also mint the init segment.
-        let closingPTS = lastVideoEndPTS ?? nextBoundaryPTS
-        let (initSegment, media) = try writer.cutSegment()
-        if let initSegment, !initSegment.isEmpty {
-            try initSegment.write(to: outputDirectory.appendingPathComponent(Self.initFileName), options: .atomic)
-        }
-        var finalSegment = media
-        finalSegment.append(try writer.finish())
-        let finalDuration = max(0.001, Double(closingPTS - (segmentStartPTS ?? closingPTS)) * tickSeconds)
-        if !finalSegment.isEmpty, segmentStartPTS != nil {
-            let file = String(format: "seg%05d.m4s", segmentIndex)
-            try finalSegment.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
-            try playlist.appendSegment(duration: finalDuration, file: file)
-            if let start = segmentStartPTS {
-                try subtitles.flushSegment(
-                    start: Double(start) * tickSeconds,
-                    end: Double(closingPTS) * tickSeconds
-                )
+            // Park: EOF reached with a plan published — wait for demand.
+            guard plannedPlan != nil, reachedEOF, !cancelled.isSet else { break produce }
+            var idleAnchor: Int?
+            while !cancelled.isSet {
+                if let anchor = demand?.takeAnchorRequest(),
+                   anchor >= 0, anchor < (plannedPlan?.entries.count ?? 0) {
+                    idleAnchor = anchor
+                    break
+                }
+                // The provider's pending serves poll every 100 ms with a 15 s
+                // budget; waking at half their cadence keeps the worst case
+                // one poll late.
+                Thread.sleep(forTimeInterval: 0.05)
             }
-        }
-        for rendition in renditions {
-            try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF)
-        }
-        if reachedEOF {
-            try subtitles.finish()
-            // ENDLIST only on a genuinely finished remux — a cancelled one leaves the
-            // event playlist open-ended, and the session dir dies with stop().
-            try playlist.finish()
+            guard let anchor = idleAnchor else { break produce }
+            try reanchor(to: anchor)
         }
     }
 

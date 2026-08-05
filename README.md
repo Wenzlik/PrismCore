@@ -79,17 +79,31 @@ the v0 implementation, and a provider that answers `.pending` gets an early
 `200` + `Transfer-Encoding: chunked` once a serve passes 2 s — keeping response
 headers inside AVPlayer's ~3.5 s media watchdog window. A pending serve that
 ultimately fails aborts the connection (truncated transfer → AVPlayer retries)
-instead of framing a cacheable empty `200`. That seam is where phase 5's
-demand-driven producer plugs in.
+instead of framing a cacheable empty `200`. Phase 5's `PlanSegmentProvider`
+plugs into that seam: a fetch of a planned-but-unproduced segment becomes a
+producer re-anchor (via `DemandCoordinator`) plus a pending serve that waits
+for the file to land.
 
 The segmentation is ours: MPVKit's libavformat is built without the `hls`
 muxer, so `FMP4SegmentWriter` drives the `mp4` muxer with `frag_custom` and cuts
 where we say (video keyframes at/after each 6 s boundary), and
-`MediaPlaylistWriter` turns those fragments into an EVENT playlist that grows
-as segments land and gains `EXT-X-ENDLIST` when the remux finishes. AVPlayer
-starts playback as soon as the first segments exist. Demand-driven seeking
-(producing segments *at* the seek target instead of from the start) is the
-single biggest piece of the later phases.
+`MediaPlaylistWriter` turns those fragments into a playlist. Two production
+modes exist:
+
+- **Planned (demand-driven, phase 5)** — the default for seekable VOD.
+  `SegmentPlan` maps every segment upfront from the demuxer's keyframe index
+  (trusted only past two witnesses: max keyframe gap 60 s, coverage ≥ one
+  target duration), complete `PLAYLIST-TYPE:VOD` playlists are published
+  before the first packet, and a fetch outside the producer's window
+  re-anchors it — `av_seek_frame` to the anchor keyframe, fresh muxers with
+  `frag_discont` + `avoid_negative_ts=disabled` so `tfdt` carries absolute
+  time and the produced segment sits exactly where the playlist promised.
+  After EOF the producer parks and keeps answering demand for segments a
+  re-anchor skipped, until the session stops.
+- **Sequential (v0, kept)** — EVENT playlist growing head-to-EOF, gaining
+  `EXT-X-ENDLIST` at the end. Used when no trustworthy plan exists (live /
+  unknown duration / junk index → uniform basis) and for the
+  muxed-with-bridge shape (re-anchoring would reset an encoder mid-fragment).
 
 ### Subtitle timing (`X-TIMESTAMP-MAP`)
 
@@ -140,8 +154,12 @@ Prism, and Prism retires only at parity.
    panel. Still open in this phase: `hvcC` normalization, the P7 conversion,
    the actual panel read, and the master-rejection fallback (reload the media
    playlist when AVPlayer refuses a master, `-11868` / `-11848` / `-1002`).
-5. **Seek & cache** — keyframe-aligned segment plan, demand-driven producer
-   with restart timeline continuity, byte-budgeted retention.
+5. **Seek & cache** *(seek implemented)* — keyframe-aligned `SegmentPlan`,
+   planned VOD playlists, demand-driven producer with re-anchoring and
+   absolute-`tfdt` restart continuity, EOF parking. Still open:
+   byte-budgeted retention (segments currently accumulate for the session's
+   lifetime) and subtitle backfill after a re-anchor (a skipped range's
+   `.vtt` serves as an honest empty segment — cues resume from the anchor).
 6. **Subtitles** — WebVTT renditions so text survives PiP / AirPlay (the
    master + rendition plumbing multi-audio built is what they plug into); bitmap
    (PGS/DVB) rendering for the fullscreen overlay.

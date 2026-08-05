@@ -64,13 +64,22 @@ public actor PrismCoreSession {
             .appendingPathComponent("PrismCore-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.workDirectory = directory
-        self.server = LoopbackHTTPServer(root: directory)
+        // The demand seam (phase 5): the provider turns a fetch of a
+        // not-yet-produced planned segment into a producer re-anchor and a
+        // pending serve. Sources the remuxer can't plan (live, junk index)
+        // never publish a plan, and the provider then behaves exactly like
+        // the plain directory provider.
+        let demand = DemandCoordinator()
+        self.server = LoopbackHTTPServer(
+            provider: PlanSegmentProvider(root: directory, coordinator: demand)
+        )
         self.remuxer = HLSRemuxer(
             sourceURL: url,
             httpHeaders: httpHeaders,
             outputDirectory: directory,
             displayIsHDRReady: displayIsHDRReady,
-            displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
+            displayIsDolbyVisionCapable: displayIsDolbyVisionCapable,
+            demand: demand
         )
     }
 

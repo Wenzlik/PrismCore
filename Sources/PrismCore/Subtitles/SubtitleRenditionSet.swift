@@ -190,6 +190,20 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         }
     }
 
+    /// Planned mode on every rendition (see `WebVTTRenditionWriter`).
+    func writePlannedVOD(durations: [Double]) throws {
+        for track in tracks {
+            try track.writer.writePlannedVOD(durations: durations)
+        }
+    }
+
+    /// Demand-driven jump on every rendition.
+    func reanchor(segmentIndex: Int, startSeconds: Double) {
+        for track in tracks {
+            track.writer.reanchor(segmentIndex: segmentIndex, startSeconds: startSeconds)
+        }
+    }
+
     /// `EXT-X-ENDLIST` on every rendition playlist.
     func finish() throws {
         for track in tracks {
