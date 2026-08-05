@@ -44,6 +44,8 @@ final class WebVTTRenditionWriter {
     /// repeat it (standard segmented-VTT practice).
     private var pending: [SubtitleCue] = []
     private var segmentIndex = 0
+    /// Planned mode: playlist published upfront; flushes write files only.
+    private var plannedMode = false
 
     init(directory: URL) throws {
         self.directory = directory
@@ -72,6 +74,23 @@ final class WebVTTRenditionWriter {
     /// axis the cues arrive on. Always writes a file, even with no cues in
     /// range: the rendition must have as many segments as the video, and an
     /// empty segment is a header-only `.vtt`.
+    /// Planned mode: complete playlist upfront, files as ranges get produced.
+    /// Segments never produced are the provider's to answer (header-only VTT).
+    func writePlannedVOD(durations: [Double]) throws {
+        plannedMode = true
+        try playlist.writePlannedVOD(durations: durations) { index in
+            String(format: "seg%05d.vtt", index)
+        }
+    }
+
+    /// Demand-driven jump: continue numbering at the anchor and forget cues
+    /// wholly before it (a later backward jump reproduces them from the
+    /// demuxer's own re-read).
+    func reanchor(segmentIndex: Int, startSeconds: Double) {
+        self.segmentIndex = segmentIndex
+        pending.removeAll { $0.end <= startSeconds }
+    }
+
     func flushSegment(start: Double, end: Double) throws {
         let range = start...max(start, end)
         let inRange = pending
@@ -86,15 +105,19 @@ final class WebVTTRenditionWriter {
         let file = String(format: "seg%05d.vtt", segmentIndex)
         try Data(Self.render(cues: inRange, mpegtsOffset: mpegtsOffset).utf8)
             .write(to: directory.appendingPathComponent(file), options: .atomic)
-        try playlist.appendSegment(duration: max(0.001, end - start), file: file)
+        if !plannedMode {
+            try playlist.appendSegment(duration: max(0.001, end - start), file: file)
+        }
         segmentIndex += 1
 
         // Keep only what a later segment still has to repeat.
         pending.removeAll { $0.end <= range.upperBound }
     }
 
-    /// `EXT-X-ENDLIST` on the rendition playlist.
+    /// `EXT-X-ENDLIST` on the rendition playlist (no-op in planned mode —
+    /// the upfront playlist already ended).
     func finish() throws {
+        guard !plannedMode else { return }
         try playlist.finish()
     }
 

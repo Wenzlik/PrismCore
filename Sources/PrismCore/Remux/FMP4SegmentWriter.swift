@@ -78,7 +78,8 @@ final class FMP4SegmentWriter {
     /// arrives from `flushInitSegment()` once packets have been fed.
     func open(
         input: UnsafeMutablePointer<AVFormatContext>,
-        plan: [StreamPlan]
+        plan: [StreamPlan],
+        restart: Bool = false
     ) throws -> Data {
         var outputOpt: UnsafeMutablePointer<AVFormatContext>?
         try FFmpegError.check(
@@ -151,7 +152,19 @@ final class FMP4SegmentWriter {
         // default_base_moof → offsets relative to the moof, which is what
         //                  HLS-fMP4 players (AVPlayer included) require of
         //                  segments served as separate resources.
-        av_dict_set(&options, "movflags", "+delay_moov+frag_custom+default_base_moof", 0)
+        // frag_discont on RESTART muxers: a fresh movenc zero-bases its
+        // timeline by default, so a restart-produced segment would carry
+        // tfdt=0 while the playlist places it mid-presentation — an implicit
+        // discontinuity AVPlayer papers over for plain playback but that
+        // detaches ancillary consumers. With frag_discont (+ negative-ts
+        // passthrough below) tfdt carries the producer's ABSOLUTE
+        // timestamps, so a demand-produced segment is placed exactly where
+        // the plan promised it.
+        let flags = restart
+            ? "+delay_moov+frag_custom+default_base_moof+frag_discont"
+            : "+delay_moov+frag_custom+default_base_moof"
+        av_dict_set(&options, "movflags", flags, 0)
+        av_dict_set(&options, "avoid_negative_ts", "disabled", 0)
 
         try FFmpegError.check(
             avformat_write_header(output, &options),

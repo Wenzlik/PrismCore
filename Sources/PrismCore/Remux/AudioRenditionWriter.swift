@@ -32,7 +32,10 @@ final class AudioRenditionWriter {
     private let ordinal: Int
     private let directory: URL
 
-    private let writer = FMP4SegmentWriter()
+    private var writer = FMP4SegmentWriter()
+    /// Planned (demand-driven) mode: the playlist was written complete
+    /// upfront from the segment plan — cuts write FILES only.
+    private var plannedMode = false
     private let playlist: MediaPlaylistWriter
     private var bridge: AudioBridge?
     private var outputIndex: Int32 = 0
@@ -57,7 +60,7 @@ final class AudioRenditionWriter {
     /// its encoder. Must run before the master playlist is written: a bridged
     /// rendition's declared codec and channel count come from the encoder that
     /// only exists after this call.
-    func open(input: UnsafeMutablePointer<AVFormatContext>) throws {
+    func open(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool = false) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let index = Int32(track.streamIndex)
@@ -79,13 +82,34 @@ final class AudioRenditionWriter {
             plan = .init(inputIndex: index, language: sourceLanguage)
         }
 
-        _ = try writer.open(input: input, plan: [plan])
+        _ = try writer.open(input: input, plan: [plan], restart: restart)
         outputIndex = writer.streamMap[track.streamIndex] ?? 0
     }
 
     func close() {
         bridge?.close()
         bridge = nil
+    }
+
+    /// Planned mode: publish the complete rendition playlist upfront (same
+    /// durations as the video's — the playlist arithmetic must agree across
+    /// renditions) and stop appending at cuts.
+    func writePlannedVOD(durations: [Double]) throws {
+        plannedMode = true
+        try playlist.writePlannedVOD(durations: durations) { index in
+            String(format: "seg%05d.m4s", index)
+        }
+    }
+
+    /// Demand-driven jump: fresh muxer (and bridge) anchored at plan segment
+    /// `segmentIndex`. The old muxer's partial fragment is abandoned — that
+    /// segment gets reproduced if anything ever asks for it.
+    func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
+        close()
+        writer = FMP4SegmentWriter()
+        try open(input: input, restart: true)
+        self.segmentIndex = segmentIndex
+        pendingDuration = 0
     }
 
     /// Push one source packet for this track through copy or bridge.
@@ -155,10 +179,12 @@ final class AudioRenditionWriter {
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
-        try playlist.appendSegment(
-            duration: max(0.001, pendingDuration + durationSeconds),
-            file: file
-        )
+        if !plannedMode {
+            try playlist.appendSegment(
+                duration: max(0.001, pendingDuration + durationSeconds),
+                file: file
+            )
+        }
         pendingDuration = 0
         segmentIndex += 1
     }
@@ -177,14 +203,16 @@ final class AudioRenditionWriter {
         if !finalSegment.isEmpty {
             let file = String(format: "seg%05d.m4s", segmentIndex)
             try finalSegment.write(to: directory.appendingPathComponent(file), options: .atomic)
-            try playlist.appendSegment(
-                duration: max(0.001, pendingDuration + durationSeconds),
-                file: file
-            )
+            if !plannedMode {
+                try playlist.appendSegment(
+                    duration: max(0.001, pendingDuration + durationSeconds),
+                    file: file
+                )
+            }
             pendingDuration = 0
             segmentIndex += 1
         }
-        if endList {
+        if endList, !plannedMode {
             try playlist.finish()
         }
     }
