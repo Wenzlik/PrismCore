@@ -88,7 +88,11 @@ struct HVCCNormalizerTests {
             (type: 34, complete: false, units: [pps]),
         ])
         let normalized = try #require(HVCCNormalizer.normalize(hvcC: record))
-        #expect(arrays(of: normalized).allSatisfy(\.complete))
+        // Computed outside the macro: #expect decomposes a trailing function call
+        // into a rethrows helper, and a key-path-as-function argument reads as
+        // throwing there.
+        let completeness = arrays(of: normalized).map(\.complete)
+        #expect(completeness == [true, true, true])
     }
 
     @Test("SEI arrays are dropped, VPS/SPS/PPS survive in order")
@@ -336,6 +340,96 @@ struct DolbyVisionConversionDeclarationTests {
             displayIsDolbyVisionCapable: true
         )
         #expect(MasterPlaylistBuilder.primaryVideoCodecString(for: variant).hasPrefix("hvc1."))
+    }
+}
+
+// MARK: - Normalization end to end
+
+/// Walks an ISO-BMFF box tree looking for `hvcC`, returning its payload.
+///
+/// Deliberately dumb: descends only the containers that lead to a sample entry
+/// (`moov` → `trak` → `mdia` → `minf` → `stbl` → `stsd`), and treats an `hvc1` /
+/// `hev1` sample entry as a container whose children start 78 bytes in (the
+/// `VisualSampleEntry` fixed fields). Enough to read our own init segment; not a
+/// general parser.
+private func findHVCC(in data: Data) -> Data? {
+    func walk(_ range: Range<Int>, insideSampleEntry: Bool) -> Data? {
+        var cursor = range.lowerBound
+        while cursor + 8 <= range.upperBound {
+            let size = Int(data[cursor]) << 24 | Int(data[cursor + 1]) << 16
+                | Int(data[cursor + 2]) << 8 | Int(data[cursor + 3])
+            let type = String(decoding: data[(cursor + 4)..<(cursor + 8)], as: UTF8.self)
+            guard size >= 8, cursor + size <= range.upperBound else { return nil }
+            let payload = (cursor + 8)..<(cursor + size)
+
+            if type == "hvcC" { return data.subdata(in: payload) }
+            switch type {
+            case "moov", "trak", "mdia", "minf", "stbl":
+                if let found = walk(payload, insideSampleEntry: false) { return found }
+            case "stsd":
+                // version/flags(4) + entry_count(4), then the sample entries.
+                if payload.count > 8,
+                   let found = walk((payload.lowerBound + 8)..<payload.upperBound,
+                                    insideSampleEntry: true) {
+                    return found
+                }
+            case "hvc1", "hev1", "dvh1", "dvhe":
+                if payload.count > 78,
+                   let found = walk((payload.lowerBound + 78)..<payload.upperBound,
+                                    insideSampleEntry: false) {
+                    return found
+                }
+            default:
+                break
+            }
+            cursor += size
+        }
+        return nil
+    }
+    return walk(0..<data.count, insideSampleEntry: false)
+}
+
+@Suite("hvcC normalization, end to end")
+struct HVCCNormalizationIntegrationTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    @Test("the served init segment's hvcC is in hvc1 form, whatever the source's was")
+    func servedRecordIsNormalized() async throws {
+        let source = try fixture("hevc_eac3.mkv")
+        let session = try PrismCoreSession(url: source)
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        // The init segment is what AVPlayer parses the sample entry out of, so
+        // it — not our in-memory record — is what has to be right.
+        let initURL = playlist.deletingLastPathComponent().appendingPathComponent("init.mp4")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        var initSegment = Data()
+        while ContinuousClock.now < deadline {
+            if let (data, response) = try? await URLSession.shared.data(from: initURL),
+               (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
+                initSegment = data
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let served = try #require(findHVCC(in: initSegment), "no hvcC in the served init segment")
+
+        // The property that matters: nothing left to normalize. Every array is
+        // complete, none is an SEI array, and they are in VPS/SPS/PPS order.
+        #expect(HVCCNormalizer.normalize(hvcC: served) == nil)
+
+        // And the PTL still describes the same stream — normalization must never
+        // change what the CODECS string says.
+        let sourceInfo = try SourceProbe.probe(url: source)
+        let sourceRecord = try #require(sourceInfo.video?.hevcConfiguration)
+        let servedRecord = try #require(HEVCConfigurationRecord.parse(hvcC: served))
+        #expect(sourceRecord == servedRecord)
     }
 }
 

@@ -44,12 +44,17 @@ import Libavutil
 ///   falling back to v0's single muxed track is strictly better than serving
 ///   silence.
 ///
-/// Phase 4 added two edits to the otherwise byte-for-byte video copy, both
-/// applied before the muxer sees anything: the `hvcC` is normalized into the form
-/// a `hvc1` sample entry has to have (`HVCCNormalizer`), and a Dolby Vision
-/// Profile 7 source has its RPUs converted to 8.1 with the enhancement layer
-/// dropped (`DolbyVisionRPUConverter`) so a dual-layer file Apple can't decode
-/// arrives as a single-layer one it can. Neither touches picture data.
+/// Phase 4 added two edits to the otherwise byte-for-byte video copy, neither of
+/// which touches picture data:
+///
+/// - The `hvcC` is normalized into the form a `hvc1` sample entry has to have
+///   (`HVCCNormalizer`). This happens **twice**, on purpose: on the input
+///   extradata, which decides which parameter sets exist at all, and again on the
+///   produced init segment, because the muxer rebuilds the record when it writes
+///   the sample entry and leaves `array_completeness = 0` under a `hvc1` name.
+/// - A Dolby Vision Profile 7 source has its RPUs converted to 8.1 with the
+///   enhancement layer dropped (`DolbyVisionRPUConverter`), so a dual-layer file
+///   Apple can't decode arrives as a single-layer one it can.
 final class HLSRemuxer: @unchecked Sendable {
 
     /// How a selected audio stream reaches the output.
@@ -421,18 +426,29 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
 
+        /// Write the init segment the first time one is minted.
+        ///
+        /// Two things happen here. The `hvcC` gets its final correction: the muxer
+        /// rebuilds the record when it writes the sample entry and leaves
+        /// `array_completeness = 0` under a `hvc1` name, so normalizing the
+        /// source's extradata alone never reaches the artifact AVPlayer parses.
+        /// And a re-anchored muxer mints its moov again — the one already served
+        /// must not change under AVPlayer's cached `EXT-X-MAP`, so the first write
+        /// wins.
+        func writeInitSegmentIfAbsent(_ initSegment: Data) throws {
+            let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
+            guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
+            let bytes = HVCCNormalizer.patch(initSegment: initSegment) ?? initSegment
+            try bytes.write(to: initURL, options: .atomic)
+        }
+
         func emitSegment(endPTS: Int64) throws {
             let (initSegment, media) = try writer.cutSegment()
             // The first cut also mints the init segment (see cutSegment's
             // doc); write it BEFORE the playlist entry so a reader that saw
             // the manifest can always fetch what it references.
             if let initSegment, !initSegment.isEmpty {
-                let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
-                // A re-anchored muxer mints its moov again; the one already
-                // served must not change under AVPlayer's cached EXT-X-MAP.
-                if !FileManager.default.fileExists(atPath: initURL.path) {
-                    try initSegment.write(to: initURL, options: .atomic)
-                }
+                try writeInitSegmentIfAbsent(initSegment)
             }
             // A boundary that produced no video bytes writes nothing anywhere,
             // renditions included: skipping the cut on all of them together is
@@ -632,10 +648,7 @@ final class HLSRemuxer: @unchecked Sendable {
             let closingPTS = lastVideoEndPTS ?? nextBoundaryPTS
             let (initSegment, media) = try writer.cutSegment()
             if let initSegment, !initSegment.isEmpty {
-                let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
-                if !FileManager.default.fileExists(atPath: initURL.path) {
-                    try initSegment.write(to: initURL, options: .atomic)
-                }
+                try writeInitSegmentIfAbsent(initSegment)
             }
             var finalSegment = media
             finalSegment.append(try writer.finish())
@@ -851,9 +864,9 @@ final class HLSRemuxer: @unchecked Sendable {
             throw FFmpegError(code: -1, operation: "av_malloc(extradata)")
         }
         data.withUnsafeBytes { source in
-            memcpy(buffer, source.baseAddress!, data.count)
+            _ = memcpy(buffer, source.baseAddress!, data.count)
         }
-        memset(buffer.advanced(by: data.count), 0, padding)
+        _ = memset(buffer.advanced(by: data.count), 0, padding)
         av_free(par.pointee.extradata)
         par.pointee.extradata = buffer.assumingMemoryBound(to: UInt8.self)
         par.pointee.extradata_size = Int32(data.count)
@@ -921,7 +934,7 @@ final class HLSRemuxer: @unchecked Sendable {
             throw FFmpegError(code: -1, operation: "packet has no data after resize")
         }
         bytes.withUnsafeBytes { source in
-            memcpy(destination, source.baseAddress!, bytes.count)
+            _ = memcpy(destination, source.baseAddress!, bytes.count)
         }
     }
 

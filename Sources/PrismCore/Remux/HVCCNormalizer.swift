@@ -113,6 +113,77 @@ enum HVCCNormalizer {
         return Data(output)
     }
 
+    // MARK: - Patching a produced init segment
+
+    /// Normalize the `hvcC` **inside a produced fMP4 init segment**.
+    ///
+    /// This exists because normalizing the source's extradata is not sufficient,
+    /// which the end-to-end test found the hard way: FFmpeg's `mp4` muxer does not
+    /// copy our record into the sample entry — `ff_isom_write_hvcc` *rebuilds* one
+    /// from the parameter sets it collected, and writes `array_completeness = 0`
+    /// while naming the entry `hvc1`. So the input-side rewrite decides which
+    /// parameter sets exist (dropping SEI and RPU arrays, which do propagate) and
+    /// this decides what the sample entry finally asserts about them.
+    ///
+    /// Returns `nil` when there is nothing to patch — no `hvcC` (H.264 sources),
+    /// or a record already in form.
+    static func patch(initSegment data: Data) -> Data? {
+        guard let payload = locateHVCCPayload(in: data) else { return nil }
+        guard let normalized = normalize(hvcC: data.subdata(in: payload)) else { return nil }
+        // A length change would move every following box and invalidate the
+        // enclosing `size` fields up the tree. It shouldn't happen — the arrays
+        // the input-side pass drops never reach here — so the safe answer is to
+        // leave the segment exactly as the muxer wrote it rather than splice a
+        // tree we'd have to re-frame.
+        guard normalized.count == payload.count else { return nil }
+        var patched = data
+        patched.replaceSubrange(payload, with: normalized)
+        return patched
+    }
+
+    /// Byte range of the `hvcC` box's payload inside an ISO-BMFF tree.
+    ///
+    /// Descends only what leads to a sample entry, and treats an HEVC sample
+    /// entry as a container whose children begin 78 bytes in (the
+    /// `VisualSampleEntry` fixed fields). Not a general parser — it reads init
+    /// segments this package wrote.
+    private static func locateHVCCPayload(in data: Data) -> Range<Int>? {
+        func walk(_ range: Range<Int>) -> Range<Int>? {
+            var cursor = range.lowerBound
+            while cursor + 8 <= range.upperBound {
+                let size = Int(data[cursor]) << 24 | Int(data[cursor + 1]) << 16
+                    | Int(data[cursor + 2]) << 8 | Int(data[cursor + 3])
+                let type = String(decoding: data[(cursor + 4)..<(cursor + 8)], as: UTF8.self)
+                // A malformed or extended-size box ends the walk: `nil` leaves
+                // the segment untouched, which is always survivable.
+                guard size >= 8, cursor + size <= range.upperBound else { return nil }
+                let payload = (cursor + 8)..<(cursor + size)
+
+                if type == "hvcC" { return payload }
+                switch type {
+                case "moov", "trak", "mdia", "minf", "stbl":
+                    if let found = walk(payload) { return found }
+                case "stsd":
+                    // version+flags(4) + entry_count(4), then the sample entries.
+                    if payload.count > 8,
+                       let found = walk((payload.lowerBound + 8)..<payload.upperBound) {
+                        return found
+                    }
+                case "hvc1", "hev1", "dvh1", "dvhe":
+                    if payload.count > 78,
+                       let found = walk((payload.lowerBound + 78)..<payload.upperBound) {
+                        return found
+                    }
+                default:
+                    break
+                }
+                cursor += size
+            }
+            return nil
+        }
+        return walk(0..<data.count)
+    }
+
     /// Are the record's arrays already in VPS → SPS → PPS order?
     ///
     /// Cheap re-walk of just the array headers. Worth it: the common case is a

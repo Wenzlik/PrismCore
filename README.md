@@ -151,9 +151,16 @@ Prism, and Prism retires only at parity.
      gets a `hvc1` sample entry, which asserts every parameter set lives in that
      entry. Matroska `CodecPrivate` routinely says otherwise
      (`array_completeness=0`) and carries SEI arrays besides, so the record is
-     rewritten to VPS/SPS/PPS in order with completeness asserted. The 22-byte
-     profile_tier_level header is copied verbatim — it is what the `CODECS`
-     string is printed from, so the declaration keeps matching the init segment.
+     rewritten to VPS/SPS/PPS in order with completeness asserted. This runs
+     **twice**: once on the input extradata, which decides which parameter sets
+     exist, and again on the produced init segment — FFmpeg's `mp4` muxer does
+     not copy our record into the sample entry, it rebuilds one and re-zeroes
+     `array_completeness` while still naming the entry `hvc1`. (Which the
+     end-to-end test found by reading the served `init.mp4`, after the
+     input-side pass alone was assumed to be enough.) The 22-byte
+     profile_tier_level header is copied verbatim either way — it is what the
+     `CODECS` string is printed from, so the declaration keeps matching the init
+     segment.
    - **P7 → 8.1 RPU conversion** (`DolbyVisionRPUConverter`) — Profile 7 is
      dual-layer with an HDR10 base no Apple platform decodes as DV. libdovi
      (already linked into MPVKit's `_FFmpeg`) rewrites each RPU NAL to its

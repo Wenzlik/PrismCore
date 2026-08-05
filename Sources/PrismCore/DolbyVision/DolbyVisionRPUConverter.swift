@@ -100,7 +100,7 @@ final class DolbyVisionRPUConverter {
         #if canImport(Libdovi)
         return nal.withUnsafeBufferPointer { buffer -> [UInt8]? in
             guard let base = buffer.baseAddress,
-                  let rpu = dovi_parse_unspec62_nalu(base, UInt(buffer.count))
+                  let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
             else { return nil }
             defer { dovi_rpu_free(rpu) }
 
