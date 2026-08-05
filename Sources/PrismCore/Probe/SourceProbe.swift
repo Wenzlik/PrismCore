@@ -129,6 +129,71 @@ public struct AVCConfigurationRecord: Sendable, Equatable {
     }
 }
 
+/// The `av1C` fields an AV1 `CODECS` string is made of (AV1 Codec ISO Media File
+/// Format Binding, §2.3).
+///
+/// Small, but it has to be read rather than assumed: the level and tier decide
+/// whether a decoder will accept the stream at all, and RFC 6381's AV1 form
+/// carries them.
+public struct AV1ConfigurationRecord: Sendable, Equatable {
+    /// `seq_profile`: 0 = Main, 1 = High, 2 = Professional.
+    public let profile: UInt8
+    /// `seq_level_idx_0`, printed as two digits (level 4.0 is index 8).
+    public let levelIndex: UInt8
+    /// `seq_tier_0`: 0 = Main tier ('M'), 1 = High tier ('H').
+    public let tier: UInt8
+    /// Luma bit depth, derived from `high_bitdepth` + `twelve_bit`: 8, 10 or 12.
+    public let bitDepth: UInt8
+    public let isMonochrome: Bool
+
+    public init(
+        profile: UInt8, levelIndex: UInt8, tier: UInt8, bitDepth: UInt8, isMonochrome: Bool
+    ) {
+        self.profile = profile
+        self.levelIndex = levelIndex
+        self.tier = tier
+        self.bitDepth = bitDepth
+        self.isMonochrome = isMonochrome
+    }
+
+    /// Parses an `AV1CodecConfigurationRecord` (the `av1C` box payload, which is
+    /// what libavformat hands over as AV1 extradata).
+    ///
+    /// `nil` for anything whose marker and version bytes don't match — an AV1
+    /// stream with no config record has no honest `CODECS` string, and the caller
+    /// then serves it media-direct rather than guessing a level.
+    public static func parse(av1C data: Data) -> AV1ConfigurationRecord? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 4 else { return nil }
+        // marker(1) must be 1, version(7) must be 1.
+        guard bytes[0] & 0x80 != 0, bytes[0] & 0x7F == 1 else { return nil }
+
+        let profile = (bytes[1] & 0xE0) >> 5
+        let levelIndex = bytes[1] & 0x1F
+        let tier = (bytes[2] & 0x80) >> 7
+        let highBitDepth = bytes[2] & 0x40 != 0
+        let twelveBit = bytes[2] & 0x20 != 0
+        let monochrome = bytes[2] & 0x10 != 0
+
+        // Twelve-bit exists only in the Professional profile; elsewhere the
+        // high-bitdepth flag alone means 10.
+        let bitDepth: UInt8
+        if profile == 2, highBitDepth, twelveBit {
+            bitDepth = 12
+        } else {
+            bitDepth = highBitDepth ? 10 : 8
+        }
+
+        return AV1ConfigurationRecord(
+            profile: profile,
+            levelIndex: levelIndex,
+            tier: tier,
+            bitDepth: bitDepth,
+            isMonochrome: monochrome
+        )
+    }
+}
+
 /// The container's `AVDOVIDecoderConfigurationRecord` (the `dvcC` / `dvvC`
 /// box), which is what decides the whole DV signaling route.
 public struct DolbyVisionConfiguration: Sendable, Equatable {
@@ -222,6 +287,8 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let hevcConfiguration: HEVCConfigurationRecord?
     /// The `avcC` bytes, for H.264 sources (`nil` for anything else).
     public let avcConfiguration: AVCConfigurationRecord?
+    /// The `av1C` fields, for AV1 sources (`nil` for anything else).
+    public let av1Configuration: AV1ConfigurationRecord?
     /// How many bytes each NAL unit's length prefix occupies in this stream's
     /// packets (`lengthSizeMinusOne + 1`), read from the configuration record.
     ///
@@ -373,6 +440,24 @@ public enum SourceProbe {
     /// Deliberately the same set `HLSRemuxer` enforces — the probe's verdict
     /// has to match what the remuxer will actually accept.
     private static let copyableVideo: Set<AVCodecID> = [AV_CODEC_ID_H264, AV_CODEC_ID_HEVC]
+
+    /// Can this video stream ride the fMP4 pipeline to `AVPlayer`?
+    ///
+    /// H.264 and HEVC always. **AV1 only where the device decodes it in
+    /// hardware** — there is no software AV1 decoder behind VideoToolbox, so on an
+    /// M1 or M2 (Vision Pro included) an AV1 variant would be offered and then not
+    /// play. Where it isn't supported the answer is `.unsupported`, which routes
+    /// the source to PrismCore's own software path and libdav1d.
+    ///
+    /// `isAV1HardwareSupported` is injected so the rule is testable on either kind
+    /// of machine.
+    static func isVideoStreamCopyable(
+        _ codecID: AVCodecID,
+        isAV1HardwareSupported: Bool = HardwareDecodeSupport.isAV1Supported
+    ) -> Bool {
+        if codecID == AV_CODEC_ID_AV1 { return isAV1HardwareSupported }
+        return copyableVideo.contains(codecID)
+    }
     private static let copyableAudio: Set<AVCodecID> = [
         AV_CODEC_ID_AAC, AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3,
         AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC,
@@ -509,6 +594,15 @@ public enum SourceProbe {
             return AVCConfigurationRecord.parse(avcC: data)
         }()
 
+        let av1Configuration: AV1ConfigurationRecord? = {
+            guard par.codec_id == AV_CODEC_ID_AV1,
+                  let extradata = par.extradata, par.extradata_size > 0
+            else { return nil }
+            return AV1ConfigurationRecord.parse(
+                av1C: Data(bytes: extradata, count: Int(par.extradata_size))
+            )
+        }()
+
         // Both configuration records put `lengthSizeMinusOne` in their last two
         // bits, at different offsets: byte 21 of an `hvcC`, byte 4 of an `avcC`.
         let nalUnitLengthSize: Int? = {
@@ -589,10 +683,11 @@ public enum SourceProbe {
             frameRateSource: frameRateSource,
             hevcConfiguration: hevcConfiguration,
             avcConfiguration: avcConfiguration,
+            av1Configuration: av1Configuration,
             nalUnitLengthSize: nalUnitLengthSize,
             dolbyVision: dolbyVision,
             dynamicRange: dynamicRange,
-            copyability: copyableVideo.contains(par.codec_id) ? .streamCopy : .unsupported
+            copyability: isVideoStreamCopyable(par.codec_id) ? .streamCopy : .unsupported
         )
     }
 

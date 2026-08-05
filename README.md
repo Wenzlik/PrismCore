@@ -128,6 +128,18 @@ track muxed into the video's own segments, media playlist served directly.
 Renditions only exist inside a master, so no master means the audio rides
 inside the variant.
 
+**AV1 is the one codec whose eligibility depends on the device, not the source.**
+Apple's hardware AV1 decoder arrived with the A17 Pro and the M3, and there is no
+software AV1 decoder behind VideoToolbox — Safari plays AV1 on an M1 or M2 through
+its own dav1d, not through the system. So on those chips (Vision Pro's M2
+included) an AV1 variant offered to `AVPlayer` doesn't play *slowly*, it doesn't
+play. `HardwareDecodeSupport.isAV1Supported` asks the device with
+`VTIsHardwareDecodeSupported` rather than inferring from a chip name, and where
+the answer is no, AV1 routes to the software path and libdav1d — which is the only
+way it plays there at all. Neatly, that makes visionOS both the platform that
+needs the software path most and the one where its unfinished parts (subtitles,
+track switching) matter most.
+
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and
 by an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
 `SegmentProvider` rather than straight off disk: `DirectorySegmentProvider` is
@@ -182,7 +194,7 @@ than a convention.
 routing is additive — sources PrismCore can't take yet keep falling back to
 Prism, and Prism retires only at parity.
 
-1. **v0 (this)** — stream-copyable A/V (HEVC/H.264 + AAC/AC3/EAC3/FLAC/ALAC),
+1. **v0 (this)** — stream-copyable A/V (HEVC/H.264/AV1 + AAC/AC3/EAC3/FLAC/ALAC),
    loopback server, event playlist. Plays an MKV remux with Atmos intact —
    which is already the bulk of what Prism handles in the wild. **Multi-audio**
    landed here rather than later: every viable audio track is served as an
