@@ -76,15 +76,11 @@ struct SubtitleRenditionTests {
         #expect(rendition.language == "ces")
         #expect(rendition.name == "Czech")   // the container's title metadata
 
-        // The master a host would serve carries the rendition and points the
-        // variant at its group.
-        let master = try MasterPlaylistBuilder.build(
-            MasterPlaylistBuilder.VariantDescription(
-                bandwidth: 1_000_000,
-                videoCodec: .explicit("avc1.64001f"),
-                subtitles: renditions
-            )
-        )
+        // The SERVED master — the one AVPlayer actually reads — carries the
+        // rendition and points the variant at its group. Asserted against the
+        // loopback, not a hand-built VariantDescription: the renditions were
+        // once produced but never declared, and a manual build can't regress.
+        let (master, _) = try await fetch(playlist)
         #expect(master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"))
         #expect(master.contains("LANGUAGE=\"ces\""))
         #expect(master.contains("URI=\"subs0/index.m3u8\""))
@@ -158,6 +154,12 @@ struct SubtitleRenditionTests {
         #expect(renditions.first?.name == "Deutsch")
         #expect(renditions.first?.language == "de")
         #expect(renditions.first?.uri == "subs0/index.m3u8")
+
+        // Externals get declared in the served master exactly like embedded
+        // tracks — same production path, same publication path.
+        let (master, _) = try await fetch(playlist)
+        #expect(master.contains("NAME=\"Deutsch\""))
+        #expect(master.contains("URI=\"subs0/index.m3u8\""))
 
         let base = playlist.deletingLastPathComponent()
         let (first, _) = try await fetch(base.appendingPathComponent("subs0/seg00000.vtt"))

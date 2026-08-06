@@ -303,9 +303,10 @@ public actor PrismCoreSession {
     /// (embedded text tracks first, then registered external files).
     ///
     /// Populated once the remux has opened the source, i.e. any time after
-    /// `start()` returns. Feed them to `MasterPlaylistBuilder` — a `SUBTITLES`
-    /// group only exists in a master playlist, so a session served media-direct
-    /// produces the renditions on disk but nothing selects them.
+    /// `start()` returns. The session's own master playlist already declares
+    /// them — this is informational (a host listing tracks in its UI). A
+    /// `SUBTITLES` group only exists in a master playlist, so a session served
+    /// media-direct produces the renditions on disk but nothing selects them.
     public var subtitleRenditions: [MasterPlaylistBuilder.SubtitleRendition] {
         remuxer.subtitles.renditions
     }

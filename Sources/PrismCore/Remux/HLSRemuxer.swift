@@ -373,6 +373,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     // `chooseAudio` would have picked (see `routeAll`).
                     rendition.rendition(groupID: Self.audioGroupID, isDefault: ordinal == 0)
                 }
+                // The WebVTT renditions `prepare` set up above. Declaring them
+                // here is what makes them exist for AVPlayer: the segments are
+                // produced either way, but only the master's SUBTITLES group
+                // puts them in the legible selection group.
+                variant.subtitles = subtitles.renditions
                 try Data(try MasterPlaylistBuilder.build(variant).utf8).write(
                     to: outputDirectory.appendingPathComponent(Self.masterPlaylistFileName),
                     options: .atomic
