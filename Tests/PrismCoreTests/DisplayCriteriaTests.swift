@@ -157,6 +157,27 @@ struct DisplayCriteriaLogicTests {
             headroomIsRaised: false, wroteHDRCriteria: false, panelHasProvenHDR: true
         ))
     }
+
+    @Test("A dynamic-range write gets room for a real HDMI handshake; rate-only keeps the short bounds")
+    func settleBoundsScaleWithTheWrite() {
+        // The race this pins: a DV/HDR10 switch that ends after the old flat
+        // 1 s + 2 s window loaded the master against the panel's previous
+        // mode, and the -11868 fallback silently played the title as HDR10 —
+        // Dolby Vision one run, black-bars HDR10 the next.
+        let hdr = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: true)
+        #expect(hdr.startGrace == .seconds(2))
+        #expect(hdr.settleCap == .seconds(6))
+
+        // A refresh-rate switch has no range claim to lose a race for, and
+        // stretching every SDR load would be dead startup time.
+        let rateOnly = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: false)
+        #expect(rateOnly.startGrace == .seconds(1))
+        #expect(rateOnly.settleCap == .seconds(2))
+
+        // The old flat bounds must never quietly come back for HDR writes.
+        #expect(hdr.startGrace > rateOnly.startGrace)
+        #expect(hdr.settleCap > rateOnly.settleCap)
+    }
 }
 
 // MARK: - Master-vs-media routing
