@@ -3,6 +3,9 @@ import AVFoundation
 #if canImport(AppKit)
 import AppKit
 #endif
+#if os(iOS) || os(tvOS)
+import UIKit
+#endif
 
 /// What the display this session plays to can actually present.
 ///
@@ -45,12 +48,37 @@ public struct DisplayCapabilities: Sendable, Equatable {
     public let isHDRReady: Bool
     /// Whether Dolby Vision may be claimed on top of it.
     public let isDolbyVisionCapable: Bool
+    /// Whether the panel is presenting HDR *right now* — `true` when the EDR
+    /// headroom is raised at read time, `nil` when there was nothing to ask.
+    ///
+    /// Only the `true` is load-bearing: a panel already out of SDR takes an
+    /// HDR master no matter what the capability read said, so this rescues the
+    /// session whose `availableHDRModes` read failed (`.conservative`) while
+    /// the panel demonstrably runs HDR. `false` proves nothing — the headroom
+    /// is raised around a dynamic-range *transition* and decays back to 1.0
+    /// while the panel keeps presenting HDR — so `false` never subtracts from
+    /// `isHDRReady`. `DisplayCriteriaController.currentPanelIsHDR()` is the
+    /// post-handshake read a host feeds back in here for its next session.
+    public let panelIsCurrentlyHDR: Bool?
     public let source: Source
 
-    public init(isHDRReady: Bool, isDolbyVisionCapable: Bool, source: Source = .caller) {
+    public init(
+        isHDRReady: Bool,
+        isDolbyVisionCapable: Bool,
+        panelIsCurrentlyHDR: Bool? = nil,
+        source: Source = .caller
+    ) {
         self.isHDRReady = isHDRReady
         self.isDolbyVisionCapable = isDolbyVisionCapable
+        self.panelIsCurrentlyHDR = panelIsCurrentlyHDR
         self.source = source
+    }
+
+    /// The routing question: may this session offer an HDR variant at all?
+    /// Capability is the optimistic read; a panel currently presenting HDR is
+    /// the certain one.
+    public var offersHDR: Bool {
+        isHDRReady || panelIsCurrentlyHDR == true
     }
 
     /// Everything off — what a session gets when nobody asked and nothing could
@@ -89,17 +117,32 @@ public struct DisplayCapabilities: Sendable, Equatable {
             // presentation the base layer already gives us. Revisit with a
             // device, not with a guess.
             isDolbyVisionCapable: false,
+            // The *current* (not potential) headroom: above 1.0 means EDR
+            // content is being presented right now.
+            panelIsCurrentlyHDR:
+                screen.maximumExtendedDynamicRangeColorComponentValue > 1.001,
             source: .extendedDynamicRange
         )
         #else
         // On tvOS this is the read that matters: it reflects the display across
         // the HDMI link, so it changes with the TV the box is plugged into.
         let modes = AVPlayer.availableHDRModes
+        // A raised EDR headroom at read time means the panel is out of SDR
+        // right now. Only trustworthy as a positive (see the property), and
+        // visionOS has no `UIScreen` to ask.
+        #if os(iOS) || os(tvOS)
+        let panelIsHDRNow: Bool? = UIScreen.main.currentEDRHeadroom > 1.001
+        #else
+        let panelIsHDRNow: Bool? = nil
+        #endif
         guard !modes.isEmpty else {
             // An empty set is a real answer (SDR display), not a failure —
             // report it as such so a host can tell it from "couldn't ask".
             return DisplayCapabilities(
-                isHDRReady: false, isDolbyVisionCapable: false, source: .availableHDRModes
+                isHDRReady: false,
+                isDolbyVisionCapable: false,
+                panelIsCurrentlyHDR: panelIsHDRNow,
+                source: .availableHDRModes
             )
         }
         return DisplayCapabilities(
@@ -107,6 +150,7 @@ public struct DisplayCapabilities: Sendable, Equatable {
             // leave SDR, which is what gates offering a PQ or HLG variant.
             isHDRReady: true,
             isDolbyVisionCapable: modes.contains(.dolbyVision),
+            panelIsCurrentlyHDR: panelIsHDRNow,
             source: .availableHDRModes
         )
         #endif

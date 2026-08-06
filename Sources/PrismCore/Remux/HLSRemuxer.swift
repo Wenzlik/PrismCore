@@ -159,6 +159,16 @@ final class HLSRemuxer: @unchecked Sendable {
         conversionStatsLock.withLock { storedConversionStats }
     }
 
+    /// The display criteria this session wants programmed before AVPlayer
+    /// loads its playlist. Known once the probe has run — i.e. from the
+    /// moment the playlists exist — and `nil` before that.
+    private let criteriaChoiceLock = NSLock()
+    private var storedCriteriaChoice: DisplayCriteriaChoice?
+
+    var displayCriteriaChoice: DisplayCriteriaChoice? {
+        criteriaChoiceLock.withLock { storedCriteriaChoice }
+    }
+
     private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
         let stats = DolbyVisionConversionStats(
             convertedRPUs: converter.convertedRPUs,
@@ -263,6 +273,21 @@ final class HLSRemuxer: @unchecked Sendable {
         let outputDolbyVision = dolbyVisionConverter != nil
             ? videoTrack.dolbyVision?.convertedToProfile81
             : videoTrack.dolbyVision
+
+        // What the panel should be asked for before AVPlayer loads any of
+        // this. Computed from the same declared configuration the manifest
+        // claims, so the criteria and the playlist never disagree about what
+        // is being played.
+        let criteriaChoice = DisplayCriteriaChoice.forSource(
+            dynamicRange: videoTrack.dynamicRange,
+            declaredDolbyVision: outputDolbyVision,
+            display: DisplayCapabilities(
+                isHDRReady: displayIsHDRReady,
+                isDolbyVisionCapable: displayIsDolbyVisionCapable
+            ),
+            frameRate: videoTrack.frameRate
+        )
+        criteriaChoiceLock.withLock { storedCriteriaChoice = criteriaChoice }
 
         let videoVariant = makeVideoVariant(
             input: input, video: videoTrack, dolbyVision: outputDolbyVision
@@ -1127,13 +1152,12 @@ final class HLSRemuxer: @unchecked Sendable {
     ) -> MasterPlaylistBuilder.VariantDescription? {
         guard let codec = videoCodecDeclaration(for: video) else { return nil }
 
-        // A range the display can't take must not be claimed, and must not be
-        // *mis*-claimed either: declaring an HDR10 stream as SDR doesn't fool
-        // the compatibility gate (it reads the bitstream's own `colr`), it only
-        // makes the manifest a lie. So an HDR source on a display the host
-        // hasn't vouched for gets no master at all, which is exactly the shape
-        // v0 already served it.
-        guard video.dynamicRange == .sdr || displayIsHDRReady else { return nil }
+        guard Self.masterVariantPermitted(
+            dynamicRange: video.dynamicRange,
+            dolbyVision: dolbyVision,
+            displayIsHDRReady: displayIsHDRReady,
+            displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
+        ) else { return nil }
 
         return MasterPlaylistBuilder.VariantDescription(
             mediaPlaylistURI: Self.mediaPlaylistFileName,
@@ -1147,6 +1171,36 @@ final class HLSRemuxer: @unchecked Sendable {
             dolbyVision: dolbyVision,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
         )
+    }
+
+    /// Whether this source may be wrapped in a master playlist for this
+    /// display at all. `false` routes the session media-direct.
+    ///
+    /// - A range the display can't take must not be claimed, and must not be
+    ///   *mis*-claimed either: declaring an HDR10 stream as SDR doesn't fool
+    ///   the compatibility gate (it reads the bitstream's own `colr`), it only
+    ///   makes the manifest a lie. So an HDR source on a display the host
+    ///   hasn't vouched for gets no master, which is exactly the shape v0
+    ///   already served it.
+    /// - Profile 5 on a non-DV display gets no master either, *proactively*:
+    ///   its primary tag is a bare `dvh1.05.xx` (there is no base codec to
+    ///   fall back to and no `SUPPLEMENTAL-CODECS` brand for P5), so a non-DV
+    ///   client's variant filter rejects the whole master with `-11868` —
+    ///   there is no sibling variant it could pick instead. Media-direct is
+    ///   the route that works there: AVPlayer tone-maps from the `dvh1`
+    ///   sample entry. Serving the master just to watch it be refused would
+    ///   burn a failed load on every P5 play.
+    static func masterVariantPermitted(
+        dynamicRange: DynamicRange,
+        dolbyVision: DolbyVisionConfiguration?,
+        displayIsHDRReady: Bool,
+        displayIsDolbyVisionCapable: Bool
+    ) -> Bool {
+        guard dynamicRange == .sdr || displayIsHDRReady else { return false }
+        if let dv = dolbyVision, dv.isSingleLayerDVOnly, !displayIsDolbyVisionCapable {
+            return false
+        }
+        return true
     }
 
     /// How the video codec is declared — from the container's own configuration
