@@ -54,6 +54,34 @@ public enum DisplayCriteriaLogic {
         if headroomIsRaised { return true }
         return wroteHDRCriteria && panelHasProvenHDR
     }
+
+    /// How long `waitForSwitch` may spend on each stage, by what the last
+    /// write asked of the panel.
+    ///
+    /// A dynamic-range switch is a real HDMI renegotiation — HDCP re-auth,
+    /// mode engage, often through an AVR — and on living-room chains it
+    /// routinely takes 2–5 s to *end*, and over a second to visibly *start*.
+    /// The old flat 1 s + 2 s bounds lost that race often enough to matter:
+    /// the master loaded against the panel's old mode, tvOS refused the DV
+    /// claim (`-11868`), and the rejection fallback silently replayed the
+    /// title as HDR10 — a different HDMI mode with the TV's other picture
+    /// preset. One play engaged Dolby Vision, the next didn't, and which one
+    /// a viewer got was a coin flip (found on an Apple TV 4K driving a real
+    /// panel, 2026-08-07).
+    ///
+    /// Both waits exit on the first positive signal (mode-switch-end, raised
+    /// headroom, in-progress flag clearing), so generous caps cost nothing on
+    /// panels that report their switches; the caps only bind where the switch
+    /// is genuinely still running or unobservable. Rate-only writes keep the
+    /// old bounds — a refresh-rate switch has no range claim to lose a race
+    /// for, and stretching every SDR load would be pure dead time.
+    public static func settleBounds(
+        wantsHDRPanel: Bool
+    ) -> (startGrace: Duration, settleCap: Duration) {
+        wantsHDRPanel
+            ? (startGrace: .seconds(2), settleCap: .seconds(6))
+            : (startGrace: .seconds(1), settleCap: .seconds(2))
+    }
 }
 
 #if os(tvOS)
@@ -189,10 +217,19 @@ public final class DisplayCriteriaController {
     /// flag sticks — which is why the cap exists and why hitting it is not an
     /// error: the panel is mid re-sync (black) during the handshake anyway,
     /// and shows the correct picture once it locks.
+    ///
+    /// `nil` bounds (the defaults) resolve per what the last `apply(_:)`
+    /// wrote — dynamic-range switches get room for a real HDMI renegotiation,
+    /// rate-only switches keep short bounds. See
+    /// `DisplayCriteriaLogic.settleBounds` for the numbers and the race they
+    /// close; pass explicit values only to override that policy.
     public func waitForSwitch(
-        startGrace: Duration = .seconds(1),
-        settleCap: Duration = .seconds(2)
+        startGrace: Duration? = nil,
+        settleCap: Duration? = nil
     ) async {
+        let bounds = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: lastWriteWantedHDR)
+        let startGrace = startGrace ?? bounds.startGrace
+        let settleCap = settleCap ?? bounds.settleCap
         let manager = window.avDisplayManager
         let screen = window.screen
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
