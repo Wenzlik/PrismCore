@@ -504,6 +504,7 @@ struct SourceInfoRoutingTests {
             isBT2020: true,
             frameRate: 23.976,
             frameRateSource: .averageFrameRate,
+            fieldOrder: .progressive,
             hevcConfiguration: nil,
             avcConfiguration: nil,
             av1Configuration: nil,

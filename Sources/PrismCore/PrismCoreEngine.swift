@@ -138,10 +138,22 @@ public enum PrismCoreEngine {
             )
 
         case .unsupported:
-            // The video itself can't ride the pipeline (VP9, MPEG-2, VC-1, …).
-            // This is what phase 7 exists for.
+            // The video itself can't ride the pipeline (VP9, MPEG-2, VC-1, …)
+            // — or it is verified interlaced, which AVPlayer would display
+            // with combing because it never deinterlaces. Either way, this is
+            // what phase 7 exists for.
             guard let entry = availability.entry(for: video.codecName), entry.isAvailable else {
                 throw RoutingFailure.noDecoderForVideo(codecName: video.codecName)
+            }
+            if video.fieldOrder.isInterlaced {
+                return Decision(
+                    engine: .software,
+                    reason: """
+                        video \(video.codecName) is interlaced \
+                        (\(video.fieldOrder.rawValue)); AVPlayer never \
+                        deinterlaces, the software path does (bwdif)
+                        """
+                )
             }
             return Decision(
                 engine: .software,

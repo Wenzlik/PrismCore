@@ -402,10 +402,21 @@ Prism, and Prism retires only at parity.
    Atmos, but sound; and when a build *does* have the encoder, the bridge keeps
    the native path instead.
 
-   Still open in this phase: deinterlacing (so interlaced H.264 is deliberately
-   still routed to the native path rather than here — no point claiming a
-   deinterlace that doesn't exist), subtitles, track switching, and
-   frame-accurate seek.
+   **Deinterlacing landed** (CPU `bwdif`, field-rate): a *verified* interlaced
+   H.264 source now routes here instead of the native path — AVPlayer never
+   deinterlaces, so a stream-copy played with combing. Verified matters:
+   broadcast H.264 is routinely *flagged* interlaced around progressive frames
+   ("progressive in interlaced carriage"), so the probe decodes a handful of
+   frames before believing the flag — evicting those from the native path
+   would trade hardware decode and Atmos passthrough for deinterlacing
+   nothing. The filter runs `deint=interlaced`, so mixed content passes its
+   progressive stretches through untouched. GPU deinterlace
+   (`yadif_videotoolbox`) is a build away, not a code path away: this FFmpeg
+   build doesn't compile the filter (the same gap AetherEngine closed in its
+   own FFmpeg build), and the aether-ffmpeg pipeline exists when it's wanted.
+
+   Still open in this phase: subtitles, track switching, and frame-accurate
+   seek.
 
 ## Using it
 

@@ -268,6 +268,27 @@ public enum StreamCopyability: String, Sendable, Equatable {
 }
 
 public struct VideoTrackInfo: Sendable, Equatable {
+
+    /// How the stream's pictures are scanned — after verification, not as
+    /// declared. Broadcast H.264 routinely arrives *flagged* interlaced while
+    /// carrying progressive frames ("progressive in interlaced carriage"),
+    /// and trusting the flag would evict exactly those sources from the
+    /// native path for no visual gain — so a declared-interlaced H.264 stream
+    /// is verified against a handful of decoded frames before it is reported
+    /// interlaced here.
+    public enum FieldOrder: String, Sendable, Equatable {
+        case progressive
+        case topFieldFirst
+        case bottomFieldFirst
+        /// The container didn't say and no verification ran — treated as
+        /// progressive by routing (never evict on a guess).
+        case unknown
+
+        public var isInterlaced: Bool {
+            self == .topFieldFirst || self == .bottomFieldFirst
+        }
+    }
+
     public let streamIndex: Int
     public let codecName: String
     public let profileName: String?
@@ -284,6 +305,10 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let isBT2020: Bool
     public let frameRate: Double?
     public let frameRateSource: FrameRateSource
+    /// Verified scan type; see `FieldOrder`. Interlaced video cannot ride the
+    /// native path honestly — AVPlayer does not deinterlace, so a stream-copy
+    /// would play with combing — which is why `copyability` reflects this.
+    public let fieldOrder: FieldOrder
     public let hevcConfiguration: HEVCConfigurationRecord?
     /// The `avcC` bytes, for H.264 sources (`nil` for anything else).
     public let avcConfiguration: AVCConfigurationRecord?
@@ -520,7 +545,9 @@ public enum SourceProbe {
         // real packets.
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
-        return describe(input: input)
+        // The probe context is one-shot (closed on return), so it is the one
+        // place the interlace verification may consume packets.
+        return describe(input: input, verifyingInterlace: true)
     }
 
     /// Describe an input that is **already open** (and already through
@@ -531,7 +558,15 @@ public enum SourceProbe {
     /// opened for the remux itself, instead of duplicating the reads or opening
     /// the source a second time (a second open on a network source costs a real
     /// round trip and can even hand back different stream indices).
-    static func describe(input: UnsafeMutablePointer<AVFormatContext>) -> SourceInfo {
+    /// - Parameter verifyingInterlace: when true, a declared-interlaced H.264
+    ///   stream is checked against a handful of *decoded* frames before it is
+    ///   reported interlaced — the read consumes packets from `input`, so only
+    ///   a one-shot probe context may ask for it. The remuxer's `describe`
+    ///   call must not: its context's read position is the remux.
+    static func describe(
+        input: UnsafeMutablePointer<AVFormatContext>,
+        verifyingInterlace: Bool = false
+    ) -> SourceInfo {
         let formatName = input.pointee.iformat.flatMap { $0.pointee.name }
             .map { String(cString: $0) } ?? "unknown"
         let duration = input.pointee.duration == swift_AV_NOPTS_VALUE()
@@ -551,7 +586,23 @@ public enum SourceProbe {
             let par = stream.pointee.codecpar.pointee
             switch par.codec_type {
             case AVMEDIA_TYPE_VIDEO where Int32(index) == bestVideoIndex:
-                video = makeVideoInfo(streamIndex: index, stream: stream)
+                var verifiedFieldOrder: VideoTrackInfo.FieldOrder?
+                if verifyingInterlace,
+                   par.codec_id == AV_CODEC_ID_H264,
+                   fieldOrder(from: par.field_order).isInterlaced {
+                    // Trust the declaration only when decoded frames agree —
+                    // "progressive in interlaced carriage" is the broadcast
+                    // norm, and evicting those from the native path would
+                    // trade hardware decode and Atmos passthrough for
+                    // deinterlacing nothing.
+                    verifiedFieldOrder = decodedFramesLookInterlaced(
+                        input: input, streamIndex: Int32(index), stream: stream
+                    ) ? fieldOrder(from: par.field_order) : .progressive
+                }
+                video = makeVideoInfo(
+                    streamIndex: index, stream: stream,
+                    verifiedFieldOrder: verifiedFieldOrder
+                )
             case AVMEDIA_TYPE_AUDIO:
                 audio.append(makeAudioInfo(streamIndex: index, stream: stream))
             case AVMEDIA_TYPE_SUBTITLE:
@@ -572,9 +623,68 @@ public enum SourceProbe {
 
     // MARK: - Per-stream reads
 
+    /// Map libavformat's field order onto the reported enum.
+    private static func fieldOrder(from order: AVFieldOrder) -> VideoTrackInfo.FieldOrder {
+        switch order {
+        case AV_FIELD_PROGRESSIVE: return .progressive
+        // TT/TB: top field coded first; BB/BT: bottom first. The coded order
+        // is what a deinterlacer's parity wants, display order is its business.
+        case AV_FIELD_TT, AV_FIELD_TB: return .topFieldFirst
+        case AV_FIELD_BB, AV_FIELD_BT: return .bottomFieldFirst
+        default: return .unknown
+        }
+    }
+
+    /// Decode a handful of frames and report whether the pictures themselves
+    /// are interlaced. Consumes packets from `input` — one-shot contexts only.
+    private static func decodedFramesLookInterlaced(
+        input: UnsafeMutablePointer<AVFormatContext>,
+        streamIndex: Int32,
+        stream: UnsafeMutablePointer<AVStream>
+    ) -> Bool {
+        guard let decoder = avcodec_find_decoder(stream.pointee.codecpar.pointee.codec_id),
+              let context = avcodec_alloc_context3(decoder)
+        else { return true }  // can't verify → believe the declaration
+        var contextRef: UnsafeMutablePointer<AVCodecContext>? = context
+        defer { avcodec_free_context(&contextRef) }
+        guard avcodec_parameters_to_context(context, stream.pointee.codecpar) >= 0,
+              avcodec_open2(context, decoder, nil) >= 0
+        else { return true }
+
+        guard let packet = av_packet_alloc(), let frame = av_frame_alloc() else { return true }
+        var packetRef: UnsafeMutablePointer<AVPacket>? = packet
+        var frameRef: UnsafeMutablePointer<AVFrame>? = frame
+        defer {
+            av_packet_free(&packetRef)
+            av_frame_free(&frameRef)
+        }
+
+        // AV_FRAME_FLAG_INTERLACED — the macro doesn't import into Swift.
+        // frame.h: CORRUPT=1<<0, KEY=1<<1, DISCARD=1<<2, INTERLACED=1<<3.
+        let interlacedFlag: Int32 = 1 << 3
+        var decoded = 0
+        var interlaced = 0
+        var packetsRead = 0
+        while decoded < 12, packetsRead < 120, av_read_frame(input, packet) >= 0 {
+            defer { av_packet_unref(packet) }
+            packetsRead += 1
+            guard packet.pointee.stream_index == streamIndex else { continue }
+            guard avcodec_send_packet(context, packet) >= 0 else { break }
+            while avcodec_receive_frame(context, frame) >= 0 {
+                decoded += 1
+                if frame.pointee.flags & interlacedFlag != 0 { interlaced += 1 }
+                av_frame_unref(frame)
+            }
+        }
+        // A lone flagged frame in a dozen is carriage noise; real interlaced
+        // content flags them all. No decoded frames at all → believe the flag.
+        return decoded == 0 || interlaced >= 2
+    }
+
     private static func makeVideoInfo(
         streamIndex: Int,
-        stream: UnsafeMutablePointer<AVStream>
+        stream: UnsafeMutablePointer<AVStream>,
+        verifiedFieldOrder: VideoTrackInfo.FieldOrder? = nil
     ) -> VideoTrackInfo {
         let par = stream.pointee.codecpar.pointee
 
@@ -666,6 +776,16 @@ public enum SourceProbe {
             return .sdr
         }()
 
+        // Verified interlace evicts from the native path: AVPlayer does not
+        // deinterlace, so a stream-copy would play with combing, and the
+        // software path has a real deinterlacer. Only a *verified* verdict
+        // does this — a declared-but-unverified flag (the remuxer's own
+        // `describe`, which must not consume packets) keeps the copyability
+        // the codec earns, because routing always works from the verified
+        // probe and the broadcast norm is progressive in interlaced carriage.
+        let reportedFieldOrder = verifiedFieldOrder ?? fieldOrder(from: par.field_order)
+        let interlacedVerdict = verifiedFieldOrder?.isInterlaced == true
+
         return VideoTrackInfo(
             streamIndex: streamIndex,
             codecName: codecName(par.codec_id),
@@ -681,13 +801,15 @@ public enum SourceProbe {
             isBT2020: par.color_primaries == AVCOL_PRI_BT2020,
             frameRate: frameRate,
             frameRateSource: frameRateSource,
+            fieldOrder: reportedFieldOrder,
             hevcConfiguration: hevcConfiguration,
             avcConfiguration: avcConfiguration,
             av1Configuration: av1Configuration,
             nalUnitLengthSize: nalUnitLengthSize,
             dolbyVision: dolbyVision,
             dynamicRange: dynamicRange,
-            copyability: isVideoStreamCopyable(par.codec_id) ? .streamCopy : .unsupported
+            copyability: isVideoStreamCopyable(par.codec_id) && !interlacedVerdict
+                ? .streamCopy : .unsupported
         )
     }
 
