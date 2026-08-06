@@ -55,6 +55,71 @@ public enum DisplayCriteriaLogic {
         return wroteHDRCriteria && panelHasProvenHDR
     }
 
+    /// What one `waitForSwitch` actually did, with real elapsed times — the
+    /// telemetry that turns settle budgets from bets into measurements.
+    ///
+    /// The elapsed fields are wall-clock readings, deliberately not derived
+    /// from tick counts times tick length: a budget-derived number reports the
+    /// *budget*, and a settle that exits early then looks exactly like one
+    /// that ran to its cap. Hosts are expected to log `summary` (Aether's Log
+    /// screen shows it under its `prismcore` category), so slow chains show
+    /// their real handshake times and the bounds in
+    /// `settleBounds(wantsHDRPanel:)` can be tuned from evidence.
+    public struct SettleReport: Sendable, Equatable {
+        public enum Outcome: String, Sendable {
+            /// Match Content is fully off — tvOS ignored the write, nothing
+            /// can switch, nothing was waited for.
+            case matchingDisabled
+            /// An HDR write met a panel already presenting HDR — no wait.
+            case alreadyPresentingHDR
+            /// Nothing visibly started within the grace: the panel already
+            /// satisfied the criteria (or its switch is unobservable).
+            case noSwitchStarted
+            /// The mode-switch-end notification arrived.
+            case modeSwitchEnd
+            /// The EDR headroom rose — the HDR engage is visible.
+            case headroomRaised
+            /// The in-progress flag cleared without an end notification.
+            case inProgressCleared
+            /// The settle cap expired with the switch still reporting
+            /// in-progress — the unobservable-switch case the cap exists for.
+            case capExpired
+        }
+
+        public let outcome: Outcome
+        /// When stage 1 saw the switch start; `nil` when none ever did.
+        public let switchStartedAfterMilliseconds: Int?
+        public let totalMilliseconds: Int
+
+        public init(
+            outcome: Outcome,
+            switchStartedAfterMilliseconds: Int? = nil,
+            totalMilliseconds: Int
+        ) {
+            self.outcome = outcome
+            self.switchStartedAfterMilliseconds = switchStartedAfterMilliseconds
+            self.totalMilliseconds = totalMilliseconds
+        }
+
+        /// One log-ready line, e.g.
+        /// `settled via modeSwitchEnd in 2140ms (switch started at 380ms)`.
+        public var summary: String {
+            let start = switchStartedAfterMilliseconds.map { " (switch started at \($0)ms)" } ?? ""
+            switch outcome {
+            case .matchingDisabled:
+                return "no wait: Match Content disabled"
+            case .alreadyPresentingHDR:
+                return "no wait: panel already presenting HDR"
+            case .noSwitchStarted:
+                return "no switch started within \(totalMilliseconds)ms grace"
+            case .capExpired:
+                return "settle cap expired after \(totalMilliseconds)ms\(start)"
+            case .modeSwitchEnd, .headroomRaised, .inProgressCleared:
+                return "settled via \(outcome.rawValue) in \(totalMilliseconds)ms\(start)"
+            }
+        }
+    }
+
     /// How long `waitForSwitch` may spend on each stage, by what the last
     /// write asked of the panel.
     ///
@@ -135,10 +200,28 @@ public final class DisplayCriteriaController {
     private let window: UIWindow
     private var written: DisplayCriteriaLogic.WrittenCriteria?
     private var lastWriteWantedHDR = false
+
+    /// The criteria still active on the panel, shared across controller
+    /// instances. Hosts build a fresh controller per playback, and the
+    /// per-instance baseline forgot everything between them — so replaying
+    /// the same title re-wrote identical criteria, which is not a no-op: it
+    /// starts a redundant HDMI negotiation, and on panels whose switch is
+    /// unobservable that negotiation makes every settle run to its cap (the
+    /// same-format skip AetherEngine's controller does for channel zaps).
+    /// There is exactly one HDMI output to describe, so the baseline is
+    /// class-wide: written by `apply`, cleared by `reset`, valid on the
+    /// premise the whole controller already stands on — these writes are the
+    /// only mover of `preferredDisplayCriteria` in the process.
+    private static var activeCriteria: DisplayCriteriaLogic.WrittenCriteria?
+
     /// Sticky: set the first time a raised EDR headroom is ever observed, and
     /// deliberately never cleared — the headroom is a transition artifact, so
-    /// its later absence proves nothing (see `DisplayCriteriaLogic`).
-    private var panelHasProvenHDR = false
+    /// its later absence proves nothing (see `DisplayCriteriaLogic`). Shared
+    /// across instances for the same reason as `activeCriteria`: the panel
+    /// that proved HDR once is the same panel the next controller drives, and
+    /// a same-format skip produces no transition for a fresh instance to
+    /// observe.
+    private static var panelHasProvenHDR = false
 
     public init(window: UIWindow) {
         self.window = window
@@ -180,7 +263,12 @@ public final class DisplayCriteriaController {
         // beats absent: tvOS ignores the rate when Match Frame Rate is off.
         let rate = choice.refreshRate ?? 24
         let next = DisplayCriteriaLogic.WrittenCriteria(target: choice.target, refreshRate: rate)
-        if DisplayCriteriaLogic.writeIsRedundant(previous: written, next: next) {
+        if DisplayCriteriaLogic.writeIsRedundant(previous: Self.activeCriteria, next: next) {
+            // Adopt the active criteria rather than merely observing them:
+            // this session now depends on the mode a previous controller
+            // programmed, so this controller's `reset()` must be willing to
+            // return the panel to default on teardown.
+            written = next
             lastWriteWantedHDR = choice.wantsHDRPanel
             return .alreadyActive
         }
@@ -195,6 +283,7 @@ public final class DisplayCriteriaController {
             refreshRate: Float(rate), formatDescription: description
         )
         written = next
+        Self.activeCriteria = next
         lastWriteWantedHDR = choice.wantsHDRPanel
         return choice.wantsHDRPanel ? .willSwitch : .wrote
     }
@@ -223,19 +312,41 @@ public final class DisplayCriteriaController {
     /// rate-only switches keep short bounds. See
     /// `DisplayCriteriaLogic.settleBounds` for the numbers and the race they
     /// close; pass explicit values only to override that policy.
+    ///
+    /// The returned report carries what actually happened, with wall-clock
+    /// times — log its `summary`, and the settle budgets stop being bets.
+    @discardableResult
     public func waitForSwitch(
         startGrace: Duration? = nil,
         settleCap: Duration? = nil
-    ) async {
+    ) async -> DisplayCriteriaLogic.SettleReport {
         let bounds = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: lastWriteWantedHDR)
         let startGrace = startGrace ?? bounds.startGrace
         let settleCap = settleCap ?? bounds.settleCap
         let manager = window.avDisplayManager
         let screen = window.screen
+        let entry = ContinuousClock.now
+        func elapsedMs() -> Int {
+            Int((ContinuousClock.now - entry) / .milliseconds(1))
+        }
+        func report(
+            _ outcome: DisplayCriteriaLogic.SettleReport.Outcome,
+            startedAt: Int? = nil
+        ) -> DisplayCriteriaLogic.SettleReport {
+            .init(
+                outcome: outcome,
+                switchStartedAfterMilliseconds: startedAt,
+                totalMilliseconds: elapsedMs()
+            )
+        }
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
         // dead startup time on every load.
-        guard manager.isDisplayCriteriaMatchingEnabled else { return }
-        if observeHeadroom(screen), lastWriteWantedHDR { return }
+        guard manager.isDisplayCriteriaMatchingEnabled else {
+            return report(.matchingDisabled)
+        }
+        if observeHeadroom(screen), lastWriteWantedHDR {
+            return report(.alreadyPresentingHDR)
+        }
 
         let started = OneShotFlag()
         let ended = OneShotFlag()
@@ -251,27 +362,34 @@ public final class DisplayCriteriaController {
         }
 
         // Stage 1 — did a switch start at all?
-        var switchIsRunning = false
+        var startedAt: Int?
         let graceDeadline = ContinuousClock.now.advanced(by: startGrace)
         while ContinuousClock.now < graceDeadline {
-            if ended.fired { return }
-            if lastWriteWantedHDR, observeHeadroom(screen) { return }
+            if ended.fired { return report(.modeSwitchEnd, startedAt: startedAt) }
+            if lastWriteWantedHDR, observeHeadroom(screen) {
+                return report(.headroomRaised, startedAt: startedAt)
+            }
             if started.fired || manager.isDisplayModeSwitchInProgress {
-                switchIsRunning = true
+                startedAt = elapsedMs()
                 break
             }
             try? await Task.sleep(for: .milliseconds(10))
         }
-        guard switchIsRunning else { return }
+        guard startedAt != nil else { return report(.noSwitchStarted) }
 
         // Stage 2 — bounded settle.
         let settleDeadline = ContinuousClock.now.advanced(by: settleCap)
         while ContinuousClock.now < settleDeadline {
             try? await Task.sleep(for: .milliseconds(50))
-            if ended.fired { return }
-            if lastWriteWantedHDR, observeHeadroom(screen) { return }
-            if !manager.isDisplayModeSwitchInProgress { return }
+            if ended.fired { return report(.modeSwitchEnd, startedAt: startedAt) }
+            if lastWriteWantedHDR, observeHeadroom(screen) {
+                return report(.headroomRaised, startedAt: startedAt)
+            }
+            if !manager.isDisplayModeSwitchInProgress {
+                return report(.inProgressCleared, startedAt: startedAt)
+            }
         }
+        return report(.capExpired, startedAt: startedAt)
     }
 
     /// Whether the panel presents this session in HDR — the input a host
@@ -283,24 +401,28 @@ public final class DisplayCriteriaController {
         DisplayCriteriaLogic.panelPresentsHDR(
             headroomIsRaised: observeHeadroom(window.screen),
             wroteHDRCriteria: written != nil && lastWriteWantedHDR,
-            panelHasProvenHDR: panelHasProvenHDR
+            panelHasProvenHDR: Self.panelHasProvenHDR
         )
     }
 
     /// Return the panel to its default criteria — only when this controller
-    /// wrote them. Nil-ing criteria somebody else manages races their
-    /// in-flight handshake.
+    /// wrote (or adopted) them. Nil-ing criteria somebody else manages races
+    /// their in-flight handshake. Clearing the shared baseline is part of the
+    /// reset: the panel is heading back to its default mode, so the next
+    /// `apply` must really write. `panelHasProvenHDR` survives — the panel's
+    /// demonstrated capability doesn't reset with its mode.
     public func reset() {
         guard written != nil else { return }
         window.avDisplayManager.preferredDisplayCriteria = nil
         written = nil
+        Self.activeCriteria = nil
     }
 
     /// Every headroom read funnels through here so a single observation of a
     /// real HDR engage is remembered after the value decays.
     private func observeHeadroom(_ screen: UIScreen) -> Bool {
         guard screen.currentEDRHeadroom > 1.001 else { return false }
-        panelHasProvenHDR = true
+        Self.panelHasProvenHDR = true
         return true
     }
 

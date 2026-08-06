@@ -178,6 +178,40 @@ struct DisplayCriteriaLogicTests {
         #expect(hdr.startGrace > rateOnly.startGrace)
         #expect(hdr.settleCap > rateOnly.settleCap)
     }
+
+    @Test("A settle report's summary carries the outcome and the real times, log-ready")
+    func settleReportSummaries() {
+        // Settled with a visible start: both numbers appear.
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .modeSwitchEnd, switchStartedAfterMilliseconds: 380, totalMilliseconds: 2140
+            ).summary == "settled via modeSwitchEnd in 2140ms (switch started at 380ms)"
+        )
+        // Settled without an observed start: no phantom start time.
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .headroomRaised, totalMilliseconds: 90
+            ).summary == "settled via headroomRaised in 90ms"
+        )
+        // The cap expiring names itself — this is the line that says the
+        // panel's switch is unobservable, not that the code is slow.
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .capExpired, switchStartedAfterMilliseconds: 950, totalMilliseconds: 8000
+            ).summary == "settle cap expired after 8000ms (switch started at 950ms)"
+        )
+        // The no-wait exits explain why nothing was waited for.
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .matchingDisabled, totalMilliseconds: 0
+            ).summary == "no wait: Match Content disabled"
+        )
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .noSwitchStarted, totalMilliseconds: 2000
+            ).summary == "no switch started within 2000ms grace"
+        )
+    }
 }
 
 // MARK: - Master-vs-media routing
