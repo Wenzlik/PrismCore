@@ -329,6 +329,16 @@ Prism, and Prism retires only at parity.
      subtitle registrations replayed). This is the half that catches the panel
      read being optimistic: no API distinguishes a Match-Content display from an
      HDR-capable one parked in SDR.
+   - **The HDMI handshake** (`DisplayCriteriaController`, tvOS) — programs
+     `preferredDisplayCriteria` from `session.displayCriteria` and waits the
+     mode switch out *before* the host loads the playlist, which is what turns
+     the rejection fallback from the common path into the rare one. See "The
+     tvOS playback contract" below. Profile 5 on a non-DV display is routed
+     media-direct proactively (a bare `dvh1.05` master has no fallback variant
+     for the filter to pick, so serving one just buys a guaranteed `-11868`),
+     and a `DisplayCapabilities(panelIsCurrentlyHDR: true)` read lets a panel
+     already presenting HDR take a master even when `availableHDRModes` came
+     back empty.
 5. **Seek & cache** *(implemented)* — keyframe-aligned `SegmentPlan`,
    planned VOD playlists, demand-driven producer with re-anchoring and
    absolute-`tfdt` restart continuity, EOF parking, byte-budgeted retention
@@ -406,6 +416,41 @@ Prism, and Prism retires only at parity.
 Platform floors are iOS 16 / tvOS 17 / macOS 14 / visionOS 1. `swift build` and
 `swift test` work on macOS; the test suite is hermetic apart from an opt-in
 real-media harness (see Status).
+
+### The tvOS playback contract
+
+Over HDMI, the panel's mode has to be programmed **before** AVPlayer sees the
+playlist: tvOS validates an HDR variant's `VIDEO-RANGE` against the panel's
+*current* mode synchronously, so a PQ master handed to an SDR-parked panel
+fails outright (`-11848` / `-11868`) instead of switching or tone-mapping.
+AVKit's `appliesPreferredDisplayCriteriaAutomatically` cannot help for HLS —
+it derives criteria from the chosen variant's format description, which only
+exists after the variant passes the very validation the switch has to precede —
+so it must be `false`, and the order is engine-driven:
+
+```swift
+let controller = DisplayCriteriaController(window: window)   // tvOS only
+let session = try PrismCoreSession(url: source, display: .current())
+let playlist = try await session.start()
+
+if let choice = await session.displayCriteria {
+    controller.apply(choice)                 // 1. program the panel
+    await controller.waitForSwitch()         // 2. let the handshake settle
+}
+player.replaceCurrentItem(with: AVPlayerItem(url: playlist))  // 3. only then load
+player.play()
+// on teardown: controller.reset()
+```
+
+`session.displayCriteria` is clamped to the display the session was built for
+(a non-DV panel is asked for the base layer's range, a non-HDR panel for a
+rate-only switch — which is also what makes Match Frame Rate engage on SDR
+content), and `controller.currentPanelIsHDR()` after the handshake is the
+value to feed back into `DisplayCapabilities(panelIsCurrentlyHDR:)` for the
+next session. Built-in panels (iPhone, iPad, Mac) engage HDR on demand and can
+skip all of this; `MasterRejection` + `makeMuxedFallbackSession()` stays as
+the backstop for the one state no read can prove (Match Content off on an
+HDR-capable panel).
 
 ## Dependencies
 

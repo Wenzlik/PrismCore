@@ -17,6 +17,31 @@ import Foundation
 /// playlist (`index.m3u8`) when it hasn't — a silent source, or one whose master
 /// couldn't be written honestly (see `HLSRemuxer`). Hosts should treat the URL as
 /// opaque: the shape is a property of the source, not of the API.
+///
+/// ## The tvOS playback contract
+///
+/// On tvOS the panel's HDMI mode has to be programmed **before** AVPlayer sees
+/// the playlist — tvOS validates an HDR variant's `VIDEO-RANGE` against the
+/// panel's *current* mode, synchronously, so a PQ master handed to an
+/// SDR-parked panel fails outright (`-11848`/`-11868`) instead of switching or
+/// tone-mapping. The order that works:
+///
+/// ```swift
+/// let playlist = try await session.start()
+/// if let choice = await session.displayCriteria {   // 1. program the panel
+///     criteriaController.apply(choice)
+///     await criteriaController.waitForSwitch()      // 2. let it settle
+/// }
+/// player.replaceCurrentItem(with: AVPlayerItem(url: playlist))  // 3. then load
+/// player.play()
+/// ```
+///
+/// AVKit's `appliesPreferredDisplayCriteriaAutomatically` must be `false` for
+/// these sessions: it derives criteria from the chosen variant's format
+/// description, which only exists *after* the variant passes the very
+/// validation the switch has to precede — and its late write races the one
+/// above into a double handshake. `MasterRejection` remains the backstop for
+/// the panel states no read can prove (Match Content off on an HDR panel).
 public actor PrismCoreSession {
 
     public enum SessionError: Error {
@@ -62,6 +87,22 @@ public actor PrismCoreSession {
     /// The remux's terminal error, if it failed after startup. Hosts can poll
     /// this when AVPlayer reports a stalled item.
     public private(set) var remuxError: Error?
+
+    /// The display criteria to program before AVPlayer loads this session's
+    /// playlist — step 1 of the tvOS playback contract (see the type doc).
+    ///
+    /// Populated once the remux has probed the source, so it is ready by the
+    /// time `start()` returns. `nil` only before that, or when the remux died
+    /// before probing. Computed from the same declared Dolby Vision
+    /// configuration the manifest claims (a converted P7 asks for DV as its
+    /// declared 8.1), and clamped to the session's `DisplayCapabilities` — a
+    /// non-DV display is asked for the base layer's range, a non-HDR-ready
+    /// display for a rate-only (SDR) switch. Platforms whose panels engage
+    /// HDR on demand (built-in iPhone/iPad/Mac displays) can ignore it; over
+    /// HDMI it is the difference between playing and `-11848`.
+    public var displayCriteria: DisplayCriteriaChoice? {
+        remuxer.displayCriteriaChoice
+    }
 
     /// - Parameters:
     ///   - displayIsHDRReady: whether the display this session plays to is in
@@ -143,7 +184,10 @@ public actor PrismCoreSession {
             sourceURL: url,
             httpHeaders: httpHeaders,
             outputDirectory: directory,
-            displayIsHDRReady: display.isHDRReady,
+            // `offersHDR`, not `isHDRReady`: a panel currently presenting HDR
+            // takes an HDR master even when the capability read came back
+            // empty, so the certain signal rescues the conservative one.
+            displayIsHDRReady: display.offersHDR,
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
