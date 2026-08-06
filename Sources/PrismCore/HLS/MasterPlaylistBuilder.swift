@@ -321,6 +321,19 @@ public enum MasterPlaylistBuilder {
         variant.audioRenditions.first(where: \.isDefault) ?? variant.audioRenditions.first
     }
 
+    /// Whether `build(_:)` prints any Dolby Vision claim for this variant — a
+    /// `dvh1` primary tag (Profile 5) or a `SUPPLEMENTAL-CODECS` entry.
+    ///
+    /// This is what the master-rejection fallback's first tier drops: a DV
+    /// claim is validated against the panel's *current* mode, and on a panel
+    /// whose true state no read can prove (Match Content off), dropping the
+    /// claim — while keeping `VIDEO-RANGE`, the renditions and the subtitles —
+    /// is the retry that still plays as HDR10 with everything selectable.
+    public static func declaresDolbyVision(_ variant: VariantDescription) -> Bool {
+        if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly { return true }
+        return supplementalCodecsString(for: variant) != nil
+    }
+
     // MARK: - Codec strings
 
     /// The primary `CODECS` entry for the video track.
