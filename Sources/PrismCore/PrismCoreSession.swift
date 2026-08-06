@@ -255,6 +255,55 @@ public actor PrismCoreSession {
             segmentCacheBytes: configuration.segmentCacheBytes,
             forceMuxedShape: true
         )
+        try await replayExternalSubtitles(onto: fallback)
+        return fallback
+    }
+
+    /// The next session to try after AVPlayer refused this one's master —
+    /// the tiered version of `makeMuxedFallbackSession()`, and what a host's
+    /// rejection handler should reach for.
+    ///
+    /// A refused master that claimed **Dolby Vision** gets one retry without
+    /// the claim first: same audio renditions, same subtitles, same
+    /// `VIDEO-RANGE`, no `dvh1`/`SUPPLEMENTAL-CODECS`. The DV claim is
+    /// validated against the panel's *current* mode, and on the one panel
+    /// state no read can prove — Match Content off with the output parked in
+    /// HDR10 — dropping it is the difference between playing with everything
+    /// selectable and falling all the way to the muxed shape. A panel parked
+    /// in SDR refuses the retry too (`VIDEO-RANGE=PQ` is still a claim), and
+    /// the *retry's* own fallback — this method on the new session — then
+    /// takes the muxed tier, because it has no DV claim left to drop.
+    ///
+    /// A master that never claimed DV skips straight to the muxed shape,
+    /// exactly as before.
+    public func makeMasterRejectionFallbackSession() async throws -> PrismCoreSession {
+        guard remuxer.masterDeclaresDolbyVision else {
+            return try await makeMuxedFallbackSession()
+        }
+        let display = configuration.display
+        let fallback = try PrismCoreSession(
+            url: configuration.url,
+            httpHeaders: configuration.httpHeaders,
+            display: DisplayCapabilities(
+                isHDRReady: display.isHDRReady,
+                // The one clamp of this tier: no DV may be claimed, however
+                // capable the link says the panel is — capability is exactly
+                // the read the rejection just proved wrong.
+                isDolbyVisionCapable: false,
+                panelIsCurrentlyHDR: display.panelIsCurrentlyHDR,
+                source: display.source
+            ),
+            segmentCacheBytes: configuration.segmentCacheBytes,
+            forceMuxedShape: false
+        )
+        try await replayExternalSubtitles(onto: fallback)
+        return fallback
+    }
+
+    /// Registered external subtitles are part of the source's identity as far
+    /// as fallbacks are concerned — every clone replays them so the host
+    /// doesn't have to remember what it registered.
+    private func replayExternalSubtitles(onto fallback: PrismCoreSession) async throws {
         for subtitle in externalSubtitles {
             try await fallback.addExternalSubtitle(
                 url: subtitle.url,
@@ -263,7 +312,6 @@ public actor PrismCoreSession {
                 isForced: subtitle.isForced
             )
         }
-        return fallback
     }
 
     // MARK: - Subtitles (phase 6)

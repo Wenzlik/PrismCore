@@ -164,9 +164,18 @@ final class HLSRemuxer: @unchecked Sendable {
     /// moment the playlists exist — and `nil` before that.
     private let criteriaChoiceLock = NSLock()
     private var storedCriteriaChoice: DisplayCriteriaChoice?
+    /// Whether the served master claims Dolby Vision (`dvh1` primary or
+    /// `SUPPLEMENTAL-CODECS`) — what the rejection fallback's first tier
+    /// drops. `false` before the master is written, and for masters with no
+    /// DV claim to drop.
+    private var storedMasterDeclaresDolbyVision = false
 
     var displayCriteriaChoice: DisplayCriteriaChoice? {
         criteriaChoiceLock.withLock { storedCriteriaChoice }
+    }
+
+    var masterDeclaresDolbyVision: Bool {
+        criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision }
     }
 
     private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
@@ -382,6 +391,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     to: outputDirectory.appendingPathComponent(Self.masterPlaylistFileName),
                     options: .atomic
                 )
+                // Remembered for the rejection fallback: a master whose DV
+                // claim may be what the panel refused gets one retry without
+                // it before the muxed shape (see the session's factory).
+                let claimsDV = MasterPlaylistBuilder.declaresDolbyVision(variant)
+                criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision = claimsDV }
             }
 
         case .muxed(let audio):
