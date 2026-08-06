@@ -348,11 +348,23 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         let video = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
         if video >= 0, let stream = input.pointee.streams[Int(video)] {
             do {
+                // Declared interlaced → run the deinterlacer. Routing only
+                // sends *verified* interlaced sources here, so this mostly
+                // agrees with the probe; when a host loads the pipeline
+                // directly, `bwdif deint=interlaced` still passes progressive
+                // frames through untouched, so over-engaging costs the
+                // hardware route, never correctness.
+                let fieldOrder = stream.pointee.codecpar.pointee.field_order
+                let declaredInterlaced = fieldOrder == AV_FIELD_TT
+                    || fieldOrder == AV_FIELD_BB
+                    || fieldOrder == AV_FIELD_TB
+                    || fieldOrder == AV_FIELD_BT
                 videoDecoder = try SoftwareVideoDecoder(
                     codecpar: stream.pointee.codecpar,
                     timeBase: stream.pointee.time_base,
                     averageFrameRate: stream.pointee.avg_frame_rate,
-                    allowHardware: allowHardwareDecode
+                    allowHardware: allowHardwareDecode,
+                    deinterlace: declaredInterlaced
                 )
                 videoStreamIndex = video
                 timeline.attach(videoSink)

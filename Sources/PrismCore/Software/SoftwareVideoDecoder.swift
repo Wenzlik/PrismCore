@@ -2,6 +2,7 @@ import Foundation
 import CoreMedia
 import CoreVideo
 import Libavcodec
+import Libavfilter
 import Libavformat
 import Libavutil
 
@@ -107,6 +108,19 @@ final class SoftwareVideoDecoder {
     private var transfer: PixelBufferTransfer?
     private var formatDescription: CMVideoFormatDescription?
 
+    /// Whether decoded frames pass through a `bwdif` deinterlacer before they
+    /// become sample buffers. Forces the CPU decode route: the filter reads
+    /// planar YUV, and a VideoToolbox frame would first have to be downloaded
+    /// — the GPU variant (`yadif_videotoolbox`) is a build away, not a code
+    /// path away (this FFmpeg build doesn't compile it).
+    private let wantsDeinterlace: Bool
+    /// Built lazily from the first decoded frame — the graph needs the real
+    /// pixel format, dimensions and SAR, which only a frame knows.
+    private var filterGraph: UnsafeMutablePointer<AVFilterGraph>?
+    private var filterSource: UnsafeMutablePointer<AVFilterContext>?
+    private var filterSink: UnsafeMutablePointer<AVFilterContext>?
+    private var filteredFrame: UnsafeMutablePointer<AVFrame>?
+
     /// Kept so a hardware failure can rebuild the context in software mode.
     /// Optional only because `avcodec_parameters_free` takes a double pointer.
     private var codecParameters: UnsafeMutablePointer<AVCodecParameters>?
@@ -135,16 +149,22 @@ final class SoftwareVideoDecoder {
     ///     fallback frame duration.
     ///   - allowHardware: false forces the CPU path (tests, and a host that
     ///     wants deterministic pixel output).
+    ///   - deinterlace: run decoded frames through `bwdif` (field-rate, so an
+    ///     interlaced 25 fps stream comes out as 50 progressive frames). The
+    ///     filter deinterlaces only frames actually flagged interlaced, so
+    ///     mixed content passes its progressive stretches through untouched.
     init(
         codecpar: UnsafePointer<AVCodecParameters>,
         timeBase: AVRational,
         averageFrameRate: AVRational = AVRational(num: 0, den: 1),
-        allowHardware: Bool = true
+        allowHardware: Bool = true,
+        deinterlace: Bool = false
     ) throws {
         self.codecID = codecpar.pointee.codec_id
         self.codecName = avcodec_get_name(codecID).map { String(cString: $0) } ?? "unknown"
         self.timeBase = timeBase
-        self.allowHardware = allowHardware
+        self.wantsDeinterlace = deinterlace
+        self.allowHardware = allowHardware && !deinterlace
         if averageFrameRate.num > 0, averageFrameRate.den > 0 {
             self.nominalFrameDuration = CMTime(
                 value: CMTimeValue(averageFrameRate.den),
@@ -185,6 +205,7 @@ final class SoftwareVideoDecoder {
             av_buffer_unref(&hardwareDeviceContext)
         }
         avcodec_parameters_free(&codecParameters)
+        teardownFilterGraph()
         transfer = nil
         formatDescription = nil
     }
@@ -301,25 +322,138 @@ final class SoftwareVideoDecoder {
     }
 
     /// Drop everything buffered — a seek. Cheap and mandatory: without it the
-    /// first frames after a seek are the pre-seek ones.
+    /// first frames after a seek are the pre-seek ones. The filter graph goes
+    /// with it: `bwdif` holds a frame of context, and pre-seek fields woven
+    /// into post-seek frames are exactly the artifact a flush exists to
+    /// prevent. It rebuilds lazily from the next frame.
     func flushBuffers() {
         guard let context = codecContext else { return }
         avcodec_flush_buffers(context)
+        teardownFilterGraph()
     }
 
     private func drain(emit: Emit) throws {
         guard let context = codecContext, let frame else { return }
         while true {
             let result = avcodec_receive_frame(context, frame)
-            if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
+            if result == swift_AVERROR_EOF() {
+                // The decoder is dry for good — let the filter's own tail out.
+                if wantsDeinterlace { try drainFilter(emit: emit) }
+                return
+            }
+            if result == swift_AVERROR(EAGAIN) { return }
             if result < 0 {
                 if try recoverFromHardwareFailure() { return }
                 throw FFmpegError(code: result, operation: "avcodec_receive_frame(video)")
             }
             defer { av_frame_unref(frame) }
-            let sampleBuffer = try makeSampleBuffer(from: frame)
+            if wantsDeinterlace {
+                try filterAndEmit(frame, emit: emit)
+            } else {
+                let sampleBuffer = try makeSampleBuffer(from: frame)
+                try emit(sampleBuffer)
+            }
+        }
+    }
+
+    // MARK: - Deinterlacing
+
+    /// `decoded frame → bwdif → 0…2 progressive frames → emit`.
+    private func filterAndEmit(_ decoded: UnsafeMutablePointer<AVFrame>, emit: Emit) throws {
+        if filterGraph == nil {
+            try buildFilterGraph(for: decoded)
+        }
+        guard let filterSource, let filterSink, let filteredFrame else { return }
+        try FFmpegError.check(
+            av_buffersrc_add_frame(filterSource, decoded),
+            "av_buffersrc_add_frame(bwdif)"
+        )
+        while true {
+            let result = av_buffersink_get_frame(filterSink, filteredFrame)
+            if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
+            try FFmpegError.check(result, "av_buffersink_get_frame(bwdif)")
+            defer { av_frame_unref(filteredFrame) }
+            let sampleBuffer = try makeSampleBuffer(from: filteredFrame)
             try emit(sampleBuffer)
         }
+    }
+
+    /// EOF: `bwdif` holds the last frame until the stream is declared over.
+    private func drainFilter(emit: Emit) throws {
+        guard let filterSource, let filterSink, let filteredFrame else { return }
+        _ = av_buffersrc_add_frame(filterSource, nil)
+        while true {
+            let result = av_buffersink_get_frame(filterSink, filteredFrame)
+            if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
+            try FFmpegError.check(result, "av_buffersink_get_frame(bwdif drain)")
+            defer { av_frame_unref(filteredFrame) }
+            let sampleBuffer = try makeSampleBuffer(from: filteredFrame)
+            try emit(sampleBuffer)
+        }
+    }
+
+    /// buffer → bwdif → buffersink, dimensioned from a real decoded frame —
+    /// the graph needs the true pixel format and SAR, which only a frame
+    /// knows (the stream's `codecpar` can lag behind a mid-stream change).
+    private func buildFilterGraph(for decoded: UnsafeMutablePointer<AVFrame>) throws {
+        guard let graph = avfilter_graph_alloc() else {
+            throw Failure.allocationFailed("filter graph")
+        }
+        filterGraph = graph
+
+        let sar = decoded.pointee.sample_aspect_ratio
+        let args = """
+            video_size=\(decoded.pointee.width)x\(decoded.pointee.height):\
+            pix_fmt=\(decoded.pointee.format):\
+            time_base=\(timeBase.num)/\(timeBase.den):\
+            pixel_aspect=\(max(sar.num, 0))/\(max(sar.den, 1))
+            """
+
+        var source: UnsafeMutablePointer<AVFilterContext>?
+        try FFmpegError.check(
+            avfilter_graph_create_filter(
+                &source, avfilter_get_by_name("buffer"), "in", args, nil, graph
+            ),
+            "avfilter_graph_create_filter(buffer)"
+        )
+        var sink: UnsafeMutablePointer<AVFilterContext>?
+        try FFmpegError.check(
+            avfilter_graph_create_filter(
+                &sink, avfilter_get_by_name("buffersink"), "out", nil, nil, graph
+            ),
+            "avfilter_graph_create_filter(buffersink)"
+        )
+        // Field-rate output (an interlaced 25 fps stream becomes 50 progressive
+        // frames — motion as broadcast), parity from the frames themselves, and
+        // `deint=interlaced` so progressive stretches of mixed content pass
+        // through untouched.
+        var deint: UnsafeMutablePointer<AVFilterContext>?
+        try FFmpegError.check(
+            avfilter_graph_create_filter(
+                &deint, avfilter_get_by_name("bwdif"), "deint",
+                "mode=send_field:parity=auto:deint=interlaced", nil, graph
+            ),
+            "avfilter_graph_create_filter(bwdif)"
+        )
+        try FFmpegError.check(avfilter_link(source, 0, deint, 0), "avfilter_link(in→bwdif)")
+        try FFmpegError.check(avfilter_link(deint, 0, sink, 0), "avfilter_link(bwdif→out)")
+        try FFmpegError.check(avfilter_graph_config(graph, nil), "avfilter_graph_config")
+
+        guard let filtered = av_frame_alloc() else {
+            throw Failure.allocationFailed("filtered frame")
+        }
+        filterSource = source
+        filterSink = sink
+        filteredFrame = filtered
+    }
+
+    private func teardownFilterGraph() {
+        if filterGraph != nil {
+            avfilter_graph_free(&filterGraph)
+        }
+        filterSource = nil
+        filterSink = nil
+        av_frame_free(&filteredFrame)
     }
 
     /// If we were on the hardware route, abandon it and reopen in software.

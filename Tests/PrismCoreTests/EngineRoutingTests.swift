@@ -83,6 +83,7 @@ struct EngineRoutingTests {
                 isBT2020: false,
                 frameRate: 25,
                 frameRateSource: .averageFrameRate,
+                fieldOrder: .progressive,
                 hevcConfiguration: nil,
                 avcConfiguration: nil,
                 av1Configuration: nil,
