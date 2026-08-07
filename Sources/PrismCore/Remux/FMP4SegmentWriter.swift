@@ -105,6 +105,23 @@ final class FMP4SegmentWriter {
                 )
                 outStream.pointee.codecpar.pointee.codec_tag = 0
             }
+            if outStream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
+                // codecpar carries only the BITSTREAM aspect ratio; the
+                // container-level one (an MKV's DisplayWidth/Height — how
+                // anamorphic DVD rips are usually tagged) lives on the
+                // stream and is what movenc's `pasp`/`tkhd` want. Same
+                // precedence as ffmpeg's own streamcopy: stream over
+                // codecpar, written back to both. Outside the mirror branch
+                // on purpose — the video stream always arrives through a
+                // `configure`, which copies codecpar and would drop the
+                // stream-level value the same way.
+                let streamSAR = inStream.pointee.sample_aspect_ratio
+                let sar = streamSAR.num != 0
+                    ? streamSAR
+                    : outStream.pointee.codecpar.pointee.sample_aspect_ratio
+                outStream.pointee.sample_aspect_ratio = sar
+                outStream.pointee.codecpar.pointee.sample_aspect_ratio = sar
+            }
             if let language = entry.language, !language.isEmpty {
                 av_dict_set(&outStream.pointee.metadata, "language", language, 0)
             }

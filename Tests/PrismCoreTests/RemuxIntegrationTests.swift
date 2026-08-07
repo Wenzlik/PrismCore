@@ -105,6 +105,59 @@ struct RemuxIntegrationTests {
         #expect(info.audioTracks.map(\.codecName).contains("aac"))
     }
 
+    @Test("Anamorphic SD: the container-level aspect ratio survives the remux")
+    func anamorphicSARSurvives() async throws {
+        // The fixture is the shape a DVD rip actually takes: bitstream SAR
+        // 1:1 (the VUI says square), container DisplayWidth/Height saying
+        // 16:9 — so 720×576 must present as 64:45 pixels. The container-level
+        // value lives on the AVStream, not in codecpar, which is exactly what
+        // a codecpar-only copy used to drop: the remux played these distorted.
+        let source = try fixture("h264_anamorphic.mkv")
+        let anamorphic = VideoTrackInfo.AspectRatio(numerator: 64, denominator: 45)
+        #expect(try SourceProbe.probe(url: source).video?.sampleAspectRatio == anamorphic)
+
+        let session = try PrismCoreSession(url: source)
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        let media = try await waitForFinishedPlaylist(playlist)
+        // Assert on the `pasp` box bytes of the served init segment — the
+        // thing AVPlayer actually reads. (Re-probing through libavformat's
+        // hls demuxer can't see it: hls.c mirrors only codecpar off its inner
+        // mov streams and drops the stream-level SAR — the same class of bug
+        // this test pins on our side.)
+        let mapURI = try #require(
+            media.split(separator: "\n").first { $0.hasPrefix("#EXT-X-MAP") }
+                .flatMap { $0.split(separator: "\"").dropFirst().first.map(String.init) },
+            "the media playlist must reference an init segment"
+        )
+        var mediaURL = playlist
+        if try await fetch(playlist).contains("#EXT-X-STREAM-INF") {
+            let variant = try #require(PrismCoreSession.playlistURIs(inMaster: try await fetch(playlist)).last)
+            mediaURL = playlist.deletingLastPathComponent().appendingPathComponent(variant)
+        }
+        let initURL = mediaURL.deletingLastPathComponent().appendingPathComponent(mapURI)
+        let (initSegment, _) = try await URLSession.shared.data(from: initURL)
+        #expect(paspRatios(in: initSegment) == [[64, 45]])
+    }
+
+    /// Every `pasp` box's `[hSpacing, vSpacing]` found in an ISOBMFF blob, in
+    /// file order. Byte-scan rather than box-walk: the fourcc + two 32-bit
+    /// integers is the entire box payload, and a false positive would need
+    /// those exact 4 bytes followed by a plausible ratio inside codec data.
+    private func paspRatios(in data: Data) -> [[UInt32]] {
+        let bytes = [UInt8](data)
+        let needle = Array("pasp".utf8)
+        guard bytes.count >= 12 else { return [] }
+        var out: [[UInt32]] = []
+        for i in 0...(bytes.count - 12) where Array(bytes[i..<i+4]) == needle {
+            let num = bytes[i+4..<i+8].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            let den = bytes[i+8..<i+12].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            out.append([num, den])
+        }
+        return out
+    }
+
     @Test("HEVC + EAC3 MKV keeps EAC3 by stream-copy — the Atmos carrier path")
     func hevcEAC3KeepsBitstream() async throws {
         let session = try PrismCoreSession(url: try fixture("hevc_eac3.mkv"))

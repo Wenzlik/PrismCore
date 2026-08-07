@@ -76,6 +76,7 @@ struct EngineRoutingTests {
                 level: 0,
                 width: 1920,
                 height: 1080,
+                sampleAspectRatio: nil,
                 bitDepth: 8,
                 colorPrimariesName: nil,
                 colorTransferName: nil,
