@@ -108,6 +108,21 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         timeline.currentTime
     }
 
+    /// Whole-source duration in seconds, `nil` until `load` — and for sources
+    /// whose container honestly doesn't know (live ingests). A host's seek bar
+    /// wants this once, not a stream to observe: it cannot change mid-file.
+    public var durationSeconds: Double? {
+        stateLock.withLock { storedDurationSeconds }
+    }
+
+    /// The pipeline's own output level, `0…1`. Scales the audio renderer, not
+    /// the device — a host's volume drag has no honest system-level lever, so
+    /// this is the same contract AVPlayer's `volume` offers.
+    public var volume: Float {
+        get { (audioSink as? AudioRendererSink)?.renderer.volume ?? 1 }
+        set { (audioSink as? AudioRendererSink)?.renderer.volume = max(0, min(1, newValue)) }
+    }
+
     /// The layer to put in the host's view hierarchy. `nil` when the pipeline
     /// was built with injected sinks (tests).
     public var displayLayer: AVSampleBufferDisplayLayer? {
@@ -138,6 +153,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var storedState: State = .idle
+    private var storedDurationSeconds: Double?
 
     // MARK: - Feed-queue state
 
@@ -335,6 +351,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         )
         input = context
         try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        if let known = context?.pointee.duration, known != swift_AV_NOPTS_VALUE() {
+            stateLock.withLock { storedDurationSeconds = Double(known) / Double(AV_TIME_BASE) }
+        }
 
         guard let allocated = av_packet_alloc() else {
             throw FFmpegError(code: -1, operation: "av_packet_alloc")

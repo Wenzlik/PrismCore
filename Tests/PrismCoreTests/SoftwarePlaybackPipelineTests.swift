@@ -172,6 +172,11 @@ struct SoftwarePlaybackPipelineTests {
         let firstPTS = CMSampleBufferGetPresentationTimeStamp(video.enqueued[0])
         #expect(timeline.currentTime == firstPTS)
         print("software pipeline route: \(pipeline.routeDescription)")
+
+        // What a host's seek bar reads once: the fixture is a couple of
+        // seconds, and the container knows it.
+        let duration = try #require(pipeline.durationSeconds)
+        #expect(duration > 0.5 && duration < 60)
     }
 
     /// The coupling bug this pipeline is shaped to avoid: with one cursor paced
