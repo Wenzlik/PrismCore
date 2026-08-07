@@ -24,6 +24,13 @@ struct PlanSegmentProvider: SegmentProvider {
 
     private let directory: DirectorySegmentProvider
 
+    /// Consulted on every subtitle-segment fetch, BEFORE the disk read — this
+    /// is what lazily arms OCR bitmap renditions (the fetch is the demand),
+    /// and what catches a file that exists but is stale: cut while the track
+    /// was unarmed, header-only, and wrong to serve because AVPlayer caches
+    /// segments forever.
+    var subtitleDemand: (@Sendable (String) -> SubtitleRenditionSet.DemandVerdict)?
+
     init(root: URL, coordinator: DemandCoordinator) {
         self.root = root
         self.coordinator = coordinator
@@ -31,6 +38,23 @@ struct PlanSegmentProvider: SegmentProvider {
     }
 
     func data(forPath path: String) async -> ProviderResult {
+        if path.hasSuffix(".vtt"), subtitleDemand?(path) == .regenerate {
+            // The stale file is already deleted (the demand call does it), so
+            // the wait below resolves on the re-produced segment. The
+            // re-anchor must come from THIS fetch: the media segment of the
+            // same index is long cached, AVPlayer will never re-fetch it, so
+            // no other request is coming to move the producer.
+            if let index = Self.vttSegmentIndex(inPath: path) {
+                coordinator.requestProduction(of: index)
+            }
+            return .pending(
+                waitForFile(
+                    path: path,
+                    timeout: subtitleProductionTimeout,
+                    onTimeout: .data(Self.emptyWebVTT, contentType: "text/vtt")
+                )
+            )
+        }
         let direct = await directory.data(forPath: path)
         if case .notFound = direct {
             return await handleMiss(path: path)
@@ -79,6 +103,15 @@ struct PlanSegmentProvider: SegmentProvider {
     static func segmentIndex(inPath path: String) -> Int? {
         let name = (path as NSString).lastPathComponent
         guard name.hasPrefix("seg"), name.hasSuffix(".m4s") else { return nil }
+        return Int(name.dropFirst(3).dropLast(4))
+    }
+
+    /// `seg%05d.vtt` under a rendition directory → index. Same shape as the
+    /// media parser; kept separate so a `.vtt` never re-anchors through the
+    /// media branch by accident.
+    static func vttSegmentIndex(inPath path: String) -> Int? {
+        let name = (path as NSString).lastPathComponent
+        guard name.hasPrefix("seg"), name.hasSuffix(".vtt") else { return nil }
         return Int(name.dropFirst(3).dropLast(4))
     }
 

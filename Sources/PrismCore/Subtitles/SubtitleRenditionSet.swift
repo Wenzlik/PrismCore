@@ -97,6 +97,16 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         private let recognize: (CGImage, String?) -> String?
         private var pending: SubtitleCue?
 
+        /// Lazy arming (below) crosses threads: `arm`/`isStale` run on the
+        /// loopback server's serve, everything else on the remux read loop.
+        private let stateLock = NSLock()
+        private var armed = false
+        /// Segment indices flushed while unarmed — written as header-only VTT
+        /// with the decode and OCR skipped. A fetch of one of these must
+        /// re-produce it, not serve it: empty is a *stale* answer, and
+        /// AVPlayer caches segments forever.
+        private var staleSegments: Set<Int> = []
+
         init(
             decoder: BitmapSubtitleDecoder?,
             language: String?,
@@ -107,9 +117,29 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             self.recognize = recognize
         }
 
+        /// Whether anyone has ever fetched a segment of this rendition.
+        /// Unarmed, `ingest` is a no-op — OCR costs tens of milliseconds per
+        /// event, and a Blu-ray-class remux can carry dozens of PGS tracks of
+        /// which the player selects at most one. Arming is one-way: a track
+        /// someone watched once keeps producing, because AVPlayer re-fetches
+        /// nothing and a de-armed gap could never be served correctly.
+        var isArmed: Bool { stateLock.withLock { armed } }
+        func arm() { stateLock.withLock { armed = true } }
+
+        func recordStale(_ index: Int) {
+            stateLock.withLock { _ = staleSegments.insert(index) }
+        }
+        func clearStale(_ index: Int) {
+            stateLock.withLock { _ = staleSegments.remove(index) }
+        }
+        func isStale(_ index: Int) -> Bool {
+            stateLock.withLock { staleSegments.contains(index) }
+        }
+
         /// Decode one packet; returns every cue whose end became known.
+        /// Skips ALL work — decode included — until the track is armed.
         func ingest(_ packet: UnsafeMutablePointer<AVPacket>) -> [SubtitleCue] {
-            guard let decoder else { return [] }
+            guard isArmed, let decoder else { return [] }
             return process(decoder.decode(packet))
         }
 
@@ -266,9 +296,59 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             )
         }
 
-        tracks = built
-        lock.withLock { storedRenditions = descriptions }
+        lock.withLock {
+            tracks = built
+            storedRenditions = descriptions
+        }
         return Set(built.compactMap(\.inputIndex))
+    }
+
+    // MARK: - Lazy arming
+
+    /// What the loopback provider should do with a subtitle-segment fetch.
+    enum DemandVerdict {
+        /// The file on disk (or its absence) is the truth — serve normally.
+        case serveAsIs
+        /// The file was cut while the track was unarmed: header-only, with the
+        /// OCR skipped. Re-produce it instead of serving the stale empty.
+        case regenerate
+    }
+
+    /// The provider reports every `.vtt` fetch here, and this is what arms a
+    /// bitmap track: OCR runs only for renditions someone actually selected.
+    /// Arming on the segment fetch and not the playlist deliberately —
+    /// AVPlayer may prefetch rendition playlists it never plays, but it
+    /// fetches segments only for the selection.
+    ///
+    /// Server-thread safe; the stale file is deleted here so the provider's
+    /// wait-for-file resolves on the re-produced one, never the stale empty.
+    func noteSegmentDemand(path: String) -> DemandVerdict {
+        guard let (ordinal, index) = Self.renditionSegment(inPath: path) else { return .serveAsIs }
+        let track = lock.withLock { tracks.indices.contains(ordinal) ? tracks[ordinal] : nil }
+        guard let track, case .bitmap(let bitmap) = track.converter else { return .serveAsIs }
+
+        bitmap.arm()
+        guard bitmap.isStale(index) else { return .serveAsIs }
+        try? FileManager.default.removeItem(
+            at: outputDirectory
+                .appendingPathComponent(Self.directoryName(ordinal), isDirectory: true)
+                .appendingPathComponent(String(format: "seg%05d.vtt", index))
+        )
+        return .regenerate
+    }
+
+    /// `subs<ordinal>/seg<index>.vtt` at the end of a request path, or `nil`
+    /// for anything else (playlists included).
+    static func renditionSegment(inPath path: String) -> (ordinal: Int, index: Int)? {
+        let parts = path.split(separator: "/")
+        guard parts.count >= 2 else { return nil }
+        let directory = parts[parts.count - 2]
+        let name = parts[parts.count - 1]
+        guard directory.hasPrefix("subs"), let ordinal = Int(directory.dropFirst(4)),
+              name.hasPrefix("seg"), name.hasSuffix(".vtt"),
+              let index = Int(name.dropFirst(3).dropLast(4))
+        else { return nil }
+        return (ordinal, index)
     }
 
     /// The presentation origin (first video PTS, in seconds). Every writer needs
@@ -323,9 +403,19 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             // written into this segment, its tail re-opens into the next —
             // a composition standing longer than a segment must not vanish
             // from the playlist while it stands on screen.
-            if case .bitmap(let bitmap) = track.converter,
-               let head = bitmap.splitPending(at: end) {
-                track.writer.add(head)
+            if case .bitmap(let bitmap) = track.converter {
+                // Bookkeep what this cut is: an unarmed cut is stale (the OCR
+                // was skipped; a fetch must re-produce it), an armed cut is
+                // the re-production that clears it.
+                let index = track.writer.nextSegmentIndex
+                if bitmap.isArmed {
+                    bitmap.clearStale(index)
+                } else {
+                    bitmap.recordStale(index)
+                }
+                if let head = bitmap.splitPending(at: end) {
+                    track.writer.add(head)
+                }
             }
             try track.writer.flushSegment(start: start, end: end)
         }
