@@ -206,8 +206,8 @@ public final class DisplayCriteriaController {
     /// per-instance baseline forgot everything between them — so replaying
     /// the same title re-wrote identical criteria, which is not a no-op: it
     /// starts a redundant HDMI negotiation, and on panels whose switch is
-    /// unobservable that negotiation makes every settle run to its cap (the
-    /// same-format skip AetherEngine's controller does for channel zaps).
+    /// unobservable that negotiation makes every settle run to its cap — the
+    /// same reason a live-TV channel zap wants to skip a same-format write.
     /// There is exactly one HDMI output to describe, so the baseline is
     /// class-wide: written by `apply`, cleared by `reset`, valid on the
     /// premise the whole controller already stands on — these writes are the
