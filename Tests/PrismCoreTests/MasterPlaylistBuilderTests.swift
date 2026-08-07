@@ -497,6 +497,7 @@ struct SourceInfoRoutingTests {
             level: 153,
             width: 3840,
             height: 2160,
+            sampleAspectRatio: nil,
             bitDepth: 10,
             colorPrimariesName: "bt2020",
             colorTransferName: "smpte2084",

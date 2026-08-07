@@ -289,6 +289,18 @@ public struct VideoTrackInfo: Sendable, Equatable {
         }
     }
 
+    /// A pixel (sample) aspect ratio, kept rational — `64/45` is exact where
+    /// `1.4222…` is not.
+    public struct AspectRatio: Sendable, Equatable {
+        public let numerator: Int
+        public let denominator: Int
+
+        public init(numerator: Int, denominator: Int) {
+            self.numerator = numerator
+            self.denominator = denominator
+        }
+    }
+
     public let streamIndex: Int
     public let codecName: String
     public let profileName: String?
@@ -297,6 +309,11 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let level: Int32
     public let width: Int
     public let height: Int
+    /// The pixel aspect ratio the display should honor, container-level over
+    /// bitstream (an MKV's DisplayWidth/Height outranks the codec's VUI —
+    /// anamorphic DVD rips are usually tagged only at the container).
+    /// `nil` when neither says — treated as square.
+    public let sampleAspectRatio: AspectRatio?
     /// Luma bit depth from the pixel format, `nil` if the format is unknown.
     public let bitDepth: Int?
     public let colorPrimariesName: String?
@@ -794,6 +811,13 @@ public enum SourceProbe {
             level: par.level,
             width: Int(par.width),
             height: Int(par.height),
+            sampleAspectRatio: {
+                // Same precedence the remuxer (and ffmpeg's streamcopy) uses.
+                let streamSAR = stream.pointee.sample_aspect_ratio
+                let sar = streamSAR.num != 0 ? streamSAR : par.sample_aspect_ratio
+                guard sar.num > 0, sar.den > 0 else { return nil }
+                return .init(numerator: Int(sar.num), denominator: Int(sar.den))
+            }(),
             bitDepth: bitDepth,
             colorPrimariesName: cString(av_color_primaries_name(par.color_primaries)),
             colorTransferName: cString(av_color_transfer_name(transfer)),
