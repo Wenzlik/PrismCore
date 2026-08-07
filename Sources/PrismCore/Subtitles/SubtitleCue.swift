@@ -23,6 +23,12 @@ struct SubtitleCue: Equatable {
         )
     }
 
+    /// Copy with a (usually earlier) known end — how an open-ended bitmap
+    /// cue gets closed by the event that displaces it.
+    func ending(at seconds: Double) -> SubtitleCue {
+        SubtitleCue(start: start, end: Swift.min(end, seconds), text: text)
+    }
+
     var overlapsNothing: Bool { end <= start }
 }
 
