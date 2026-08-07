@@ -18,8 +18,29 @@ bumps may break API while **patch** bumps stay source-compatible.
   published. FFmpeg's own terms are untouched and unchanged.
 - `CHANGELOG.md` — this file. Releases up to 0.1.11 are reconstructed from their
   tags.
+- `VideoTrackInfo.sampleAspectRatio` — the pixel aspect ratio a display should
+  honor, kept rational, container-level over bitstream. What a host needs to
+  size a surface for anamorphic content.
+
+### Fixed
+
+- **Anamorphic SD plays at its intended shape.** The container-level aspect
+  ratio (an MKV's DisplayWidth/Height — how anamorphic DVD rips are usually
+  tagged) lives on the stream, not in codecpar, and the codecpar-only copy
+  dropped it: 720×576/16:9 sources played distorted. The remux now propagates
+  it into the `pasp` box AVPlayer honors. (Found and pinned byte-level because
+  FFmpeg's own hls demuxer has the same codecpar-only bug and a playlist
+  re-probe can never see the value.)
 
 ### Changed
+
+- **OCR arms on demand.** Bitmap renditions used to decode and OCR every track
+  from the first packet; a Blu-ray-class remux can carry dozens of PGS tracks
+  of which the player selects at most one. A track now does nothing — decode
+  included — until a fetch of one of its own `.vtt` segments arms it, and
+  segments cut while unarmed are re-produced on that fetch through the same
+  re-anchor machinery a seek uses, so subtitles enabled mid-film still get
+  their cues. Text renditions stay always-on — they are cheap.
 
 - **README rewritten for adopters.** It described a v0 scaffold whose Aether
   integration was "parked on two build-level prerequisites"; both were solved
