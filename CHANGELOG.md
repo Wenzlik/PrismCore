@@ -5,19 +5,10 @@ All notable changes to PrismCore. The format follows
 [Semantic Versioning](https://semver.org) — with the pre-1.0 caveat that **minor**
 bumps may break API while **patch** bumps stay source-compatible.
 
-## [0.1.12] — 2026-08-07
+## [0.1.13] — 2026-08-07
 
 ### Added
 
-- **Application Store Exception** on the licence. LGPL section 6 asks that users
-  be able to relink a work against a modified PrismCore, which a signed `.ipa`
-  cannot allow — so plain LGPL and the App Store were in tension, which is a poor
-  reason for a library like this to be unusable by the apps it was written for.
-  The exception releases an adopter from that requirement for store distribution
-  only; modifications to PrismCore itself stay LGPL and still have to be
-  published. FFmpeg's own terms are untouched and unchanged.
-- `CHANGELOG.md` — this file. Releases up to 0.1.11 are reconstructed from their
-  tags.
 - `VideoTrackInfo.sampleAspectRatio` — the pixel aspect ratio a display should
   honor, kept rational, container-level over bitstream. What a host needs to
   size a surface for anamorphic content.
@@ -41,6 +32,22 @@ bumps may break API while **patch** bumps stay source-compatible.
   segments cut while unarmed are re-produced on that fetch through the same
   re-anchor machinery a seek uses, so subtitles enabled mid-film still get
   their cues. Text renditions stay always-on — they are cheap.
+
+## [0.1.12] — 2026-08-07
+
+### Added
+
+- **Application Store Exception** on the licence. LGPL section 6 asks that users
+  be able to relink a work against a modified PrismCore, which a signed `.ipa`
+  cannot allow — so plain LGPL and the App Store were in tension, which is a poor
+  reason for a library like this to be unusable by the apps it was written for.
+  The exception releases an adopter from that requirement for store distribution
+  only; modifications to PrismCore itself stay LGPL and still have to be
+  published. FFmpeg's own terms are untouched and unchanged.
+- `CHANGELOG.md` — this file. Releases up to 0.1.11 are reconstructed from their
+  tags.
+
+### Changed
 
 - **README rewritten for adopters.** It described a v0 scaffold whose Aether
   integration was "parked on two build-level prerequisites"; both were solved
@@ -200,6 +207,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[0.1.13]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.13
 [0.1.12]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.12
 [0.1.11]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.11
 [0.1.10]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.10
