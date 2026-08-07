@@ -358,19 +358,31 @@ Prism, and Prism retires only at parity.
    (`subtitleProductionTimeout`, 8 s) and degrades to the empty segment only if
    the range genuinely never lands. A subtitle serve never aborts the connection
    the way a media serve does: empty cues beat a failed rendition.
-6. **Subtitles** *(text half implemented)* — every text subtitle stream
-   (SubRip / ASS / SSA / WebVTT / mov_text) is converted during the remux read
-   loop into a segmented WebVTT rendition (`subs<N>/seg%05d.vtt` +
+6. **Subtitles** *(text + OCR-bitmap implemented)* — every text subtitle
+   stream (SubRip / ASS / SSA / WebVTT / mov_text) is converted during the
+   remux read loop into a segmented WebVTT rendition (`subs<N>/seg%05d.vtt` +
    `subs<N>/index.m3u8`) cut on the video's own segment boundaries, so text
    survives PiP / AirPlay instead of living in a host overlay. External `.srt` /
    `.vtt` files register with `PrismCoreSession.addExternalSubtitle(url:…)`
    before `start()` and become renditions the same way. The renditions are
    declared `DEFAULT=NO,AUTOSELECT=NO` in a `SUBTITLES` group so AVKit never
    engages one by itself — the host selects it in the legible
-   `AVMediaSelectionGroup`. Bitmap subtitles (PGS/DVB/DVD) are out of scope
-   here: `SourceProbe` reports them (`SourceInfo.bitmapSubtitleTracks`) so the
-   host can render them in its own overlay, and an OCR-fed rendition is a later
-   idea, not this phase.
+   `AVMediaSelectionGroup`.
+
+   **Bitmap subtitles (PGS/DVB/DVD) become renditions through on-device OCR**:
+   the compositions decode to images (`BitmapSubtitleDecoder` — bitmap
+   subtitles are *event* streams, so a pending-cue lifecycle turns show/clear
+   events into cues with known ends, split at segment boundaries and capped
+   when a clear never comes), Vision reads them (`SubtitleOCR`, no language
+   correction — subtitles are full of names a corrector would "fix"), and the
+   text rides the same rendition machinery. Lossy by design — typography dies,
+   text survives — and verified against a real Blu-ray remux, where the served
+   segments read back the film's own SDH cues. `SourceProbe` still reports the
+   tracks (`SourceInfo.bitmapSubtitleTracks`) so a host that wants
+   pixel-accurate rendering can draw them itself; a platform without Vision
+   keeps them host-only in practice. (Field note for anyone repeating this:
+   without `pkt_timebase` on the subtitle decoder context, `AVSubtitle.pts`
+   stays NOPTS and every composition arrives untimed.)
 7. **Software decode path** *(implemented and routed; needs a device)*
    — libavcodec → `AVSampleBufferDisplayLayer`/`AVSampleBufferAudioRenderer`
    under an `AVSampleBufferRenderSynchronizer` for what the HLS-fMP4 pipeline
