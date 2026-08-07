@@ -83,6 +83,10 @@ final class WebVTTRenditionWriter {
         }
     }
 
+    /// The index the NEXT `flushSegment` will write — what a caller needs to
+    /// bookkeep per-segment state alongside the write it is about to trigger.
+    var nextSegmentIndex: Int { segmentIndex }
+
     /// Demand-driven jump: continue numbering at the anchor and forget cues
     /// wholly before it (a later backward jump reproduces them from the
     /// demuxer's own re-read).

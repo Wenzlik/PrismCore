@@ -181,4 +181,61 @@ struct SubtitleOCRLanguageTests {
         #expect(SubtitleOCR.visionLanguage(for: "", in: request) == nil)
     }
 }
+
+/// Lazy OCR arming: a bitmap rendition does no work — decode included — until
+/// a `.vtt` fetch of its own directory arms it, and segments cut while
+/// unarmed are bookkept stale so that fetch re-produces them instead of
+/// serving the header-only empty AVPlayer would cache forever. The full
+/// fetch→arm→re-produce loop runs in the opt-in real-media harness; these pin
+/// the pure pieces.
+@Suite("Lazy OCR arming")
+struct LazyOCRArmingTests {
+
+    @Test("A track starts unarmed and arming is one-way")
+    func armingIsOneWay() {
+        let track = SubtitleRenditionSet.BitmapRenditionTrack(
+            decoder: nil, language: nil, recognize: { _, _ in nil }
+        )
+        #expect(!track.isArmed)
+        track.arm()
+        #expect(track.isArmed)
+        track.arm()
+        #expect(track.isArmed, "re-arming is idempotent, never a toggle")
+    }
+
+    @Test("Stale bookkeeping: recorded while unarmed, cleared by the armed re-cut")
+    func staleLifecycle() {
+        let track = SubtitleRenditionSet.BitmapRenditionTrack(
+            decoder: nil, language: nil, recognize: { _, _ in nil }
+        )
+        track.recordStale(3)
+        track.recordStale(4)
+        #expect(track.isStale(3))
+        #expect(!track.isStale(5))
+        track.clearStale(3)
+        #expect(!track.isStale(3))
+        #expect(track.isStale(4), "clearing one index must not clear its neighbours")
+    }
+
+    @Test("Request paths parse to (ordinal, index) only for rendition segments")
+    func renditionSegmentParsing() {
+        typealias Renditions = SubtitleRenditionSet
+        #expect(Renditions.renditionSegment(inPath: "subs0/seg00012.vtt")! == (0, 12))
+        #expect(Renditions.renditionSegment(inPath: "/subs17/seg00000.vtt")! == (17, 0))
+        // Everything that is not a rendition segment: playlists, media
+        // segments, other directories, malformed ordinals.
+        #expect(Renditions.renditionSegment(inPath: "subs0/index.m3u8") == nil)
+        #expect(Renditions.renditionSegment(inPath: "seg00012.m4s") == nil)
+        #expect(Renditions.renditionSegment(inPath: "audio0/seg00012.vtt") == nil)
+        #expect(Renditions.renditionSegment(inPath: "subsX/seg00012.vtt") == nil)
+        #expect(Renditions.renditionSegment(inPath: "seg00012.vtt") == nil)
+    }
+
+    @Test("The provider's vtt index parser mirrors the media one, per extension")
+    func vttIndexParsing() {
+        #expect(PlanSegmentProvider.vttSegmentIndex(inPath: "subs2/seg00034.vtt") == 34)
+        #expect(PlanSegmentProvider.vttSegmentIndex(inPath: "subs2/seg00034.m4s") == nil)
+        #expect(PlanSegmentProvider.segmentIndex(inPath: "subs2/seg00034.vtt") == nil)
+    }
+}
 #endif

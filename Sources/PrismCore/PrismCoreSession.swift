@@ -177,10 +177,7 @@ public actor PrismCoreSession {
         // never publish a plan, and the provider then behaves exactly like
         // the plain directory provider.
         let demand = DemandCoordinator()
-        self.server = LoopbackHTTPServer(
-            provider: PlanSegmentProvider(root: directory, coordinator: demand)
-        )
-        self.remuxer = HLSRemuxer(
+        let remuxer = HLSRemuxer(
             sourceURL: url,
             httpHeaders: httpHeaders,
             outputDirectory: directory,
@@ -193,6 +190,15 @@ public actor PrismCoreSession {
             segmentCacheBytes: segmentCacheBytes,
             forceMuxed: forceMuxedShape
         )
+        self.remuxer = remuxer
+        var provider = PlanSegmentProvider(root: directory, coordinator: demand)
+        // The demand seam for lazy OCR: a `.vtt` fetch is what arms a bitmap
+        // rendition, so a 29-PGS-track disc pays for the one track someone
+        // selected, not all of them.
+        provider.subtitleDemand = { [subtitles = remuxer.subtitles] path in
+            subtitles.noteSegmentDemand(path: path)
+        }
+        self.server = LoopbackHTTPServer(provider: provider)
     }
 
     /// A session for the display the host is playing to right now.
