@@ -1,3 +1,49 @@
+PrismCore
+Copyright © 2026 Václav Zmrhal <https://zmrhal.cz>
+
+PrismCore is licensed under the GNU Lesser General Public License, version 2.1
+or (at your option) any later version — the full text of which follows below —
+with the following added permission.
+
+
+                    APPLICATION STORE EXCEPTION
+
+As a special exception to the terms of the GNU Lesser General Public License
+version 2.1, the copyright holder of PrismCore grants you permission to convey
+a combined work that incorporates PrismCore through an application
+distribution channel — the Apple App Store, TestFlight, the Mac App Store, or
+any comparable store — whose terms of service are incompatible with the
+requirements of section 6 of that License, notwithstanding those requirements.
+
+Concretely, and only for such distribution, you are released from section 6's
+requirements that the terms of your combined work permit modification of that
+work for the customer's own use and reverse engineering for debugging such
+modifications, and from section 6's requirement to accompany the work with the
+material that would let a recipient relink it against a modified PrismCore.
+
+This exception is subject to two conditions:
+
+  1. It covers the *use* of PrismCore in a larger work. It does not cover
+     PrismCore itself: if you modify PrismCore, the modified library remains
+     subject to the Lesser General Public License in full, and you must make
+     your modifications available under that License.
+
+  2. You must give notice, in a place a user of your work can find (an About
+     screen, an acknowledgements page, or the accompanying documentation),
+     that your work incorporates PrismCore, along with a copy of this License
+     and a reference to where PrismCore's source can be obtained.
+
+This exception applies to PrismCore's own code only. It does not extend to
+FFmpeg or to any other third-party component. FFmpeg reaches an adopting
+application as dynamically linked frameworks under the plain Lesser General
+Public License — see NOTICE.md for what that asks of you, which is the same
+thing it already asks of every FFmpeg-based application on those stores.
+
+If you would rather not rely on this exception, the Lesser General Public
+License below applies on its own terms, unmodified.
+
+-------------------------------------------------------------------------------
+
                   GNU LESSER GENERAL PUBLIC LICENSE
                        Version 2.1, February 1999
 

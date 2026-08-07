@@ -6,7 +6,19 @@ PrismCore was written by **Václav Zmrhal** ([zmrhal.cz](https://zmrhal.cz)) for
 Copyright © 2026 Václav Zmrhal.
 
 PrismCore is licensed under the **GNU Lesser General Public License, version 2.1
-or later** — see [`LICENSE`](LICENSE).
+or later, with an Application Store Exception** — see [`LICENSE`](LICENSE).
+
+## The Application Store Exception, in one paragraph
+
+LGPL section 6 asks that the users of a work built on PrismCore be able to relink
+it against a modified PrismCore. A signed `.ipa` cannot allow that, so plain LGPL
+and the App Store are in tension — which is a poor reason for a library like this
+one to be unusable by the apps it was written for. The exception releases an
+adopter from that requirement *for store distribution only*. It does not release
+anyone from LGPL on PrismCore itself: modify the library and those modifications
+stay LGPL and have to be published. Using it unmodified asks two things — say in
+your app that it includes PrismCore and where the source is, and honour FFmpeg's
+own terms below, which are unchanged by any of this.
 
 ## Why LGPL rather than something permissive
 
@@ -42,7 +54,11 @@ and they are linked dynamically — so the LGPL's relinking requirement is satis
 by replacing the xcframeworks in MPVKit.
 
 Anything built on PrismCore inherits those obligations: ship the licence texts,
-say which versions you used, and keep the FFmpeg libraries replaceable.
+say which versions you used, and keep the FFmpeg libraries replaceable. The
+Application Store Exception above covers PrismCore's own code and does not reach
+FFmpeg — but nothing here makes FFmpeg's terms harder than they already are for
+any app that ships it, and embedding the frameworks dynamically (which is how
+MPVKit delivers them) is what satisfies them.
 
 ## Attribution
 
