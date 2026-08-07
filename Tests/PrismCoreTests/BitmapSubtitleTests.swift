@@ -154,3 +154,31 @@ struct BitmapSubtitleTests {
         #expect(track.process([clear(3.0)]).isEmpty)
     }
 }
+
+#if canImport(Vision)
+import Vision
+
+@Suite("OCR language mapping")
+struct SubtitleOCRLanguageTests {
+
+    @Test("Container 639-2 tags resolve to a supported Vision identifier")
+    func iso6392Resolves() {
+        let request = VNRecognizeTextRequest()
+        // "cze" is what a Czech Matroska track actually carries; a raw
+        // pass-through matched nothing and silently lost the language hint.
+        if let czech = SubtitleOCR.visionLanguage(for: "cze", in: request) {
+            #expect(czech.lowercased().hasPrefix("cs"))
+        }
+        let english = SubtitleOCR.visionLanguage(for: "eng", in: request)
+        #expect(english?.lowercased().hasPrefix("en") == true)
+    }
+
+    @Test("An unknown tag skips the hint instead of poisoning the request")
+    func unknownTagIsDropped() {
+        let request = VNRecognizeTextRequest()
+        #expect(SubtitleOCR.visionLanguage(for: "xxx", in: request) == nil)
+        #expect(SubtitleOCR.visionLanguage(for: nil, in: request) == nil)
+        #expect(SubtitleOCR.visionLanguage(for: "", in: request) == nil)
+    }
+}
+#endif
