@@ -2,8 +2,19 @@
 
 All notable changes to PrismCore. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
-[Semantic Versioning](https://semver.org) — with the pre-1.0 caveat that **minor**
-bumps may break API while **patch** bumps stay source-compatible.
+[Semantic Versioning](https://semver.org). (Releases before 1.0.0 carried the
+usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
+source-compatible.)
+
+## [1.0.0] — 2026-08-07
+
+Identical in content to 0.1.13 — the bump is the declaration. The engine has
+been shipping in a real app across the 0.1.x line: remux with multi-audio,
+Atmos carriage, Dolby Vision (including 7 → 8.1 conversion), text and OCR
+bitmap subtitle renditions, the tvOS display-criteria contract, demand-driven
+production with seek re-anchoring, deinterlace verification and the software
+pipeline. From here the public API is stable: breaking changes mean a major
+bump, features a minor, fixes a patch.
 
 ## [0.1.13] — 2026-08-07
 
@@ -207,6 +218,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.0.0
 [0.1.13]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.13
 [0.1.12]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.12
 [0.1.11]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.11

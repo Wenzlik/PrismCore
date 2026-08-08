@@ -74,7 +74,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "0.1.12")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "1.0.0")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -290,11 +290,11 @@ to override the `mpvkit` identity PrismCore asks for.
 
 PrismCore follows [Semantic Versioning](https://semver.org). Every `public`
 declaration in `Sources/PrismCore/` is the stability contract; `internal` types are
-not. While the package is pre-1.0, **minor** bumps may carry breaking API changes
-and **patch** bumps stay source-compatible — so pin accordingly:
+not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
+features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", .upToNextMinor(from: "0.1.12"))
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "1.0.0")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
