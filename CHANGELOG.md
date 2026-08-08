@@ -6,6 +6,21 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.1.1] — 2026-08-08
+
+### Fixed
+
+- **A source with no seek index can't eat the startup budget.** The nudge seek
+  that makes a demuxer load its index is only *bounded* when an index exists:
+  a Matroska without Cues turns it into a linear scan of the whole file, and
+  over a slow transport that is the entire session startup (field case: a
+  5.4 GB webrip on an SMB mount — one seek took 66 s, and `start()` timed out
+  before the master playlist was ever written, so the host fell back to its
+  other engine). The seek now runs under a 3 s wall-clock guard
+  (`interrupt_callback`); on expiry the plan degrades to the uniform basis —
+  the same path an untrusted index already took — and the session starts.
+  Sources with an index load it in a fraction of a second and are unaffected.
+
 ## [1.1.0] — 2026-08-08
 
 ### Changed
@@ -240,6 +255,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.1.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.1
 [1.1.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.0
 [1.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.0.0
 [0.1.13]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.13

@@ -86,4 +86,41 @@ struct SegmentPlanTests {
         #expect(plan.entries.count == 2)
         #expect(abs(plan.entries[0].duration - 6) < 0.5)
     }
+
+    @Test("An exhausted index-load budget still yields a usable plan")
+    func exhaustedIndexBudgetStillPlans() throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "h264_aac", withExtension: "mkv", subdirectory: "Fixtures"
+        ))
+        // A zero budget is the worst case the guard exists for. What it must
+        // never do is lose the plan or the read position: whether the index
+        // survives depends on where the demuxer had to READ (the interrupt is
+        // only consulted on I/O, so a small already-buffered file loads its
+        // Cues regardless — which is why this asserts a usable plan rather
+        // than a basis).
+        let plan = try #require(SegmentPlanProbe.plan(
+            url: fixture, targetSeconds: 6, indexLoadBudget: .zero
+        ))
+        #expect(!plan.entries.isEmpty)
+        // Whatever the basis, the plan must still cover the source: a
+        // truncated plan would promise AVPlayer segments that stop early.
+        let covered = plan.entries.reduce(0) { $0 + $1.duration }
+        #expect(covered > 7, "an 8 s source planned as \(covered)s on \(plan.basis)")
+    }
+
+    @Test("The nudge seek leaves the read position at the head, budget or not")
+    func indexLoadRestoresPosition() throws {
+        // The guard is lifted before the seek back to zero precisely so an
+        // expired budget cannot strand the producer mid-file. Proven through
+        // the served output: a session whose producer started mid-file would
+        // serve a first segment that doesn't begin at the presentation
+        // origin.
+        let fixture = try #require(Bundle.module.url(
+            forResource: "h264_aac", withExtension: "mkv", subdirectory: "Fixtures"
+        ))
+        let plan = try #require(SegmentPlanProbe.plan(
+            url: fixture, targetSeconds: 6, indexLoadBudget: .zero
+        ))
+        #expect(plan.entries.first?.startPTS == 0)
+    }
 }

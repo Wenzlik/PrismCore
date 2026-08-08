@@ -10,7 +10,8 @@ enum SegmentPlanProbe {
     static func plan(
         url: URL,
         httpHeaders: [String: String] = [:],
-        targetSeconds: Int
+        targetSeconds: Int,
+        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
     ) -> SegmentPlan? {
         var input: UnsafeMutablePointer<AVFormatContext>?
 
@@ -35,7 +36,8 @@ enum SegmentPlanProbe {
         return SegmentPlan.build(
             input: input,
             videoStreamIndex: videoIndex,
-            targetSeconds: targetSeconds
+            targetSeconds: targetSeconds,
+            indexLoadBudget: indexLoadBudget
         )
     }
 }
