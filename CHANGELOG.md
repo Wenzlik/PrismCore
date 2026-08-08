@@ -6,6 +6,28 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.1.0] — 2026-08-08
+
+### Changed
+
+- **An HDR settle no longer trusts the ambiguous clear.** On an HDR target,
+  the display-switch in-progress flag clearing is not a "done": a panel that
+  finished quietly and one that ABORTED the switch (staying SDR) look
+  identical at that moment, and returning on the clear is exactly how a
+  slow-but-willing panel's master got validated against the old SDR mode
+  (`-11868`). The wait now notes the clear and spends the rest of the settle
+  cap watching for a real HDR signal (mode-switch-end, raised headroom).
+  Rate-only writes keep the clear as their exit. Found on a panel that takes
+  HDR10 fine when parked there, yet cleared its runtime switch at ~2.9 s with
+  the mode never engaging.
+
+### Added
+
+- `SettleReport.Outcome.clearedWithoutHDRSignal` + `clearedAfterMilliseconds`
+  — the report line that says the panel probably stayed SDR and a master
+  rejection may follow: "switch cleared at 2913ms but HDR never signalled;
+  watched to 6000ms".
+
 ## [1.0.0] — 2026-08-07
 
 Identical in content to 0.1.13 — the bump is the declaration. The engine has
@@ -218,6 +240,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.1.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.0
 [1.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.0.0
 [0.1.13]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.13
 [0.1.12]: https://github.com/Wenzlik/PrismCore/releases/tag/0.1.12

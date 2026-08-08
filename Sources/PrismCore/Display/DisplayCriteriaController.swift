@@ -79,8 +79,22 @@ public enum DisplayCriteriaLogic {
             case modeSwitchEnd
             /// The EDR headroom rose — the HDR engage is visible.
             case headroomRaised
-            /// The in-progress flag cleared without an end notification.
+            /// The in-progress flag cleared without an end notification —
+            /// terminal only for rate-only writes, where there is no range
+            /// engage left to confirm.
             case inProgressCleared
+            /// **HDR targets only**: the in-progress flag cleared, the rest
+            /// of the cap was spent watching for an HDR signal (end
+            /// notification, raised headroom), and none came. The clear was
+            /// ambiguous — a panel that finished quietly looks exactly like
+            /// one that ABORTED the switch and stayed SDR — so the wait
+            /// doesn't end on it; but a cap's worth of silence afterwards
+            /// means the master this session serves may well be about to
+            /// meet an SDR panel (`-11868`, and the rejection fallback takes
+            /// it from there). Found on a panel that takes HDR10 fine when
+            /// parked there, yet cleared its runtime switch at ~2.9 s with
+            /// the mode never engaging.
+            case clearedWithoutHDRSignal
             /// The settle cap expired with the switch still reporting
             /// in-progress — the unobservable-switch case the cap exists for.
             case capExpired
@@ -89,15 +103,20 @@ public enum DisplayCriteriaLogic {
         public let outcome: Outcome
         /// When stage 1 saw the switch start; `nil` when none ever did.
         public let switchStartedAfterMilliseconds: Int?
+        /// When the in-progress flag cleared without an HDR signal; only set
+        /// for `.clearedWithoutHDRSignal`.
+        public let clearedAfterMilliseconds: Int?
         public let totalMilliseconds: Int
 
         public init(
             outcome: Outcome,
             switchStartedAfterMilliseconds: Int? = nil,
+            clearedAfterMilliseconds: Int? = nil,
             totalMilliseconds: Int
         ) {
             self.outcome = outcome
             self.switchStartedAfterMilliseconds = switchStartedAfterMilliseconds
+            self.clearedAfterMilliseconds = clearedAfterMilliseconds
             self.totalMilliseconds = totalMilliseconds
         }
 
@@ -114,6 +133,9 @@ public enum DisplayCriteriaLogic {
                 return "no switch started within \(totalMilliseconds)ms grace"
             case .capExpired:
                 return "settle cap expired after \(totalMilliseconds)ms\(start)"
+            case .clearedWithoutHDRSignal:
+                let cleared = clearedAfterMilliseconds.map { "\($0)ms" } ?? "?"
+                return "switch cleared at \(cleared) but HDR never signalled; watched to \(totalMilliseconds)ms\(start)"
             case .modeSwitchEnd, .headroomRaised, .inProgressCleared:
                 return "settled via \(outcome.rawValue) in \(totalMilliseconds)ms\(start)"
             }
@@ -331,11 +353,13 @@ public final class DisplayCriteriaController {
         }
         func report(
             _ outcome: DisplayCriteriaLogic.SettleReport.Outcome,
-            startedAt: Int? = nil
+            startedAt: Int? = nil,
+            clearedAt: Int? = nil
         ) -> DisplayCriteriaLogic.SettleReport {
             .init(
                 outcome: outcome,
                 switchStartedAfterMilliseconds: startedAt,
+                clearedAfterMilliseconds: clearedAt,
                 totalMilliseconds: elapsedMs()
             )
         }
@@ -377,7 +401,15 @@ public final class DisplayCriteriaController {
         }
         guard startedAt != nil else { return report(.noSwitchStarted) }
 
-        // Stage 2 — bounded settle.
+        // Stage 2 — bounded settle. For an HDR target the in-progress flag
+        // clearing is NOT terminal: a panel that finished quietly and one
+        // that aborted the switch (staying SDR) look identical at that
+        // moment, and returning on the clear is exactly how a slow-but-
+        // willing panel's master got validated against the old SDR mode
+        // (-11868). So the clear is noted and the rest of the cap keeps
+        // watching for a real HDR signal; rate-only writes keep the clear as
+        // their exit — there is no range engage left to confirm.
+        var clearedAt: Int?
         let settleDeadline = ContinuousClock.now.advanced(by: settleCap)
         while ContinuousClock.now < settleDeadline {
             try? await Task.sleep(for: .milliseconds(50))
@@ -386,8 +418,14 @@ public final class DisplayCriteriaController {
                 return report(.headroomRaised, startedAt: startedAt)
             }
             if !manager.isDisplayModeSwitchInProgress {
-                return report(.inProgressCleared, startedAt: startedAt)
+                guard lastWriteWantedHDR else {
+                    return report(.inProgressCleared, startedAt: startedAt)
+                }
+                if clearedAt == nil { clearedAt = elapsedMs() }
             }
+        }
+        if let clearedAt {
+            return report(.clearedWithoutHDRSignal, startedAt: startedAt, clearedAt: clearedAt)
         }
         return report(.capExpired, startedAt: startedAt)
     }

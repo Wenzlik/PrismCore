@@ -211,6 +211,18 @@ struct DisplayCriteriaLogicTests {
                 outcome: .noSwitchStarted, totalMilliseconds: 2000
             ).summary == "no switch started within 2000ms grace"
         )
+        // The ambiguous clear names both times: when the flag cleared and
+        // how long the HDR signal was watched for — the line that says the
+        // panel probably stayed SDR and a master rejection may follow.
+        #expect(
+            DisplayCriteriaLogic.SettleReport(
+                outcome: .clearedWithoutHDRSignal,
+                switchStartedAfterMilliseconds: 11,
+                clearedAfterMilliseconds: 2913,
+                totalMilliseconds: 6000
+            ).summary
+                == "switch cleared at 2913ms but HDR never signalled; watched to 6000ms (switch started at 11ms)"
+        )
     }
 }
 
