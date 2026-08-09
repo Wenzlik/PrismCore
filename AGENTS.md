@@ -1,0 +1,196 @@
+# AGENTS.md — guide for AI contributors
+
+This file is the contract between PrismCore and any AI coding agent working on
+it — **Claude Code**, **Codex**, **Gemini**, **Copilot**, **Cursor**, or
+whatever opens this repository next. Read it in full before changing anything.
+Humans: it works as onboarding too.
+
+---
+
+## Fast read order
+
+1. [`README.md`](README.md) — what the engine handles and how to call it
+2. `AGENTS.md` *(this file)* — how we work, and what has already bitten us
+3. [`CHANGELOG.md`](CHANGELOG.md) — what actually landed, newest first
+
+Then open Swift files, starting from `PrismCoreSession` (the front door).
+
+### The engine in one paragraph
+
+PrismCore turns media `AVPlayer` cannot open into media it can. The **remux
+path** (the main one) demuxes with libavformat, stream-copies video and audio
+into HLS-fMP4 on disk, and serves it from a loopback HTTP server — so the host
+plays a plain `AVPlayer` and keeps hardware decode, PiP, AirPlay, native track
+selection and the tvOS display handshake. Nothing is re-encoded, so Atmos stays
+object audio and Dolby Vision stays Dolby Vision (Profile 7 is converted to 8.1
+in flight). The **software path** is a real player for what AVPlayer cannot
+decode at all (VP9, MPEG-2, VC-1, verified-interlaced H.264): libavcodec into an
+`AVSampleBufferDisplayLayer` with its own clock. `PrismCoreEngine.decide` picks
+between them; a host that has no surface for the software path can decline it
+and route elsewhere.
+
+---
+
+## House rules
+
+- **Never copy code from AetherEngine.** It is prior art we study for
+  *approach* only (LGPL-3.0 vs our LGPL-2.1+, and it is someone else's work).
+  Read it, describe the mechanism in your own words, then design ours. Saying
+  "convergent with AetherEngine" in a PR is good; lifting a function is not.
+- **Comments explain *why*, never *what*.** A comment that restates the line
+  above it is noise. A comment that records the failure a line prevents is the
+  most valuable thing in this repo — most of the notes below started as one.
+- **Claims need evidence.** "This is faster" means a measurement in the PR body.
+  "This works" means a test or a named device run. See *Measuring* below for the
+  trap that already caught us once.
+- **Every release gets a CHANGELOG entry**, and every changed behaviour gets its
+  reasoning recorded — including the things we tried and reverted, which are
+  often more useful than what shipped.
+
+---
+
+## Field notes — the things that cost hours
+
+These are all real. Each one was found the hard way; none is obvious from the
+API surface.
+
+### FFmpeg / libavformat
+
+- **`avformat_find_stream_info` is not optional, and not just knowledge.** It
+  also fills fields the *muxer* needs — an EAC3 track's frame size most
+  sharply. A context that skipped it produces a perfectly correct-looking
+  manifest and then fails on `av_interleaved_write_frame` (`-22`). This is why
+  the probe hands over its **context** (`ProbedSource`), never merely its
+  conclusions. Tried the other way in 1.1.2; reverted the same day.
+- **`interrupt_callback` must be set BEFORE `avformat_open_input`.** The read
+  path checks `URLContext.interrupt_callback` (`libavformat/avio.c:515`), which
+  is populated when the context is created (`avio.c:189`). Setting it on the
+  `AVFormatContext` afterwards reaches only the few places that read
+  `s->interrupt_callback` directly — *not* the blocking reads. **Known bug:**
+  1.1.1's bounded index-load seek does exactly this and therefore does not
+  work; see the CHANGELOG note and the open issue.
+- **Container-level aspect ratio lives on `AVStream.sample_aspect_ratio`**, not
+  in codecpar. An MKV's `DisplayWidth`/`Height` — how anamorphic DVD rips are
+  tagged — is dropped by a codecpar-only copy. FFmpeg's *own* hls demuxer has
+  the same bug (`hls.c:2040`), which is why the SAR test asserts on the `pasp`
+  box bytes of the served init segment rather than re-probing the playlist.
+- **A Matroska without Cues turns any timestamp seek into a linear scan** of
+  the whole container. On a 5.4 GB file over SMB that is 66 s for one seek. Do
+  not assume a seek is bounded because the file is "local".
+- **`AV_FRAME_FLAG_INTERLACED` is `1 << 3`.** `1 << 2` is `DISCARD`. Using the
+  wrong one makes every stream look progressive and the mistake is invisible
+  without a test.
+- **A subtitle codec context needs `pkt_timebase` set before `avcodec_open2`**,
+  or `AVSubtitle.pts` stays `NOPTS` and every decoded event is silently
+  dropped. Cost: 2000 PGS packets, 0 cues, no error anywhere.
+- **`av_seek_frame` trips assertions in `matroskadec.c`** with nested elements;
+  prefer `avformat_seek_file`, and flush after seeking.
+
+### Muxing to fMP4 (`FMP4SegmentWriter`, `HLSRemuxer`)
+
+- **movenc defaults HEVC to `hev1`, not `hvc1`.** Apple's HLS rules want
+  `hvc1`, and `HVCCNormalizer` asserts `array_completeness = 1`, which
+  contradicts `hev1` — movenc resolves that by writing **no `hvcC` box at
+  all**. Set the fourcc explicitly.
+- **The `hvcC` is normalized twice on purpose**: on the input extradata, and
+  again on the produced init segment, because the muxer rebuilds the record
+  when it writes the sample entry.
+- **`delay_moov` is mandatory for EAC3.** movenc builds the `dec3` sample entry
+  from parsed packets and refuses an up-front moov.
+- Dolby Vision Profile 5 needs the `dvh1` fourcc — an `hvc1` entry over P5
+  decodes to green-and-purple. Profile 8.x deliberately keeps `hvc1`, because
+  its base layer *is* the fallback.
+
+### tvOS display handshake (`DisplayCriteriaController`)
+
+- Criteria must be programmed and settled **before** the host loads the
+  playlist. tvOS validates an HDR variant's `VIDEO-RANGE` against the panel's
+  *current* mode, synchronously — a PQ master handed to an SDR-parked panel
+  fails outright (`-11868`), it does not switch or tone-map.
+- **The in-progress flag clearing is ambiguous on an HDR target.** A panel that
+  finished quietly and one that aborted the switch look identical at that
+  moment. Since 1.1.0 the settle keeps watching for a real HDR signal and
+  reports `clearedWithoutHDRSignal` if none comes.
+- Panels advertise HDR they cannot usefully *display*. One 1080p set in the
+  field accepts HDR10 and shows it washed out; the honest answer there is SDR,
+  and the rejection fallback already produces it.
+
+---
+
+## Measuring
+
+There is an opt-in harness: `StartupCostBenchmark`, enabled by pointing
+`PRISMCORE_BENCH` at real media (a path **or an `http://` URL`**). It breaks
+startup into probe / second open / `start()` / first fetch.
+
+**Measure over HTTP, not a mounted share.** This already caught us out: an
+SMB-mounted file reads locally and cached, so the double-open measured as 21 ms
+of noise and the conclusion ("not worth fixing") was wrong. The same work over
+HTTP was hundreds of milliseconds, twice per playback. Hosts reach media over
+the network; benchmark the transport they actually use.
+
+Byte-counting through a toy HTTP server is unreliable for the same class of
+reason: an open-ended range means the server keeps writing until the client
+hangs up, so "bytes served" includes socket slack and varies run to run. Prefer
+repeated timings with a warm cache, and report the spread, not one number.
+
+---
+
+## Testing
+
+- Swift Testing. `swift test --filter` matches **function names**, not the
+  display strings in `@Test("…")`. Filtering on a suite title silently runs
+  nothing ("No matching test cases were run").
+- Some tests need Xcode's toolchain rather than the Command Line Tools —
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`. A
+  missing `Testing.framework` at *runtime* is this, not a broken test.
+- **Opt-in harnesses for what a fixture cannot carry**, gated on an environment
+  variable so CI stays hermetic:
+  - `PRISMCORE_MEDIA` — real-media probe/DV verification
+  - `PRISMCORE_PGS_MEDIA` — the OCR subtitle pipeline (no FFmpeg build can
+    *encode* PGS, so there is no committable fixture)
+  - `PRISMCORE_BENCH` — startup cost
+- Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
+  and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
+  pipeline, never the premium claims — Atmos and Dolby Vision need real media
+  and a device.
+
+---
+
+## Releasing
+
+1. Land the change with a CHANGELOG entry under a new version heading, plus the
+   link at the bottom of the file.
+2. `git tag X.Y.Z` — **always three components**. SPM only resolves full semver
+   tags; a `1.2` tag is invisible to consumers. (Release *titles* may drop a
+   trailing zero if you like; tags may not.)
+3. `gh release create X.Y.Z` with notes that say what changed and why. Since
+   1.0.0 this project follows full semver: breaking → major, feature → minor,
+   fix → patch.
+4. **Bump the host pin in two places or not at all.** Aether pins PrismCore
+   exactly, in `project.yml` (`exactVersion:`) *and*
+   `ci_scripts/Package.resolved.pinned`. Bumping one silently gives devices and
+   TestFlight different engines — that happened (local 0.1.11, cloud 0.1.6) and
+   is why the pin is exact.
+
+---
+
+## Repository shape
+
+```
+Sources/PrismCore/
+  PrismCoreSession.swift     the front door: start() → playlist URL, stop()
+  PrismCoreEngine.swift      decide(for:) — remux vs software vs decline
+  Probe/                     SourceProbe, ProbedSource, DisplayCapabilities,
+                             SourceOpenTuning (read caps)
+  Remux/                     HLSRemuxer (the producer), FMP4SegmentWriter,
+                             AudioBridge, SegmentPlan, DemandCoordinator
+  Loopback/                  LoopbackHTTPServer + segment providers
+  Subtitles/                 WebVTT renditions, bitmap decode + OCR
+  Display/                   tvOS criteria + settle
+  Software/                  the decode-and-render path
+Tests/PrismCoreTests/        Swift Testing, fixtures, opt-in harnesses
+```
+
+The host contract is deliberately small: build a session, `start()`, play the
+URL, `stop()`. Everything else is the engine's business.
