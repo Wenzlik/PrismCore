@@ -159,7 +159,8 @@ public actor PrismCoreSession {
         httpHeaders: [String: String] = [:],
         display: DisplayCapabilities,
         segmentCacheBytes: Int? = 1 << 30,
-        forceMuxedShape: Bool = false
+        forceMuxedShape: Bool = false,
+        probed: ProbedSource? = nil
     ) throws {
         self.configuration = Configuration(
             url: url,
@@ -190,7 +191,8 @@ public actor PrismCoreSession {
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
-            forceMuxed: forceMuxedShape
+            forceMuxed: forceMuxedShape,
+            probed: probed
         )
         self.remuxer = remuxer
         var provider = PlanSegmentProvider(root: directory, coordinator: demand)

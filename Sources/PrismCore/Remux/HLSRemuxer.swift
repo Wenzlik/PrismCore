@@ -133,6 +133,11 @@ final class HLSRemuxer: @unchecked Sendable {
     /// answer to AVPlayer refusing a master (-11868/-11848/-1002): a fresh
     /// session with the one best audio track muxed into the variant.
     private let forceMuxed: Bool
+    /// The routing probe's already-open context, when the host passed one.
+    /// `run()` consumes it (once) instead of opening the source again; holding
+    /// the reference also means an unconsumed one is closed when this remuxer
+    /// is released rather than leaked.
+    private let probed: ProbedSource?
 
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
@@ -196,8 +201,10 @@ final class HLSRemuxer: @unchecked Sendable {
         displayIsDolbyVisionCapable: Bool = false,
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
-        forceMuxed: Bool = false
+        forceMuxed: Bool = false,
+        probed: ProbedSource? = nil
     ) {
+        self.probed = probed
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
         self.outputDirectory = outputDirectory
@@ -220,36 +227,53 @@ final class HLSRemuxer: @unchecked Sendable {
     func run() throws {
         var input: UnsafeMutablePointer<AVFormatContext>?
 
-        // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
-        // authorization) on the demux connection itself, under the shared
-        // read caps (see `SourceOpenTuning`).
-        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-        defer { av_dict_free(&openOptions) }
+        // Adopt the routing probe's context when the host handed one over —
+        // the source is already open and already analysed, so this whole
+        // block is a rewind instead of a round trip. Only the CONTEXT can be
+        // inherited, never merely its conclusions: `find_stream_info` fills
+        // fields the muxer needs (an EAC3 track's frame size), so a context
+        // that skipped it produces a right-looking manifest and a failing
+        // `av_interleaved_write_frame`. That is the whole reason this is a
+        // handover and not a cache.
+        let adoptedInfo: SourceInfo?
+        if let adopted = probed?.consumeContext() {
+            input = adopted
+            // The probe left the position wherever its reads ended — the
+            // interlace verification decodes a dozen frames. Production starts
+            // at the head, and the demand-driven planner seeks from there.
+            _ = av_seek_frame(adopted, -1, 0, AVSEEK_FLAG_BACKWARD)
+            avformat_flush(adopted)
+            adoptedInfo = probed?.info
+        } else {
+            // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
+            // authorization) on the demux connection itself, under the shared
+            // read caps (see `SourceOpenTuning`).
+            var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
+            defer { av_dict_free(&openOptions) }
 
-        let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
-        try FFmpegError.check(
-            avformat_open_input(&input, sourceSpec, nil, &openOptions),
-            "avformat_open_input"
-        )
+            let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
+            try FFmpegError.check(
+                avformat_open_input(&input, sourceSpec, nil, &openOptions),
+                "avformat_open_input"
+            )
+            guard let opened = input else { throw Failure.noVideoStream }
+            try FFmpegError.check(
+                avformat_find_stream_info(opened, nil), "avformat_find_stream_info"
+            )
+            adoptedInfo = nil
+        }
+        // Ours to close either way now: a consumed `ProbedSource` has given up
+        // ownership, and an unconsumed one never had this context.
         defer { avformat_close_input(&input) }
         guard let input else { throw Failure.noVideoStream }
 
-        // Not skippable, however much the host already knows about this
-        // source. The obvious saving — the routing probe just analysed the
-        // same file, so reuse its answer and skip this second analysis — was
-        // tried and reverted: `find_stream_info` is also what fills the fields
-        // the MUXER needs (an EAC3 track's frame size, most sharply), and a
-        // context that never ran it mixes a manifest that looks right with an
-        // `av_interleaved_write_frame` failure. Making the second open cheap
-        // has to mean sharing the FIRST one's context, not trusting its
-        // conclusions.
-        try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
-
         // The probe already reads everything both decisions below need — which
         // streams exist, what they are, whether they copy, their languages and
-        // the video's HDR/DV signaling. Reuse it rather than re-deriving any of
-        // it here (SourceProbe.describe works on our already-open context).
-        let info = SourceProbe.describe(input: input)
+        // the video's HDR/DV signaling. An adopted context brings that answer
+        // with it (including the verified interlace verdict, which costs
+        // decoded frames and must not be paid twice); otherwise derive it here
+        // from our own context.
+        let info = adoptedInfo ?? SourceProbe.describe(input: input)
         guard let videoTrack = info.video else { throw Failure.noVideoStream }
         guard videoTrack.copyability == .streamCopy else {
             throw Failure.videoCodecNotNativelyPlayable(videoTrack.codecName)
