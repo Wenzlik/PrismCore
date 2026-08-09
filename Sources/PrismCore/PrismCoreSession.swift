@@ -68,7 +68,9 @@ public actor PrismCoreSession {
     private let configuration: Configuration
     /// External subtitle registrations, replayed onto a fallback session.
     private var externalSubtitles: [(url: URL, language: String?, name: String?, isForced: Bool)] = []
-    private let workDirectory: URL
+    /// Where this session's playlists and segments live. Internal so the
+    /// startup-cost benchmark can watch artifacts appear as they land.
+    let workDirectory: URL
     private let server: LoopbackHTTPServer
     private let remuxer: HLSRemuxer
     private var remuxTask: Task<Void, Error>?
