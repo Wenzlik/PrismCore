@@ -6,6 +6,34 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.1.2] — 2026-08-09
+
+### Fixed
+
+- **Opening a source no longer reads more of it than it has to.** Every open
+  now carries explicit read caps (4 MB probe, 2 s of analysis) instead of
+  libavformat's defaults, which are sized for containers that hide their
+  structure — Matroska and MP4 describe themselves in their header. Measured
+  against a 5.4 GB HEVC/EAC3 remux served over HTTP, warm, five runs: the open
+  drops from a median of 126 ms to 54 ms, and the spikes (168 ms) disappear
+  along with the analysis that produced them. A playback pays this twice — the
+  routing probe and the remuxer each open the source — so it is the part of a
+  host's "Preparing…" that PrismCore actually controls. The caps are a
+  ceiling, not a target: a well-formed file stops well short of both.
+
+### Notes
+
+- The companion idea — hand the remuxer the routing probe's answer so it can
+  skip its own `find_stream_info` — was implemented, caught by a new test, and
+  reverted. That call is also what fills fields the *muxer* needs (an EAC3
+  track's frame size), and a context that never ran it produces a correct-
+  looking manifest with a failing `av_interleaved_write_frame`. Making the
+  second open cheap has to mean sharing the first one's **context**, not
+  trusting its conclusions; that is a 1.2 change, not a patch.
+- `StartupCostBenchmark` (opt-in via `PRISMCORE_BENCH`, a path or an http URL)
+  measures the phases end to end, so the next change to this area starts from
+  numbers rather than intuition.
+
 ## [1.1.1] — 2026-08-08
 
 ### Fixed
@@ -255,6 +283,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.1.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.2
 [1.1.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.1
 [1.1.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.0
 [1.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.0.0

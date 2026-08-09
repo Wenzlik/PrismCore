@@ -535,15 +535,11 @@ public enum SourceProbe {
 
         // Same open pattern as HLSRemuxer: the caller's headers (Plex token,
         // WebDAV authorization) travel on the probe connection too, otherwise
-        // a server source would 401 here and get mis-routed as unplayable.
-        var openOptions: OpaquePointer?
+        // a server source would 401 here and get mis-routed as unplayable —
+        // and the same read caps, because over a network this open IS the
+        // wait the user sees (see `SourceOpenTuning`).
+        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
         defer { av_dict_free(&openOptions) }
-        if !httpHeaders.isEmpty {
-            let headerBlob = httpHeaders.map { "\($0.key): \($0.value)\r\n" }.joined()
-            av_dict_set(&openOptions, "headers", headerBlob, 0)
-        }
-        av_dict_set(&openOptions, "reconnect", "1", 0)
-        av_dict_set(&openOptions, "reconnect_streamed", "1", 0)
 
         let sourceSpec = url.isFileURL ? url.path : url.absoluteString
         do {
@@ -957,7 +953,9 @@ public enum SourceProbe {
 
     // MARK: - Small C bridges
 
-    private static func codecName(_ id: AVCodecID) -> String {
+    /// The demuxer's own name for a codec. Internal so the remuxer can check
+    /// a stream's identity against a probe result without re-describing it.
+    static func codecName(_ id: AVCodecID) -> String {
         cString(avcodec_get_name(id)) ?? "unknown"
     }
 

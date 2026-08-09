@@ -221,16 +221,10 @@ final class HLSRemuxer: @unchecked Sendable {
         var input: UnsafeMutablePointer<AVFormatContext>?
 
         // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
-        // authorization) on the demux connection itself.
-        var openOptions: OpaquePointer?
+        // authorization) on the demux connection itself, under the shared
+        // read caps (see `SourceOpenTuning`).
+        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
         defer { av_dict_free(&openOptions) }
-        if !httpHeaders.isEmpty {
-            let headerBlob = httpHeaders.map { "\($0.key): \($0.value)\r\n" }.joined()
-            av_dict_set(&openOptions, "headers", headerBlob, 0)
-        }
-        // Reconnect on dropped HTTP connections — the demuxer read side.
-        av_dict_set(&openOptions, "reconnect", "1", 0)
-        av_dict_set(&openOptions, "reconnect_streamed", "1", 0)
 
         let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
         try FFmpegError.check(
@@ -240,6 +234,15 @@ final class HLSRemuxer: @unchecked Sendable {
         defer { avformat_close_input(&input) }
         guard let input else { throw Failure.noVideoStream }
 
+        // Not skippable, however much the host already knows about this
+        // source. The obvious saving — the routing probe just analysed the
+        // same file, so reuse its answer and skip this second analysis — was
+        // tried and reverted: `find_stream_info` is also what fills the fields
+        // the MUXER needs (an EAC3 track's frame size, most sharply), and a
+        // context that never ran it mixes a manifest that looks right with an
+        // `av_interleaved_write_frame` failure. Making the second open cheap
+        // has to mean sharing the FIRST one's context, not trusting its
+        // conclusions.
         try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
 
         // The probe already reads everything both decisions below need — which
