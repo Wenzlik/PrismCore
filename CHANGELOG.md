@@ -79,6 +79,15 @@ source-compatible.)
   the same path an untrusted index already took — and the session starts.
   Sources with an index load it in a fraction of a second and are unaffected.
 
+  > **Correction (2026-08-09): this fix does not work.** Re-measured against
+  > the same file, the session still times out at 20 s. The guard is installed
+  > on the `AVFormatContext` *after* `avformat_open_input`, but the read path
+  > checks `URLContext.interrupt_callback` (`libavformat/avio.c:515`), which is
+  > populated when the context is created (`avio.c:189`) — so it never reaches
+  > the blocking reads. The callback has to be set before the open. Tracked as
+  > an open issue; the capping in 1.1.2 and the single open in 1.2.0 are
+  > unaffected.
+
 ## [1.1.0] — 2026-08-08
 
 ### Changed
