@@ -86,6 +86,28 @@ API surface.
 - **`av_seek_frame` trips assertions in `matroskadec.c`** with nested elements;
   prefer `avformat_seek_file`, and flush after seeking.
 
+### Building the FFmpeg xcframeworks
+
+- **A build can succeed and silently ship without the feature you built it
+  for.** FFmpeg's configure does not fail on an unmet filter dependency — it
+  logs `WARNING: Disabled <x> because not all dependencies are satisfied: …`
+  and carries on. Check `config_components.h` for the `CONFIG_*` define (filter
+  and codec defines live there, not in `config.h`) **before** publishing
+  anything. Two full builds were published-ready and useless before this rule
+  existed.
+- **The Metal toolchain is registered to one Xcode.** `yadif_videotoolbox`
+  needs Metal, which in Xcode 26 is a separate download
+  (`xcodebuild -downloadComponent MetalToolchain`) installed as a *cryptex
+  mount* tied to a single Xcode installation. Point `DEVELOPER_DIR` at a
+  different one and `xcrun metal` fails — which is easy to do, because
+  `DEVELOPER_DIR` also has to be set for an unrelated reason (below). Check
+  with `xcrun -sdk macosx metal --version` **under the same `DEVELOPER_DIR` the
+  build will use**.
+- **MPVKit's build scripts sanitize their subprocess environment**, dropping
+  `DEVELOPER_DIR` — so every `xcrun --sdk …` resolves against `xcode-select`,
+  which on a machine with Command Line Tools installed means no tvOS/xrOS SDK
+  and a build that dies partway through. Patch `Utility.launch` to propagate it.
+
 ### Muxing to fMP4 (`FMP4SegmentWriter`, `HLSRemuxer`)
 
 - **movenc defaults HEVC to `hev1`, not `hvc1`.** Apple's HLS rules want
