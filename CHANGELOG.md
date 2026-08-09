@@ -6,6 +6,39 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.3.0] — 2026-08-09
+
+### Changed
+
+- **Deinterlacing no longer costs the hardware decode.** `bwdif` reads planar
+  YUV, so asking for it forced the whole decode onto the CPU — on an Apple TV,
+  for interlaced broadcast content, the worst combination available. When the
+  FFmpeg build carries `yadif_videotoolbox`, the filter now runs on the
+  VideoToolbox frames the decoder already produced and the zero-copy route
+  survives deinterlacing.
+
+  The choice is made per frame, from what the frame *is*: a hardware frame
+  carries a `hw_frames_ctx` and gets the GPU filter (handed to the graph via
+  `av_buffersrc_parameters_set`, without which configuration fails with "No
+  hardware frames context provided"); a planar frame gets `bwdif` exactly as
+  before.
+
+### Added
+
+- `SoftwareVideoDecoder.gpuDeinterlaceName` — the GPU deinterlacer this build
+  carries, or `nil`. Resolved at runtime because it is a property of the
+  **build**, not the code: the filter needs Metal, which is a separate Xcode
+  component, and a host on an FFmpeg without it still deinterlaces correctly on
+  the CPU route. `routeDescription` names whichever one is in use.
+
+### Notes
+
+- The GPU path needs an FFmpeg built with `--enable-filter=yadif_videotoolbox`
+  — [aether-ffmpeg `n8.0.1-eac3-vt.1`](https://github.com/Wenzlik/aether-ffmpeg/releases/tag/n8.0.1-eac3-vt.1)
+  or later. PrismCore's own dependency is upstream MPVKit, which does not carry
+  it, so this repository's tests exercise the fallback branch; the GPU graph is
+  verified by a host on that build, or on a device.
+
 ## [1.2.0] — 2026-08-09
 
 ### Added
@@ -322,6 +355,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.3.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.0
 [1.2.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.2.0
 [1.1.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.2
 [1.1.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.1

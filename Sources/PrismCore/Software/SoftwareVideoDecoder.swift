@@ -108,12 +108,25 @@ final class SoftwareVideoDecoder {
     private var transfer: PixelBufferTransfer?
     private var formatDescription: CMVideoFormatDescription?
 
-    /// Whether decoded frames pass through a `bwdif` deinterlacer before they
-    /// become sample buffers. Forces the CPU decode route: the filter reads
-    /// planar YUV, and a VideoToolbox frame would first have to be downloaded
-    /// — the GPU variant (`yadif_videotoolbox`) is a build away, not a code
-    /// path away (this FFmpeg build doesn't compile it).
+    /// Whether decoded frames pass through a deinterlacer before they become
+    /// sample buffers — and, when they do, which one (see `gpuDeinterlaceName`).
     private let wantsDeinterlace: Bool
+
+    /// The VideoToolbox deinterlacer, when this FFmpeg build carries it.
+    ///
+    /// It changes what deinterlacing *costs*. `bwdif` reads planar YUV, so
+    /// asking for it means abandoning hardware decode entirely and paying a
+    /// CPU decode plus a CPU filter — on an Apple TV, for interlaced broadcast
+    /// content, that is the worst combination available. `yadif_videotoolbox`
+    /// filters the VideoToolbox frames the decoder already produced, so the
+    /// zero-copy route survives deinterlacing.
+    ///
+    /// Resolved once, at runtime, because it is a property of the *build*: a
+    /// host on an FFmpeg without it (the filter needs Metal, which is a
+    /// separate Xcode component and easy to build without) still gets working
+    /// deinterlacing, just on the CPU route as before.
+    static let gpuDeinterlaceName: String? =
+        avfilter_get_by_name("yadif_videotoolbox") != nil ? "yadif_videotoolbox" : nil
     /// Built lazily from the first decoded frame — the graph needs the real
     /// pixel format, dimensions and SAR, which only a frame knows.
     private var filterGraph: UnsafeMutablePointer<AVFilterGraph>?
@@ -132,9 +145,14 @@ final class SoftwareVideoDecoder {
 
     /// Human-readable route, e.g. `"vp9 → videotoolbox (zero-copy)"`.
     var routeDescription: String {
+        let deinterlacer = wantsDeinterlace
+            ? " + \(Self.gpuDeinterlaceName ?? "bwdif")"
+            : ""
         switch route {
-        case .videoToolboxZeroCopy: return "\(codecName) → videotoolbox (zero-copy)"
-        case .softwareCopy: return "\(codecName) → libavcodec (CPU, one conversion copy per frame)"
+        case .videoToolboxZeroCopy:
+            return "\(codecName) → videotoolbox (zero-copy)\(deinterlacer)"
+        case .softwareCopy:
+            return "\(codecName) → libavcodec (CPU, one conversion copy per frame)\(deinterlacer)"
         }
     }
 
@@ -164,7 +182,10 @@ final class SoftwareVideoDecoder {
         self.codecName = avcodec_get_name(codecID).map { String(cString: $0) } ?? "unknown"
         self.timeBase = timeBase
         self.wantsDeinterlace = deinterlace
-        self.allowHardware = allowHardware && !deinterlace
+        // Deinterlacing only forfeits hardware decode when the deinterlacer
+        // itself is CPU-only. With the VideoToolbox filter available there is
+        // nothing to give up.
+        self.allowHardware = allowHardware && (!deinterlace || Self.gpuDeinterlaceName != nil)
         if averageFrameRate.num > 0, averageFrameRate.den > 0 {
             self.nominalFrameDuration = CMTime(
                 value: CMTimeValue(averageFrameRate.den),
@@ -392,9 +413,16 @@ final class SoftwareVideoDecoder {
         }
     }
 
-    /// buffer → bwdif → buffersink, dimensioned from a real decoded frame —
-    /// the graph needs the true pixel format and SAR, which only a frame
-    /// knows (the stream's `codecpar` can lag behind a mid-stream change).
+    /// buffer → deinterlacer → buffersink, dimensioned from a real decoded
+    /// frame — the graph needs the true pixel format and SAR, which only a
+    /// frame knows (the stream's `codecpar` can lag behind a mid-stream
+    /// change).
+    ///
+    /// Which deinterlacer depends on what the frame *is*. A VideoToolbox frame
+    /// carries a `hw_frames_ctx` and gets `yadif_videotoolbox`, which keeps the
+    /// pixels on the GPU; a planar frame gets `bwdif`. Both run field-rate with
+    /// `deint=interlaced`, so mixed content's progressive stretches pass
+    /// through untouched either way.
     private func buildFilterGraph(for decoded: UnsafeMutablePointer<AVFrame>) throws {
         guard let graph = avfilter_graph_alloc() else {
             throw Failure.allocationFailed("filter graph")
@@ -427,16 +455,48 @@ final class SoftwareVideoDecoder {
         // frames — motion as broadcast), parity from the frames themselves, and
         // `deint=interlaced` so progressive stretches of mixed content pass
         // through untouched.
+        // A hardware frame's format alone doesn't describe it: the filter has
+        // to be handed the frame pool it came from, or graph configuration
+        // fails with "No hardware frames context provided".
+        let isHardwareFrame = decoded.pointee.hw_frames_ctx != nil
+        if isHardwareFrame {
+            guard let params = av_buffersrc_parameters_alloc() else {
+                throw Failure.allocationFailed("buffersrc parameters")
+            }
+            defer {
+                var freeable: UnsafeMutableRawPointer? = UnsafeMutableRawPointer(params)
+                av_freep(&freeable)
+            }
+            params.pointee.format = decoded.pointee.format
+            params.pointee.width = decoded.pointee.width
+            params.pointee.height = decoded.pointee.height
+            params.pointee.time_base = timeBase
+            params.pointee.sample_aspect_ratio = sar
+            // Borrowed, not owned: `av_buffersrc_parameters_set` refs it.
+            params.pointee.hw_frames_ctx = decoded.pointee.hw_frames_ctx
+            try FFmpegError.check(
+                av_buffersrc_parameters_set(source, params),
+                "av_buffersrc_parameters_set"
+            )
+        }
+
+        let deinterlacerName = isHardwareFrame
+            ? (Self.gpuDeinterlaceName ?? "bwdif")
+            : "bwdif"
         var deint: UnsafeMutablePointer<AVFilterContext>?
         try FFmpegError.check(
             avfilter_graph_create_filter(
-                &deint, avfilter_get_by_name("bwdif"), "deint",
+                &deint, avfilter_get_by_name(deinterlacerName), "deint",
                 "mode=send_field:parity=auto:deint=interlaced", nil, graph
             ),
-            "avfilter_graph_create_filter(bwdif)"
+            "avfilter_graph_create_filter(\(deinterlacerName))"
         )
-        try FFmpegError.check(avfilter_link(source, 0, deint, 0), "avfilter_link(in→bwdif)")
-        try FFmpegError.check(avfilter_link(deint, 0, sink, 0), "avfilter_link(bwdif→out)")
+        try FFmpegError.check(
+            avfilter_link(source, 0, deint, 0), "avfilter_link(in→\(deinterlacerName))"
+        )
+        try FFmpegError.check(
+            avfilter_link(deint, 0, sink, 0), "avfilter_link(\(deinterlacerName)→out)"
+        )
         try FFmpegError.check(avfilter_graph_config(graph, nil), "avfilter_graph_config")
 
         guard let filtered = av_frame_alloc() else {
