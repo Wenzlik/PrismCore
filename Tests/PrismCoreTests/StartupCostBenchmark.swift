@@ -99,10 +99,17 @@ struct StartupCostBenchmark {
         let cappedMs = openCost(probesize: 2 << 20, analyzeDurationMicroseconds: 1_000_000)
         lines.append("open with probesize=2MB analyzeduration=1s: \(cappedMs) ms")
 
-        // 4. Session startup end to end, and the shape it produced.
+        // 4. Session startup end to end, and the shape it produced. Probed
+        // first and handed over, which is the routing shape a host uses: the
+        // number below is therefore "probe + start", one open in total.
+        var probeAndAdoptMs = 0
+        var probedSource: ProbedSource?
+        probeAndAdoptMs = try ms { probedSource = try SourceProbe.open(url: mediaURL) }
+        lines.append("probe keeping the context (SourceProbe.open): \(probeAndAdoptMs) ms")
         let session = try PrismCoreSession(
             url: mediaURL,
-            display: DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true)
+            display: DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
+            probed: probedSource
         )
         var playlist: URL?
         var startFailure: String?

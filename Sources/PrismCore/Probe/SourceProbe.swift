@@ -531,6 +531,21 @@ public enum SourceProbe {
     }
 
     public static func probe(url: URL, httpHeaders: [String: String] = [:]) throws -> SourceInfo {
+        // The context is closed when the returned `ProbedSource` goes out of
+        // scope here — this overload is for callers that only want the answer.
+        try open(url: url, httpHeaders: httpHeaders).info
+    }
+
+    /// Probe a source and **keep the open context**, so a session over the same
+    /// source can produce from it instead of opening again.
+    ///
+    /// This is the routing entry point worth using: `PrismCoreEngine.decide`
+    /// takes the `info`, and a source that routes to the remux path can be
+    /// handed straight to `PrismCoreSession(probed:display:)`, which adopts the
+    /// context. A source that routes elsewhere simply releases it — see
+    /// `ProbedSource` for why the context, and not merely its conclusions, is
+    /// what has to travel.
+    public static func open(url: URL, httpHeaders: [String: String] = [:]) throws -> ProbedSource {
         var input: UnsafeMutablePointer<AVFormatContext>?
 
         // Same open pattern as HLSRemuxer: the caller's headers (Plex token,
@@ -550,17 +565,34 @@ public enum SourceProbe {
         } catch {
             throw Failure.openFailed(error)
         }
-        defer { avformat_close_input(&input) }
         guard let input else { throw Failure.noStreams }
+        // From here the context is owned by the `ProbedSource` we return; on
+        // the throwing paths below it has no owner yet, so close it by hand.
+        func closeAndThrow(_ failure: any Error) -> any Error {
+            var closing: UnsafeMutablePointer<AVFormatContext>? = input
+            avformat_close_input(&closing)
+            return failure
+        }
 
         // Needed for pixel format, color properties and the DV side data —
         // several of them are only filled in after the codec parser has seen
-        // real packets.
-        try FFmpegError.check(avformat_find_stream_info(input, nil), "avformat_find_stream_info")
+        // real packets. It is also what fills the fields the MUXER later needs,
+        // which is why a context that skipped it cannot be produced from.
+        do {
+            try FFmpegError.check(
+                avformat_find_stream_info(input, nil), "avformat_find_stream_info"
+            )
+        } catch {
+            throw closeAndThrow(error)
+        }
 
-        // The probe context is one-shot (closed on return), so it is the one
-        // place the interlace verification may consume packets.
-        return describe(input: input, verifyingInterlace: true)
+        // The interlace verification consumes packets, which is why it was
+        // only ever safe on a one-shot context. It still is: the read position
+        // it leaves behind is the adopting producer's to fix (it seeks to its
+        // own start anyway), and the verdict is worth far more than the rewind
+        // costs.
+        let info = describe(input: input, verifyingInterlace: true)
+        return ProbedSource(info: info, url: url, httpHeaders: httpHeaders, context: input)
     }
 
     /// Describe an input that is **already open** (and already through
