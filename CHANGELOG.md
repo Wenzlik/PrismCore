@@ -6,6 +6,46 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.3.1] — 2026-08-10
+
+### Changed
+
+- **The polling cadences stopped being the latency.** Three waits in the
+  session's hot paths polled at 100 ms (readiness gate, the provider's
+  wait-for-file) and 50 ms (the parked producer's wake), and on a warm source
+  the polls cost more than the work they were waiting for. All three now run
+  at 10 ms. Measured over local HTTP (3 min H.264/AC3 MKV, planned mode,
+  three runs): `session.start()` 103–109 ms → **13–25 ms**; a parked cold
+  seek of an evicted segment (re-anchor → produce → serve) 114 ms →
+  **19–34 ms**. The checks are a couple of small file reads each — at 10 ms
+  they are still noise.
+
+### Fixed
+
+- **The bounded index-load seek works now.** 1.1.1 shipped it and its own
+  correction: the wall-clock guard was installed on the `AVFormatContext`
+  *after* `avformat_open_input`, but the blocking reads check the
+  `URLContext`'s copy of the callback, taken when that context is created
+  during the open — so the guard never reached the reads and a cue-less
+  source still stalled the whole startup (#39).
+
+  The guard (`ReadInterruptGuard`) now exists **before** the open, on every
+  open site — `SourceProbe.open`, the remuxer's fallback open, and the plan
+  probe — permanently installed and disarmed, armed only around the
+  index-load seek. Both sites matter: since 1.2.0 the remuxer usually adopts
+  the probe's context, so the probe's open is the one that decides whether a
+  bound is possible at all, and the guard travels with the context inside
+  `ProbedSource`. An aborted read latches `AVERROR_EXIT` in the
+  `AVIOContext`; the planner clears it after disarming, so the session
+  carries on with the uniform plan instead of dying on its first real read.
+
+  Verified the way the correction asked: against a transport that actually
+  blocks. The test serves a fixture's head over local HTTP and then holds
+  every read open forever — with a 0.5 s budget the plan comes back in
+  ~0.5 s on the uniform basis, covering the full source from the head.
+  Before the fix that test hangs, which is precisely what the field case
+  (5.4 GB cue-less MKV, 20 s session timeout) looked like.
+
 ## [1.3.0] — 2026-08-09
 
 ### Changed
@@ -117,8 +157,8 @@ source-compatible.)
   > on the `AVFormatContext` *after* `avformat_open_input`, but the read path
   > checks `URLContext.interrupt_callback` (`libavformat/avio.c:515`), which is
   > populated when the context is created (`avio.c:189`) — so it never reaches
-  > the blocking reads. The callback has to be set before the open. Tracked as
-  > an open issue; the capping in 1.1.2 and the single open in 1.2.0 are
+  > the blocking reads. The callback has to be set before the open — which is
+  > what [1.3.1] does; the capping in 1.1.2 and the single open in 1.2.0 are
   > unaffected.
 
 ## [1.1.0] — 2026-08-08
@@ -355,6 +395,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.3.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.1
 [1.3.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.0
 [1.2.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.2.0
 [1.1.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.1.2

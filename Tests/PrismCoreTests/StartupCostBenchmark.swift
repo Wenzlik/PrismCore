@@ -141,6 +141,63 @@ struct StartupCostBenchmark {
                 _ = try await URLSession.shared.data(from: base.appendingPathComponent("seg00000.m4s"))
             }
             lines.append("fetch seg00000.m4s: \(segMs) ms")
+
+            // 6. A cold SEEK: fetch a segment far past the produced window,
+            // which walks the whole demand path — the parked producer notices
+            // the anchor, re-anchors, produces, and the provider notices the
+            // file. Every hop of that chain is a poll; this is their sum.
+            if let variant = try? String(
+                contentsOf: base.appendingPathComponent("index.m3u8")
+            ) {
+                let segments = variant.split(separator: "\n")
+                    .filter { $0.hasSuffix(".m4s") && $0.hasPrefix("seg") }
+                if segments.count > 4 {
+                    let target = String(segments[(segments.count * 2) / 3])
+                    let seekMs = try await ms {
+                        _ = try await URLSession.shared.data(from: base.appendingPathComponent(target))
+                    }
+                    lines.append("cold seek (\(target), demand path): \(seekMs) ms")
+                }
+            }
+        }
+
+        // 7. A PARKED cold seek — the shape a user's seek actually has ten
+        // minutes into playback: the producer sits in its park loop, the
+        // target segment was evicted, and the fetch has to cross every poll
+        // in the chain (park wake → re-anchor → produce → provider notices
+        // the file). A tight cache budget forces the eviction; the wait
+        // before the fetch lets production finish and the producer park.
+        do {
+            let parked = try PrismCoreSession(
+                url: mediaURL,
+                display: DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
+                segmentCacheBytes: 8 << 20
+            )
+            let playlist2 = try await parked.start()
+            defer { Task { await parked.stop() } }
+            let work = await parked.workDirectory
+            // Wait for EOF + park: production stops growing the directory.
+            var lastCount = -1
+            for _ in 0..<100 {
+                let count = (try? FileManager.default.contentsOfDirectory(atPath: work.path).count) ?? 0
+                if count == lastCount { break }
+                lastCount = count
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            let base2 = playlist2.deletingLastPathComponent()
+            if let victim = (0..<25).first(where: { index in
+                !FileManager.default.fileExists(
+                    atPath: work.appendingPathComponent(String(format: "seg%05d.m4s", index)).path
+                )
+            }) {
+                let name = String(format: "seg%05d.m4s", victim)
+                let parkedSeekMs = try await ms {
+                    _ = try await URLSession.shared.data(from: base2.appendingPathComponent(name))
+                }
+                lines.append("parked cold seek (\(name), evicted → re-anchor): \(parkedSeekMs) ms")
+            } else {
+                lines.append("parked cold seek: nothing evicted, skipped")
+            }
         }
 
         lines.append("--- totals ---")

@@ -37,6 +37,14 @@ public final class ProbedSource: @unchecked Sendable {
     public let url: URL
     let httpHeaders: [String: String]
 
+    /// The interrupt guard the context was OPENED with — the callback is
+    /// baked into the URLContext at creation and cannot be added later (issue
+    /// #39), so it travels with the context. Whoever adopts the context arms
+    /// this to bound a read; the guard object must stay alive until the
+    /// context is closed, which holding it here (and the remuxer holding the
+    /// whole `ProbedSource`) guarantees.
+    let interruptGuard: ReadInterruptGuard
+
     private let lock = NSLock()
     private var context: UnsafeMutablePointer<AVFormatContext>?
 
@@ -44,12 +52,14 @@ public final class ProbedSource: @unchecked Sendable {
         info: SourceInfo,
         url: URL,
         httpHeaders: [String: String],
-        context: UnsafeMutablePointer<AVFormatContext>
+        context: UnsafeMutablePointer<AVFormatContext>,
+        interruptGuard: ReadInterruptGuard
     ) {
         self.info = info
         self.url = url
         self.httpHeaders = httpHeaders
         self.context = context
+        self.interruptGuard = interruptGuard
     }
 
     /// Take the open context, transferring ownership. Returns `nil` on every

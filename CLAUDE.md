@@ -12,8 +12,8 @@ Then, as needed: [`README.md`](README.md) → [`CHANGELOG.md`](CHANGELOG.md).
    probe's answer — it also fills fields the *muxer* needs. Hand over the
    **context** (`ProbedSource`), never the conclusions.
 2. **`interrupt_callback` must be set before `avformat_open_input`**, or it
-   never reaches the blocking reads. (1.1.1's bounded seek gets this wrong and
-   is still broken — see AGENTS.md.)
+   never reaches the blocking reads. (1.1.1 got this wrong; since 1.3.1 every
+   open installs a disarmed `ReadInterruptGuard` — see AGENTS.md.)
 3. **Benchmark over HTTP, not a mounted share.** A local mount hides the exact
    cost hosts pay, and has already produced a confidently wrong conclusion.
 4. **`swift test --filter` matches function names**, not `@Test("…")` titles —

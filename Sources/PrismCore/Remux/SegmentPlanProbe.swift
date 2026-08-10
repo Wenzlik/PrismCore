@@ -13,7 +13,10 @@ enum SegmentPlanProbe {
         targetSeconds: Int,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
     ) -> SegmentPlan? {
-        var input: UnsafeMutablePointer<AVFormatContext>?
+        // Installed before the open or it bounds nothing — the blocking reads
+        // check the URLContext's copy of the callback (issue #39).
+        let interruptGuard = ReadInterruptGuard()
+        var input: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
 
         var options: OpaquePointer?
         defer { av_dict_free(&options) }
@@ -25,8 +28,10 @@ enum SegmentPlanProbe {
         let spec = url.isFileURL ? url.path : url.absoluteString
         guard avformat_open_input(&input, spec, nil, &options) >= 0, let input else { return nil }
         defer {
-            var closing: UnsafeMutablePointer<AVFormatContext>? = input
-            avformat_close_input(&closing)
+            withExtendedLifetime(interruptGuard) {
+                var closing: UnsafeMutablePointer<AVFormatContext>? = input
+                avformat_close_input(&closing)
+            }
         }
         guard avformat_find_stream_info(input, nil) >= 0 else { return nil }
 
@@ -37,7 +42,8 @@ enum SegmentPlanProbe {
             input: input,
             videoStreamIndex: videoIndex,
             targetSeconds: targetSeconds,
-            indexLoadBudget: indexLoadBudget
+            indexLoadBudget: indexLoadBudget,
+            interruptGuard: interruptGuard
         )
     }
 }

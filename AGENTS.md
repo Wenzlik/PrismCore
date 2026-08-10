@@ -66,9 +66,14 @@ API surface.
   path checks `URLContext.interrupt_callback` (`libavformat/avio.c:515`), which
   is populated when the context is created (`avio.c:189`). Setting it on the
   `AVFormatContext` afterwards reaches only the few places that read
-  `s->interrupt_callback` directly — *not* the blocking reads. **Known bug:**
-  1.1.1's bounded index-load seek does exactly this and therefore does not
-  work; see the CHANGELOG note and the open issue.
+  `s->interrupt_callback` directly — *not* the blocking reads. 1.1.1's bounded
+  index-load seek made exactly this mistake and bounded nothing; since 1.3.1
+  every open site installs a permanent, disarmed `ReadInterruptGuard` at
+  `avformat_alloc_context` time and arms it only around the seek. Two
+  corollaries: the guard must travel with an adopted context (`ProbedSource`
+  carries it), and an aborted read latches `AVERROR_EXIT` in
+  `AVIOContext.error`, which has to be cleared before the context can read
+  again.
 - **Container-level aspect ratio lives on `AVStream.sample_aspect_ratio`**, not
   in codecpar. An MKV's `DisplayWidth`/`Height` — how anamorphic DVD rips are
   tagged — is dropped by a codecpar-only copy. FFmpeg's *own* hls demuxer has
@@ -155,6 +160,14 @@ Byte-counting through a toy HTTP server is unreliable for the same class of
 reason: an open-ended range means the server keeps writing until the client
 hangs up, so "bytes served" includes socket slack and varies run to run. Prefer
 repeated timings with a warm cache, and report the spread, not one number.
+
+**The benchmark server must support Range requests.** `python3 -m http.server`
+does not — it answers every Range with a 200 and the whole file, libavformat
+concludes the stream cannot seek, the Matroska Cues at the tail never load, and
+every plan silently degrades to the uniform basis (no demand mode at all). The
+same file over a Range-capable server plans on the keyframe index. If a
+benchmark shows `basis=uniform` on a file that has Cues, suspect the server
+before the planner.
 
 ---
 

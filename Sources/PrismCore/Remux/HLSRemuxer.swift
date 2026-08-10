@@ -236,14 +236,21 @@ final class HLSRemuxer: @unchecked Sendable {
         // `av_interleaved_write_frame`. That is the whole reason this is a
         // handover and not a cache.
         let adoptedInfo: SourceInfo?
-        if let adopted = probed?.consumeContext() {
+        // Whichever branch opens (or adopts) the context, the guard is the one
+        // its blocking reads were CREATED with — a callback cannot be added to
+        // a context after `avformat_open_input` (issue #39), so an adopted
+        // context brings the probe's guard along and a self-opened one gets
+        // its own before the open.
+        let interruptGuard: ReadInterruptGuard
+        if let adopted = probed?.consumeContext(), let probed {
             input = adopted
+            interruptGuard = probed.interruptGuard
             // The probe left the position wherever its reads ended — the
             // interlace verification decodes a dozen frames. Production starts
             // at the head, and the demand-driven planner seeks from there.
             _ = av_seek_frame(adopted, -1, 0, AVSEEK_FLAG_BACKWARD)
             avformat_flush(adopted)
-            adoptedInfo = probed?.info
+            adoptedInfo = probed.info
         } else {
             // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
             // authorization) on the demux connection itself, under the shared
@@ -251,6 +258,8 @@ final class HLSRemuxer: @unchecked Sendable {
             var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
             defer { av_dict_free(&openOptions) }
 
+            interruptGuard = ReadInterruptGuard()
+            input = interruptGuard.makeContext()
             let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
             try FFmpegError.check(
                 avformat_open_input(&input, sourceSpec, nil, &openOptions),
@@ -263,8 +272,12 @@ final class HLSRemuxer: @unchecked Sendable {
             adoptedInfo = nil
         }
         // Ours to close either way now: a consumed `ProbedSource` has given up
-        // ownership, and an unconsumed one never had this context.
-        defer { avformat_close_input(&input) }
+        // ownership, and an unconsumed one never had this context. The guard
+        // outlives the close — its callback runs on the teardown reads too.
+        defer {
+            avformat_close_input(&input)
+            withExtendedLifetime(interruptGuard) {}
+        }
         guard let input else { throw Failure.noVideoStream }
 
         // The probe already reads everything both decisions below need — which
@@ -345,7 +358,8 @@ final class HLSRemuxer: @unchecked Sendable {
             guard demand != nil else { return nil }
             if case .muxed(let audio) = shape, audio?.mode == .bridge { return nil }
             guard let built = SegmentPlan.build(
-                input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds
+                input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds,
+                interruptGuard: interruptGuard
             ), built.basis == .keyframeIndex else { return nil }
             return built
         }()
@@ -874,10 +888,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     idleAnchor = anchor
                     break
                 }
-                // The provider's pending serves poll every 100 ms with a 15 s
-                // budget; waking at half their cadence keeps the worst case
-                // one poll late.
-                Thread.sleep(forTimeInterval: 0.05)
+                // Parked is where a SEEK finds the producer, so this wake
+                // interval is the first hop of seek latency (then production,
+                // then the provider's own poll notices the file). Matched to
+                // the provider's 10 ms cadence.
+                Thread.sleep(forTimeInterval: 0.01)
             }
             guard let anchor = idleAnchor else { break produce }
             try reanchor(to: anchor)
