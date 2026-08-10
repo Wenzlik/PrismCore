@@ -69,6 +69,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 | Subtitles (bitmap) | PGS / DVB / DVD read by on-device Vision OCR into the same rendition machinery. Lossy by design — typography dies, text survives — and the raw tracks stay surfaced for a host that wants to draw them pixel-accurately |
 | Seek & cache | Keyframe-aligned segment plan published upfront, demand-driven production with re-anchoring, absolute-`tfdt` continuity across restarts, byte-budgeted retention (1 GiB default; an evicted segment is reproduced on demand, so the budget bounds disk, not seekability) |
 | Display | tvOS HDMI handshake driven by the engine: `preferredDisplayCriteria` programmed and settled **before** the item is loaded, which is the only ordering tvOS accepts for HDR HLS |
+| Scrub previews | `SeekPreviewService` decodes the keyframe covering any position into a `CGImage` for a custom player HUD — its own context, CPU-only, cached per keyframe, and independent of which engine is playing. The trick-play answer for sources with no server-generated previews |
 | Streaming | HTTP headers ride the demux connection (a Plex token, a WebDAV authorization), reconnect on dropped connections |
 
 ## Quick start

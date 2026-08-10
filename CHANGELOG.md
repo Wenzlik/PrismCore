@@ -6,6 +6,39 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.5.0] — 2026-08-10
+
+### Added
+
+- **`SeekPreviewService` — scrub-bar thumbnails for anything libavformat can
+  open.** `thumbnail(at:)` returns a `CGImage` of the keyframe covering the
+  position: the floating frame a player HUD shows while the user drags the
+  seek bar, for the sources that have no server-generated trick-play (SMB,
+  WebDAV, local files, servers that never built previews). Deliberately its
+  own small pipeline, independent of which engine is playing the title — it
+  opens its own context (a thumbnail must never stall playback), decodes on
+  the CPU only (one keyframe at ~300 px doesn't earn a VideoToolbox
+  session), and `sws_scale` does the decode-to-delivery in one step.
+
+  Containers land differently after a timestamp seek, and the service knows:
+  an indexed seek (Matroska Cues, MP4) puts the first packet on the covering
+  keyframe — one decode answers; MPEG-TS's binary search lands *past* it (the
+  search runs on DTS, a keyframe's DTS trails its PTS), so the landing is
+  re-seeked a second early and walked forward, scaling only the candidates.
+  Results are cached by the keyframe they show (LRU, 32 entries), with a
+  learned-coverage map — a request at T that decoded keyframe P proves no
+  keyframe exists in (P, T], so everything in [P, T] hits the cache; forward
+  of proven ground the next keyframe may lurk anywhere, and guessing would
+  pin a wrong picture. A harvested keyframe map (1.4.0's sidecar, same
+  `keyframeIndexCacheDirectory`) resolves positions exactly and makes
+  GOP-wide hits immediate. Thumbnail seeks run under a 3 s interrupt bound —
+  a cue-less Matroska over a slow transport turns them into linear scans
+  (the 1.1.1 shape), and a missing floating frame beats a frozen scrub bar.
+
+  Known v1 caveats: HDR (PQ/HLG) converts by matrix, not tone-map — previews
+  look flatter than the picture; Dolby Vision Profile 5 (IPT-PQc2) has no
+  honest RGB conversion here, hosts should not offer engine previews for P5.
+
 ## [1.4.0] — 2026-08-10
 
 ### Added
@@ -443,6 +476,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.5.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.5.0
 [1.4.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.4.0
 [1.3.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.1
 [1.3.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.0
