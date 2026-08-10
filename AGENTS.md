@@ -66,9 +66,14 @@ API surface.
   path checks `URLContext.interrupt_callback` (`libavformat/avio.c:515`), which
   is populated when the context is created (`avio.c:189`). Setting it on the
   `AVFormatContext` afterwards reaches only the few places that read
-  `s->interrupt_callback` directly — *not* the blocking reads. **Known bug:**
-  1.1.1's bounded index-load seek does exactly this and therefore does not
-  work; see the CHANGELOG note and the open issue.
+  `s->interrupt_callback` directly — *not* the blocking reads. 1.1.1's bounded
+  index-load seek made exactly this mistake and bounded nothing; since 1.3.1
+  every open site installs a permanent, disarmed `ReadInterruptGuard` at
+  `avformat_alloc_context` time and arms it only around the seek. Two
+  corollaries: the guard must travel with an adopted context (`ProbedSource`
+  carries it), and an aborted read latches `AVERROR_EXIT` in
+  `AVIOContext.error`, which has to be cleared before the context can read
+  again.
 - **Container-level aspect ratio lives on `AVStream.sample_aspect_ratio`**, not
   in codecpar. An MKV's `DisplayWidth`/`Height` — how anamorphic DVD rips are
   tagged — is dropped by a codecpar-only copy. FFmpeg's *own* hls demuxer has

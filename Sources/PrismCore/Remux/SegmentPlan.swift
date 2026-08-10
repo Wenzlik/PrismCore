@@ -68,27 +68,25 @@ struct SegmentPlan: Equatable {
     /// it in a fraction of a second, so a generous cap costs them nothing.
     static let indexLoadBudget: Duration = .seconds(3)
 
-    /// The wall-clock guard the index-load seek runs under, via FFmpeg's
-    /// `interrupt_callback`. A reference type: the C callback reaches it
-    /// through the context's opaque pointer.
-    private final class IndexLoadDeadline {
-        let deadline: ContinuousClock.Instant
-        init(budget: Duration) { deadline = .now + budget }
-    }
-
     /// Build a plan from an OPENED input whose stream info has been read.
     /// `duration` comes from the container; sources that don't know theirs
     /// (live) have no plan — the caller stays on the v0 event path.
     ///
-    /// `indexLoadBudget` bounds the index-load seek by wall clock; on expiry
-    /// the seek aborts, the read position returns to the head, and the plan
-    /// degrades to `.uniform` exactly like an untrusted index — the caller
-    /// then skips demand mode rather than the whole session timing out.
+    /// `indexLoadBudget` bounds the index-load seek by wall clock, **through
+    /// `interruptGuard`** — which must be the guard the context was *opened*
+    /// with. The blocking reads check the URLContext's copy of the callback,
+    /// taken at open; a callback installed here, on the format context, never
+    /// reaches them, which is the 1.1.1 mistake this signature exists to make
+    /// unrepeatable (issue #39). On expiry the seek aborts, the read position
+    /// returns to the head, and the plan degrades to `.uniform` exactly like
+    /// an untrusted index — the caller then skips demand mode rather than the
+    /// whole session timing out. A `nil` guard means an unbounded seek.
     static func build(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
         targetSeconds: Int,
-        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
+        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
+        interruptGuard: ReadInterruptGuard? = nil
     ) -> SegmentPlan? {
         let stream = input.pointee.streams[Int(videoStreamIndex)]!
         let timeBase = stream.pointee.time_base
@@ -104,27 +102,26 @@ struct SegmentPlan: Equatable {
         // bounded seek; MP4 has stss in the moov already) — under a deadline,
         // because "bounded" is a property of the index existing: without one
         // the demuxer scans the file linearly and this call IS the stall.
-        // The callback aborts the underlying reads (AVERROR_EXIT) once the
+        // The armed guard aborts the underlying reads (AVERROR_EXIT) once the
         // budget is gone; a partial scan leaves the demuxer consistent, just
         // positioned mid-file.
-        let guardBox = IndexLoadDeadline(budget: indexLoadBudget)
-        let previousInterrupt = input.pointee.interrupt_callback
-        input.pointee.interrupt_callback = AVIOInterruptCB(
-            callback: { opaque in
-                guard let opaque else { return 0 }
-                let box = Unmanaged<IndexLoadDeadline>.fromOpaque(opaque).takeUnretainedValue()
-                return ContinuousClock.now >= box.deadline ? 1 : 0
-            },
-            opaque: Unmanaged.passUnretained(guardBox).toOpaque()
-        )
+        interruptGuard?.arm(budget: indexLoadBudget)
         _ = av_seek_frame(input, videoStreamIndex, stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / tick), AVSEEK_FLAG_BACKWARD)
         // The guard must not outlive the nudge: the seek back to the head is
         // what restores the position the producer starts from, and aborting
         // THAT would leave the read position wherever the scan died. To
         // timestamp 0 it is cheap regardless of an index — the first
         // cluster's position is known from the header.
-        input.pointee.interrupt_callback = previousInterrupt
-        withExtendedLifetime(guardBox) {}
+        interruptGuard?.disarm()
+        if interruptGuard != nil, let pb = input.pointee.pb, pb.pointee.error < 0 {
+            // An aborted read latches its error (AVERROR_EXIT) in the
+            // AVIOContext, and every later read would return it verbatim —
+            // clearing it is what lets the producer carry on with the uniform
+            // plan instead of dying on its first real read. Only touched when
+            // a guard could have fired: an error on an unguarded context is a
+            // genuine I/O failure and stays.
+            pb.pointee.error = 0
+        }
         _ = av_seek_frame(input, videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD)
 
         var keyframes: [Int64] = []

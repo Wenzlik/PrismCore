@@ -546,7 +546,13 @@ public enum SourceProbe {
     /// `ProbedSource` for why the context, and not merely its conclusions, is
     /// what has to travel.
     public static func open(url: URL, httpHeaders: [String: String] = [:]) throws -> ProbedSource {
-        var input: UnsafeMutablePointer<AVFormatContext>?
+        // The interrupt guard has to exist BEFORE the open — the blocking
+        // reads check the URLContext's copy of the callback, taken at
+        // creation — and this open is the one that decides whether the
+        // adopting producer can ever bound a read: the remuxer usually
+        // inherits this very context (see `ReadInterruptGuard`).
+        let interruptGuard = ReadInterruptGuard()
+        var input: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
 
         // Same open pattern as HLSRemuxer: the caller's headers (Plex token,
         // WebDAV authorization) travel on the probe connection too, otherwise
@@ -569,8 +575,13 @@ public enum SourceProbe {
         // From here the context is owned by the `ProbedSource` we return; on
         // the throwing paths below it has no owner yet, so close it by hand.
         func closeAndThrow(_ failure: any Error) -> any Error {
-            var closing: UnsafeMutablePointer<AVFormatContext>? = input
-            avformat_close_input(&closing)
+            // The close can itself read (a tail request being torn down), and
+            // the callback holds an unretained pointer — keep the guard alive
+            // through it even if the optimizer thinks it is done.
+            withExtendedLifetime(interruptGuard) {
+                var closing: UnsafeMutablePointer<AVFormatContext>? = input
+                avformat_close_input(&closing)
+            }
             return failure
         }
 
@@ -592,7 +603,10 @@ public enum SourceProbe {
         // own start anyway), and the verdict is worth far more than the rewind
         // costs.
         let info = describe(input: input, verifyingInterlace: true)
-        return ProbedSource(info: info, url: url, httpHeaders: httpHeaders, context: input)
+        return ProbedSource(
+            info: info, url: url, httpHeaders: httpHeaders,
+            context: input, interruptGuard: interruptGuard
+        )
     }
 
     /// Describe an input that is **already open** (and already through
