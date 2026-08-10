@@ -161,6 +161,14 @@ reason: an open-ended range means the server keeps writing until the client
 hangs up, so "bytes served" includes socket slack and varies run to run. Prefer
 repeated timings with a warm cache, and report the spread, not one number.
 
+**The benchmark server must support Range requests.** `python3 -m http.server`
+does not — it answers every Range with a 200 and the whole file, libavformat
+concludes the stream cannot seek, the Matroska Cues at the tail never load, and
+every plan silently degrades to the uniform basis (no demand mode at all). The
+same file over a Range-capable server plans on the keyframe index. If a
+benchmark shows `basis=uniform` on a file that has Cues, suspect the server
+before the planner.
+
 ---
 
 ## Testing

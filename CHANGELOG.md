@@ -8,6 +8,18 @@ source-compatible.)
 
 ## [1.3.1] — 2026-08-10
 
+### Changed
+
+- **The polling cadences stopped being the latency.** Three waits in the
+  session's hot paths polled at 100 ms (readiness gate, the provider's
+  wait-for-file) and 50 ms (the parked producer's wake), and on a warm source
+  the polls cost more than the work they were waiting for. All three now run
+  at 10 ms. Measured over local HTTP (3 min H.264/AC3 MKV, planned mode,
+  three runs): `session.start()` 103–109 ms → **13–25 ms**; a parked cold
+  seek of an evicted segment (re-anchor → produce → serve) 114 ms →
+  **19–34 ms**. The checks are a couple of small file reads each — at 10 ms
+  they are still noise.
+
 ### Fixed
 
 - **The bounded index-load seek works now.** 1.1.1 shipped it and its own

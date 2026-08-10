@@ -137,7 +137,11 @@ struct PlanSegmentProvider: SegmentProvider {
                 if let data = try? Data(contentsOf: fileURL) {
                     return .data(data, contentType: contentType)
                 }
-                try? await Task.sleep(for: .milliseconds(100))
+                // This poll sits on the SEEK path: a demand fetch is answered
+                // the moment the produced file lands, plus this interval. At
+                // 100 ms the polling alone contributed more to seek latency
+                // than the production of a warm segment did.
+                try? await Task.sleep(for: .milliseconds(10))
             }
             return onTimeout
         }

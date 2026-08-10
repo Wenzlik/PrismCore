@@ -888,10 +888,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     idleAnchor = anchor
                     break
                 }
-                // The provider's pending serves poll every 100 ms with a 15 s
-                // budget; waking at half their cadence keeps the worst case
-                // one poll late.
-                Thread.sleep(forTimeInterval: 0.05)
+                // Parked is where a SEEK finds the producer, so this wake
+                // interval is the first hop of seek latency (then production,
+                // then the provider's own poll notices the file). Matched to
+                // the provider's 10 ms cadence.
+                Thread.sleep(forTimeInterval: 0.01)
             }
             guard let anchor = idleAnchor else { break produce }
             try reanchor(to: anchor)

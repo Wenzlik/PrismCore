@@ -394,7 +394,11 @@ public actor PrismCoreSession {
             // surface its error instead of burning the whole timeout.
             if task.isCancelled { break }
             if let remuxError { throw SessionError.startupTimedOut(underlying: remuxError) }
-            try await Task.sleep(for: .milliseconds(100))
+            // 10 ms, not 100: readiness lands ~30 ms after start on a warm
+            // source, and a coarser poll was quantizing every startup up to
+            // its own interval — measured 103 ms returned for 33 ms ready.
+            // The check is two small file reads; at this rate it is noise.
+            try await Task.sleep(for: .milliseconds(10))
         }
         throw SessionError.startupTimedOut(underlying: remuxError)
     }
