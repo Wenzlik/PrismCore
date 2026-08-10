@@ -81,12 +81,20 @@ struct SegmentPlan: Equatable {
     /// returns to the head, and the plan degrades to `.uniform` exactly like
     /// an untrusted index — the caller then skips demand mode rather than the
     /// whole session timing out. A `nil` guard means an unbounded seek.
+    ///
+    /// `cachedKeyframes` short-circuits the demuxer's index entirely: the
+    /// keyframe map a previous play's producer harvested
+    /// (`KeyframeIndexCache`) stands in for it, and neither seek runs — the
+    /// read position stays at the head, where the caller put it. The map
+    /// still faces the same two witnesses as a demuxer index; a stale or
+    /// sparse one degrades to uniform exactly like a junk index would.
     static func build(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
         targetSeconds: Int,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
-        interruptGuard: ReadInterruptGuard? = nil
+        interruptGuard: ReadInterruptGuard? = nil,
+        cachedKeyframes: [Int64]? = nil
     ) -> SegmentPlan? {
         let stream = input.pointee.streams[Int(videoStreamIndex)]!
         let timeBase = stream.pointee.time_base
@@ -98,40 +106,46 @@ struct SegmentPlan: Equatable {
         let durationSeconds = Double(rawDuration) / Double(AV_TIME_BASE)
         guard durationSeconds.isFinite, durationSeconds > 0 else { return nil }
 
-        // Nudge the demuxer to load its index (Matroska Cues arrive with a
-        // bounded seek; MP4 has stss in the moov already) — under a deadline,
-        // because "bounded" is a property of the index existing: without one
-        // the demuxer scans the file linearly and this call IS the stall.
-        // The armed guard aborts the underlying reads (AVERROR_EXIT) once the
-        // budget is gone; a partial scan leaves the demuxer consistent, just
-        // positioned mid-file.
-        interruptGuard?.arm(budget: indexLoadBudget)
-        _ = av_seek_frame(input, videoStreamIndex, stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / tick), AVSEEK_FLAG_BACKWARD)
-        // The guard must not outlive the nudge: the seek back to the head is
-        // what restores the position the producer starts from, and aborting
-        // THAT would leave the read position wherever the scan died. To
-        // timestamp 0 it is cheap regardless of an index — the first
-        // cluster's position is known from the header.
-        interruptGuard?.disarm()
-        if interruptGuard != nil, let pb = input.pointee.pb, pb.pointee.error < 0 {
-            // An aborted read latches its error (AVERROR_EXIT) in the
-            // AVIOContext, and every later read would return it verbatim —
-            // clearing it is what lets the producer carry on with the uniform
-            // plan instead of dying on its first real read. Only touched when
-            // a guard could have fired: an error on an unguarded context is a
-            // genuine I/O failure and stays.
-            pb.pointee.error = 0
-        }
-        _ = av_seek_frame(input, videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD)
-
-        var keyframes: [Int64] = []
-        let count = avformat_index_get_entries_count(stream)
-        keyframes.reserveCapacity(Int(count))
-        for i in 0..<count {
-            guard let entry = avformat_index_get_entry(stream, i) else { continue }
-            if entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 {
-                keyframes.append(entry.pointee.timestamp)
+        let keyframes: [Int64]
+        if let cachedKeyframes {
+            keyframes = cachedKeyframes
+        } else {
+            // Nudge the demuxer to load its index (Matroska Cues arrive with a
+            // bounded seek; MP4 has stss in the moov already) — under a deadline,
+            // because "bounded" is a property of the index existing: without one
+            // the demuxer scans the file linearly and this call IS the stall.
+            // The armed guard aborts the underlying reads (AVERROR_EXIT) once the
+            // budget is gone; a partial scan leaves the demuxer consistent, just
+            // positioned mid-file.
+            interruptGuard?.arm(budget: indexLoadBudget)
+            _ = av_seek_frame(input, videoStreamIndex, stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / tick), AVSEEK_FLAG_BACKWARD)
+            // The guard must not outlive the nudge: the seek back to the head is
+            // what restores the position the producer starts from, and aborting
+            // THAT would leave the read position wherever the scan died. To
+            // timestamp 0 it is cheap regardless of an index — the first
+            // cluster's position is known from the header.
+            interruptGuard?.disarm()
+            if interruptGuard != nil, let pb = input.pointee.pb, pb.pointee.error < 0 {
+                // An aborted read latches its error (AVERROR_EXIT) in the
+                // AVIOContext, and every later read would return it verbatim —
+                // clearing it is what lets the producer carry on with the uniform
+                // plan instead of dying on its first real read. Only touched when
+                // a guard could have fired: an error on an unguarded context is a
+                // genuine I/O failure and stays.
+                pb.pointee.error = 0
             }
+            _ = av_seek_frame(input, videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD)
+
+            var indexed: [Int64] = []
+            let count = avformat_index_get_entries_count(stream)
+            indexed.reserveCapacity(Int(count))
+            for i in 0..<count {
+                guard let entry = avformat_index_get_entry(stream, i) else { continue }
+                if entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 {
+                    indexed.append(entry.pointee.timestamp)
+                }
+            }
+            keyframes = indexed
         }
 
         if let planned = keyframePlan(

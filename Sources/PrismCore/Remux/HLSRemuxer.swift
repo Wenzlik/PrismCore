@@ -133,6 +133,15 @@ final class HLSRemuxer: @unchecked Sendable {
     /// answer to AVPlayer refusing a master (-11868/-11848/-1002): a fresh
     /// session with the one best audio track muxed into the variant.
     private let forceMuxed: Bool
+    /// Cross-session keyframe map (issue #34): consulted before the plan's
+    /// index-load seek, fed by the sequential producer of a source whose own
+    /// index couldn't be trusted. `nil` = no persistence, exactly as before.
+    private let keyframeCache: KeyframeIndexCache?
+    /// The plan's index-load seek budget, passed through to
+    /// `SegmentPlan.build`. A knob for tests: a zero budget reproduces the
+    /// field shape — the scan bounded out, the index never loaded — on a
+    /// local file whose scan would otherwise finish instantly.
+    private let indexLoadBudget: Duration
     /// The routing probe's already-open context, when the host passed one.
     /// `run()` consumes it (once) instead of opening the source again; holding
     /// the reference also means an unconsumed one is closed when this remuxer
@@ -202,9 +211,13 @@ final class HLSRemuxer: @unchecked Sendable {
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
         forceMuxed: Bool = false,
-        probed: ProbedSource? = nil
+        probed: ProbedSource? = nil,
+        keyframeCacheDirectory: URL? = nil,
+        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
     ) {
         self.probed = probed
+        self.keyframeCache = keyframeCacheDirectory.map { KeyframeIndexCache(directory: $0) }
+        self.indexLoadBudget = indexLoadBudget
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
         self.outputDirectory = outputDirectory
@@ -354,15 +367,63 @@ final class HLSRemuxer: @unchecked Sendable {
         // shape excluded is muxed-with-bridge: re-anchoring would mean
         // resetting an encoder mid-fragment, and that combination only occurs
         // when a master was refused anyway.
-        let plannedPlan: SegmentPlan? = {
-            guard demand != nil else { return nil }
-            if case .muxed(let audio) = shape, audio?.mode == .bridge { return nil }
-            guard let built = SegmentPlan.build(
-                input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds,
-                interruptGuard: interruptGuard
-            ), built.basis == .keyframeIndex else { return nil }
-            return built
+        let demandEligible: Bool = {
+            guard demand != nil else { return false }
+            if case .muxed(let audio) = shape, audio?.mode == .bridge { return false }
+            return true
         }()
+
+        // The source's identity for the keyframe cache — from the opened
+        // context, so the size is the transport's own answer (HTTP and file
+        // alike) and the duration is the container's.
+        let cacheIdentity: String? = keyframeCache.map { _ in
+            KeyframeIndexCache.identity(
+                sourceURL: sourceURL,
+                sizeBytes: input.pointee.pb.map { avio_size($0) } ?? -1,
+                durationMicroseconds: input.pointee.duration
+            )
+        }
+        // A previous play's harvested keyframe map, when its time base still
+        // matches the stream's. It replaces the demuxer index in the plan —
+        // and skips the index-load seek, so a cache hit starts faster than
+        // even a well-indexed first play.
+        let cachedKeyframes: [Int64]? = {
+            guard demandEligible, let keyframeCache, let cacheIdentity,
+                  // A plan is a promise to re-anchor, and a re-anchor is a
+                  // seek — on a transport that can't (an HTTP server that
+                  // ignores Range), the cached map would plan a session whose
+                  // first real seek kills it. Unseekable sources keep the
+                  // sequential shape the map can't improve.
+                  let pb = input.pointee.pb, pb.pointee.seekable != 0,
+                  let entry = keyframeCache.lookup(identity: cacheIdentity)
+            else { return nil }
+            let timeBase = input.pointee.streams[Int(videoIndex)]!.pointee.time_base
+            guard entry.timeBaseNum == timeBase.num, entry.timeBaseDen == timeBase.den,
+                  entry.keyframePTS.count >= 2
+            else { return nil }
+            return entry.keyframePTS
+        }()
+
+        let builtPlan: SegmentPlan? = demandEligible
+            ? SegmentPlan.build(
+                input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds,
+                indexLoadBudget: indexLoadBudget,
+                interruptGuard: interruptGuard, cachedKeyframes: cachedKeyframes
+            )
+            : nil
+        let plannedPlan: SegmentPlan? = builtPlan?.basis == .keyframeIndex ? builtPlan : nil
+
+        // Harvest for next time (issue #34): this session degraded to the
+        // sequential shape even though it could have been planned — the map
+        // is not in the file. The producer is about to read every packet
+        // head-to-EOF anyway (sequential mode never re-anchors, so coverage
+        // is complete), and each video keyframe it sees goes into the sidecar
+        // the NEXT play's plan builds from. Strictly a by-product: no plan
+        // possible at all (`builtPlan == nil`, a live source) means the next
+        // play can't use a map either, so nothing is collected.
+        let shouldHarvestKeyframes = keyframeCache != nil && cacheIdentity != nil
+            && demandEligible && builtPlan != nil && plannedPlan == nil
+        var harvestedKeyframes: [Int64]? = shouldHarvestKeyframes ? [] : nil
 
         // MARK: Output setup
 
@@ -747,6 +808,10 @@ final class HLSRemuxer: @unchecked Sendable {
                     if packet.pointee.pts != swift_AV_NOPTS_VALUE() {
                         let pts = packet.pointee.pts
                         let isKey = packet.pointee.flags & AV_PKT_FLAG_KEY != 0
+                        // The keyframe harvest (issue #34): the packet is in
+                        // hand either way, so the cost is one append on a
+                        // packet already being examined for cut points.
+                        if isKey { harvestedKeyframes?.append(pts) }
                         if isKey {
                             if segmentStartPTS == nil {
                                 segmentStartPTS = pts
@@ -883,6 +948,19 @@ final class HLSRemuxer: @unchecked Sendable {
                 // (Planned playlists were born ended.)
                 if plannedPlan == nil {
                     try playlist.finish()
+                }
+                // Only a complete run persists its harvest: a cancelled
+                // session saw a prefix of the file, and a map that passes the
+                // witnesses while covering half the source would plan
+                // segments whose keyframes it never saw.
+                if let keyframeCache, let cacheIdentity,
+                   let harvested = harvestedKeyframes, harvested.count >= 2 {
+                    keyframeCache.store(.init(
+                        identity: cacheIdentity,
+                        timeBaseNum: videoTimeBase.num,
+                        timeBaseDen: videoTimeBase.den,
+                        keyframePTS: harvested
+                    ))
                 }
             }
 

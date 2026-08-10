@@ -8,6 +8,31 @@ source-compatible.)
 
 ## [1.4.0] — 2026-08-10
 
+### Added
+
+- **The remux harvests the keyframe index and the next play reuses it**
+  (#34). A container with no usable seek index — a Matroska without Cues,
+  any MPEG-TS — could never get a keyframe-basis plan: the map is not in the
+  file, and 1.1.1/1.3.1 only made *not having it* survivable (bounded seek →
+  uniform plan → sequential playback, every play again). The information is
+  free, though: the sequential producer reads the whole file and sees every
+  keyframe go past. With `keyframeIndexCacheDirectory` set on
+  `PrismCoreSession` (opt-in; a host cache directory is right — entries are
+  a few KB of JSON, bounded LRU), it now collects those keyframes as a pure
+  by-product — no extra I/O, and only a run that reached EOF persists, since
+  a partial map that passes the plan's witnesses would promise segments
+  whose keyframes nobody saw. The next play of the same source plans on the
+  map from its first second: full demand-driven seeking, as if the file had
+  an index. A cache hit also skips the index-load nudge seek entirely.
+
+  Entries are keyed by URL (query stripped — a rotated Plex token is the
+  same media), byte size, whole-second duration and, for local files, mtime;
+  the full identity is stored inside the entry, so the filename hash needs
+  no collision guarantees, and a mismatch is simply a miss. A cached map is
+  only used on a seekable transport — a plan is a promise to re-anchor, and
+  a re-anchor is a seek. The reference engine does not do this (checked
+  2026-08-08, approach only): it recomputes its keyframe list every session.
+
 ### Fixed
 
 - **Retention can no longer evict a demanded segment before its serve reads

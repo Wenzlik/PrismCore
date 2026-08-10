@@ -63,6 +63,7 @@ public actor PrismCoreSession {
         var display: DisplayCapabilities
         var segmentCacheBytes: Int?
         var forceMuxedShape: Bool
+        var keyframeIndexCacheDirectory: URL?
     }
 
     private let configuration: Configuration
@@ -127,13 +128,22 @@ public actor PrismCoreSession {
     ///     -1002): make a NEW session with this set — the rejected master's
     ///     variant alone would be silent video, renditions live only in
     ///     masters.
+    ///   - keyframeIndexCacheDirectory: where harvested keyframe maps persist
+    ///     across sessions (issue #34) — a host-owned cache directory
+    ///     (`Caches/…` is right: entries are cheap to lose). A source whose
+    ///     container carries no usable seek index (Matroska without Cues,
+    ///     MPEG-TS) plays sequentially on its first run while the producer
+    ///     harvests every keyframe it reads anyway; the next play of the same
+    ///     source plans on that map — full demand-driven seeking, as if the
+    ///     file had an index. `nil` (the default) turns persistence off.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
         displayIsHDRReady: Bool = false,
         displayIsDolbyVisionCapable: Bool = false,
         segmentCacheBytes: Int? = 1 << 30,
-        forceMuxedShape: Bool = false
+        forceMuxedShape: Bool = false,
+        keyframeIndexCacheDirectory: URL? = nil
     ) throws {
         try self.init(
             url: url,
@@ -143,7 +153,8 @@ public actor PrismCoreSession {
                 isDolbyVisionCapable: displayIsDolbyVisionCapable
             ),
             segmentCacheBytes: segmentCacheBytes,
-            forceMuxedShape: forceMuxedShape
+            forceMuxedShape: forceMuxedShape,
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
         )
     }
 
@@ -160,14 +171,16 @@ public actor PrismCoreSession {
         display: DisplayCapabilities,
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
-        probed: ProbedSource? = nil
+        probed: ProbedSource? = nil,
+        keyframeIndexCacheDirectory: URL? = nil
     ) throws {
         self.configuration = Configuration(
             url: url,
             httpHeaders: httpHeaders,
             display: display,
             segmentCacheBytes: segmentCacheBytes,
-            forceMuxedShape: forceMuxedShape
+            forceMuxedShape: forceMuxedShape,
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
         )
 
         let directory = FileManager.default.temporaryDirectory
@@ -192,7 +205,8 @@ public actor PrismCoreSession {
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             forceMuxed: forceMuxedShape,
-            probed: probed
+            probed: probed,
+            keyframeCacheDirectory: keyframeIndexCacheDirectory
         )
         self.remuxer = remuxer
         var provider = PlanSegmentProvider(root: directory, coordinator: demand)
@@ -216,14 +230,16 @@ public actor PrismCoreSession {
         url: URL,
         httpHeaders: [String: String] = [:],
         segmentCacheBytes: Int? = 1 << 30,
-        forceMuxedShape: Bool = false
+        forceMuxedShape: Bool = false,
+        keyframeIndexCacheDirectory: URL? = nil
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
             httpHeaders: httpHeaders,
             display: .current(),
             segmentCacheBytes: segmentCacheBytes,
-            forceMuxedShape: forceMuxedShape
+            forceMuxedShape: forceMuxedShape,
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
         )
     }
 
@@ -263,7 +279,8 @@ public actor PrismCoreSession {
             httpHeaders: configuration.httpHeaders,
             display: configuration.display,
             segmentCacheBytes: configuration.segmentCacheBytes,
-            forceMuxedShape: true
+            forceMuxedShape: true,
+            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback
@@ -304,7 +321,8 @@ public actor PrismCoreSession {
                 source: display.source
             ),
             segmentCacheBytes: configuration.segmentCacheBytes,
-            forceMuxedShape: false
+            forceMuxedShape: false,
+            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback

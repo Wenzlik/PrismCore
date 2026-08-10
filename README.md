@@ -186,6 +186,14 @@ turns those fragments into a playlist. Two production modes exist:
   plan exists (live, unknown duration, junk index) and for the muxed-with-bridge
   shape, where re-anchoring would reset an encoder mid-fragment.
 
+A source whose container carries no usable index (a Matroska without Cues, any
+MPEG-TS) is stuck sequential on its first play — but the producer reads every
+packet anyway, so with `keyframeIndexCacheDirectory` set on the session it
+harvests the keyframe map as a by-product and persists it (keyed by URL sans
+query + size + duration; bounded LRU). The next play of the same source plans
+on that map from its first second, as if the file had an index — and a cache
+hit skips the index-load seek entirely.
+
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and by
 an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
 `SegmentProvider` rather than straight off disk, and a provider that answers
