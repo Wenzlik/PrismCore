@@ -61,6 +61,58 @@ struct DemandDrivenTests {
         #expect(coordinator.takeAnchorRequest() == 0)
     }
 
+    @Test("A demand miss protects its index from the moment of the miss until the serve exits")
+    func demandProtectionLifecycle() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreDemand-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<10).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex,
+            timeBaseNum: 1,
+            timeBaseDen: 1000
+        ))
+        let provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+
+        // The miss itself must install the protection — before the pending's
+        // closure ever runs, or eviction can strike in the queue gap.
+        let result = await provider.data(forPath: "seg00007.m4s")
+        guard case .pending(let pending) = result else {
+            Issue.record("expected a pending serve for a planned miss")
+            return
+        }
+        #expect(coordinator.demandProtectedIndexes == [7])
+
+        // Refcounted: the audio rendition's fetch of the same index stacks.
+        let audioResult = await provider.data(forPath: "audio0/seg00007.m4s")
+        guard case .pending(let audioPending) = audioResult else {
+            Issue.record("expected a pending serve for the rendition miss")
+            return
+        }
+        #expect(coordinator.demandProtectedIndexes == [7])
+
+        // Production lands the file; both serves resolve and the protection
+        // drops only when the LAST one exits.
+        let payload = Data("moof-payload".utf8)
+        try payload.write(to: root.appendingPathComponent("seg00007.m4s"))
+        guard case .data(let served, _) = await pending.resolve() else {
+            Issue.record("the landed file did not serve")
+            return
+        }
+        #expect(served == payload)
+        #expect(coordinator.demandProtectedIndexes == [7])
+
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("audio0"), withIntermediateDirectories: true
+        )
+        try payload.write(to: root.appendingPathComponent("audio0/seg00007.m4s"))
+        _ = await audioPending.resolve()
+        #expect(coordinator.demandProtectedIndexes.isEmpty)
+    }
+
     @Test("Planned segment paths parse to indices; everything else does not")
     func segmentPathParsing() {
         #expect(PlanSegmentProvider.segmentIndex(inPath: "seg00004.m4s") == 4)

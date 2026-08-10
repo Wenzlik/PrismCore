@@ -48,6 +48,27 @@ struct SegmentRetentionTests {
         #expect(retention.totalBytes == 300)
     }
 
+    @Test("A protected index survives eviction — the next-farthest goes instead")
+    func protectedIndexSurvives() {
+        var retention = SegmentRetention(budgetBytes: 400, keepWindow: 1)
+
+        // 0..3 landed; the producer then ran on to 8 past a demand at 0.
+        for index in 0...3 {
+            _ = retention.record(index: index, bytes: 100, producing: index)
+        }
+        // Landing 8 exceeds the budget by one segment. Farthest from the
+        // producer is 0 — but 0 has an outstanding demand serve, so 1 goes.
+        let victims = retention.record(index: 8, bytes: 100, producing: 8, protected: [0])
+        #expect(victims == [1])
+        #expect(retention.totalBytes == 400)
+
+        // With every candidate protected, the policy stops rather than spins —
+        // same contract as the keep window, the budget stays exceeded.
+        let none = retention.record(index: 9, bytes: 100, producing: 9, protected: [0, 2, 3])
+        #expect(none.isEmpty)
+        #expect(retention.totalBytes == 500)
+    }
+
     @Test("Re-recording a segment replaces its size instead of double-counting")
     func reRecordReplaces() {
         var retention = SegmentRetention(budgetBytes: 1_000, keepWindow: 0)

@@ -16,6 +16,14 @@ final class DemandCoordinator: @unchecked Sendable {
     /// The producer's current position: the segment it is producing now.
     /// `-1` until production starts.
     private var producingIndex = -1
+    /// Segment indexes with an outstanding demand serve, refcounted — the
+    /// variant and each rendition of the same index arrive as separate
+    /// fetches. Retention consults this set so it never evicts a segment the
+    /// provider is still waiting to read off disk (issue #43): production can
+    /// run several segments past a just-reproduced one before the provider's
+    /// poll notices the file, and "farthest from the producer" is then exactly
+    /// the segment that was demanded.
+    private var outstandingServes: [Int: Int] = [:]
 
     /// How far ahead of the producer a request may point and still be worth
     /// WAITING for instead of re-anchoring. Two segments ≈ 12 s of content —
@@ -43,6 +51,14 @@ final class DemandCoordinator: @unchecked Sendable {
         }
     }
 
+    /// The indexes retention must not evict right now. Snapshotted once per
+    /// `record` call on the producer's thread — a Set copy under the same lock
+    /// both sides already take, so the cost sits with eviction, not the
+    /// per-packet hot path.
+    var demandProtectedIndexes: Set<Int> {
+        lock.withLock { Set(outstandingServes.keys) }
+    }
+
     // MARK: - Provider side
 
     /// The plan, if published.
@@ -63,6 +79,27 @@ final class DemandCoordinator: @unchecked Sendable {
             // Last request wins: AVPlayer's newest fetch is where the
             // playhead actually is.
             requestedAnchor = index
+        }
+    }
+
+    /// A demand serve of segment `index` starts waiting for its file. Must be
+    /// balanced with `endServing` — the protection lasts exactly as long as
+    /// the wait, and an unbalanced begin would pin the segment (and its bytes)
+    /// against the budget forever.
+    func beginServing(index: Int) {
+        lock.withLock { outstandingServes[index, default: 0] += 1 }
+    }
+
+    /// The serve of segment `index` finished — served, timed out, or the
+    /// connection died; every exit counts, only the refcount matters.
+    func endServing(index: Int) {
+        lock.withLock {
+            guard let count = outstandingServes[index] else { return }
+            if count > 1 {
+                outstandingServes[index] = count - 1
+            } else {
+                outstandingServes.removeValue(forKey: index)
+            }
         }
     }
 }

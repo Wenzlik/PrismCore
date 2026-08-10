@@ -528,7 +528,14 @@ final class HLSRemuxer: @unchecked Sendable {
                     .appendingPathComponent(name).path
                 bytes += ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.intValue ?? 0
             }
-            for victim in retention!.record(index: index, bytes: bytes, producing: index) {
+            // Indexes with an outstanding demand serve are off limits — the
+            // fetch that re-anchored production here is still polling for its
+            // file, and production has usually run several segments past it
+            // by the time this records (issue #43).
+            let protected = demand?.demandProtectedIndexes ?? []
+            for victim in retention!.record(
+                index: index, bytes: bytes, producing: index, protected: protected
+            ) {
                 let victimName = String(format: "seg%05d.m4s", victim)
                 try? FileManager.default.removeItem(
                     at: outputDirectory.appendingPathComponent(victimName)

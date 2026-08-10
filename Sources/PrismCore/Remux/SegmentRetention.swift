@@ -36,14 +36,23 @@ struct SegmentRetention {
     /// Record segment `index` as present with `bytes` on disk (a reproduction
     /// replaces the old size), and return the indices to evict — farthest from
     /// `producing` first — until the total fits the budget again.
-    mutating func record(index: Int, bytes: Int, producing: Int) -> [Int] {
+    ///
+    /// `protected` indexes are never evicted, budget notwithstanding: they
+    /// have an outstanding demand serve, and the whole reason the segment was
+    /// just (re-)produced may be that fetch. Evicting one hands the provider a
+    /// 15 s timeout and AVPlayer a lost connection (issue #43) — the distance
+    /// policy can't see that on its own, because a demanded segment stops
+    /// being near the producer the moment production runs on past it.
+    mutating func record(
+        index: Int, bytes: Int, producing: Int, protected: Set<Int> = []
+    ) -> [Int] {
         totalBytes += bytes - (sizes[index] ?? 0)
         sizes[index] = bytes
 
         var victims: [Int] = []
         while totalBytes > budgetBytes {
             let candidate = sizes.keys
-                .filter { abs($0 - producing) > keepWindow }
+                .filter { abs($0 - producing) > keepWindow && !protected.contains($0) }
                 .max { abs($0 - producing) < abs($1 - producing) }
             guard let victim = candidate else { break }
             totalBytes -= sizes.removeValue(forKey: victim) ?? 0

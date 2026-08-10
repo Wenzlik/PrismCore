@@ -68,7 +68,12 @@ struct PlanSegmentProvider: SegmentProvider {
         // Unproduced planned artifacts by shape:
         if let index = Self.segmentIndex(inPath: path) {
             coordinator.requestProduction(of: index)
-            return .pending(waitForFile(path: path))
+            // Protected from HERE, not from when the wait's closure runs: a
+            // queued pending leaves a gap in which production could land the
+            // segment and retention evict it again (issue #43). The matching
+            // `endServing` sits in the wait itself.
+            coordinator.beginServing(index: index)
+            return .pending(waitForFile(path: path, servingIndex: index))
         }
         if path.hasSuffix("init.mp4") {
             // The init exists after the producer's first cut wherever it is
@@ -118,18 +123,28 @@ struct PlanSegmentProvider: SegmentProvider {
     /// A header-only WebVTT segment: valid, parseable, no cues.
     static let emptyWebVTT = Data("WEBVTT\n\n".utf8)
 
-    /// - Parameter onTimeout: what to answer when the file never lands.
-    ///   `.notFound` aborts the connection, which is right for media (a truncated
-    ///   transfer makes AVPlayer retry) and wrong for subtitles.
+    /// - Parameters:
+    ///   - onTimeout: what to answer when the file never lands.
+    ///     `.notFound` aborts the connection, which is right for media (a truncated
+    ///     transfer makes AVPlayer retry) and wrong for subtitles.
+    ///   - servingIndex: the planned segment index this wait serves, when the
+    ///     caller already told the coordinator via `beginServing` — every exit
+    ///     of the wait balances it, so the eviction protection lasts exactly
+    ///     as long as the file can still be needed off disk.
     private func waitForFile(
         path: String,
         timeout: Duration? = nil,
-        onTimeout: ProviderResult = .notFound
+        onTimeout: ProviderResult = .notFound,
+        servingIndex: Int? = nil
     ) -> PendingResult {
         let fileURL = root.appendingPathComponent(path)
         let contentType = LoopbackHTTPServer.contentType(for: fileURL)
         let timeout = timeout ?? productionTimeout
+        let coordinator = self.coordinator
         return PendingResult {
+            defer {
+                if let servingIndex { coordinator.endServing(index: servingIndex) }
+            }
             // Clock starts when the SERVE runs, not when the miss was seen —
             // a queued pending must get its full window.
             let deadline = ContinuousClock.now.advanced(by: timeout)

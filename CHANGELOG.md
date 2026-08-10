@@ -6,6 +6,29 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.4.0] — 2026-08-10
+
+### Fixed
+
+- **Retention can no longer evict a demanded segment before its serve reads
+  it** (#43). Under a tight `segmentCacheBytes` budget, a demand fetch of an
+  evicted segment could fail outright: the producer re-anchors, re-produces
+  the segment, runs on past it — and `recordAndEvict`, seeing the budget
+  exceeded, evicts the farthest-from-producer segment, which by then is
+  exactly the one just re-produced. The provider's poll finds nothing, times
+  out at 15 s, and AVPlayer reports a lost connection (`-1005`). The 1.3.1
+  cadence change made the race hard to lose (19–34 ms serve vs. a 100 ms
+  poll); it never removed it.
+
+  Now the provider tells the coordinator when a demand serve begins and ends
+  (`beginServing`/`endServing`, refcounted — the variant and each rendition of
+  an index fetch separately), and eviction skips any index with a serve
+  outstanding, exactly like the keep window: the budget may stay exceeded for
+  the serve's duration rather than answer a promise the playlist made with a
+  404. Protection is installed at the moment of the miss, not when the queued
+  serve first runs, so there is no gap for production to land the file and
+  eviction to take it back.
+
 ## [1.3.1] — 2026-08-10
 
 ### Changed
@@ -395,6 +418,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.4.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.4.0
 [1.3.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.1
 [1.3.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.0
 [1.2.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.2.0
