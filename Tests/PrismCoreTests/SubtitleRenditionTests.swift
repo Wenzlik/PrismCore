@@ -184,6 +184,58 @@ struct SubtitleRenditionTests {
         }
     }
 
+    // MARK: - Host cue tap
+
+    /// Collects `TimedTextCue`s across the remux thread and the test task.
+    private final class CueCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [TimedTextCue] = []
+        func append(_ cue: TimedTextCue) { lock.withLock { stored.append(cue) } }
+        var cues: [TimedTextCue] { lock.withLock { stored } }
+    }
+
+    @Test("A registered handler receives every embedded cue, on the played timeline")
+    func cueTapDeliversEmbeddedCues() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_srt.mkv"))
+        let collector = CueCollector()
+        await session.setTimedTextCueHandler { collector.append($0) }
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        try await waitForFinishedPlaylist(playlist)
+
+        // The fixture's SRT: three cues, one straddling the 6 s segment cut.
+        // The tap must deliver each source cue exactly once — unsplit, unlike
+        // the segmented rendition — and dedup any re-demuxed region.
+        let cues = collector.cues
+        #expect(cues.count == 3)
+        let first = try #require(cues.first)
+        // First video PTS is 0, so the played timeline and the source timeline
+        // coincide here.
+        #expect(first.start == 1.0)
+        #expect(first.end == 3.0)
+        #expect(first.text.contains("Ahoj"))
+        #expect(cues.allSatisfy { $0.streamIndex == cues[0].streamIndex })
+        let straddling = try #require(cues.dropFirst().first)
+        #expect(straddling.start < 6.0 && straddling.end > 6.0)
+    }
+
+    @Test("A handler registered after production is replayed everything so far")
+    func cueTapReplaysOnLateRegistration() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_srt.mkv"))
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        try await waitForFinishedPlaylist(playlist)
+
+        // Nothing was registered while the remux ran; the late handler must
+        // still see the complete cue list, in production order.
+        let collector = CueCollector()
+        await session.setTimedTextCueHandler { collector.append($0) }
+        let cues = collector.cues
+        #expect(cues.count == 3)
+        #expect(cues.map(\.start) == cues.map(\.start).sorted())
+        #expect(cues.last?.text.contains("Konec") == true)
+    }
+
     // MARK: - Master playlist rules
 
     @Test("Renditions are never DEFAULT or AUTOSELECT — the host selects them")

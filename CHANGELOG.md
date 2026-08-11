@@ -6,6 +6,31 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.6.0] — 2026-08-11
+
+### Added
+
+- **`setTimedTextCueHandler` — embedded subtitle cues streamed to the host.**
+  A public tap on the demux's subtitle conversion: every cue an embedded text
+  stream produces (and every OCR'd bitmap cue) is handed to the host as a
+  `TimedTextCue` — stream index, start/end **rebased onto the played
+  timeline** (presentation origin already subtracted), and the converted
+  text. The WebVTT renditions keep working unchanged; this is the other
+  delivery, for a host that draws captions itself on the player's own clock
+  instead of AVPlayer's rendition schedule. A handler registered late is
+  replayed everything produced so far in production order; a re-demuxed
+  region (demand-driven seeks) is deduplicated inside the engine; cues
+  produced before the presentation origin is known are held and flushed with
+  it. Fallback sessions (master rejection, muxed shape) inherit the handler
+  the same way they inherit external subtitle registrations. External files
+  registered via `addExternalSubtitle` are not streamed — the host handed
+  those in and already owns their text.
+
+  Why: the server-side text routes keep failing hosts — Plex's subtitle-only
+  transcode answers empty documents for embedded tracks (Aether#1533), and
+  rendition timing is where the late-cue drift class of bugs lives. The
+  demux this engine already runs is the one honest source of embedded cues.
+
 ## [1.5.0] — 2026-08-10
 
 ### Added
@@ -476,6 +501,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.6.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.0
 [1.5.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.5.0
 [1.4.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.4.0
 [1.3.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.3.1

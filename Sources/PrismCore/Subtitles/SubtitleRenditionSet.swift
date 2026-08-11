@@ -200,6 +200,27 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// otherwise print cues against origin 0.
     private var originSet = false
 
+    // MARK: Host cue tap
+
+    /// The host's `TimedTextCue` sink, when one registered. Fired for every
+    /// cue an **embedded** stream produces — external files are skipped, the
+    /// host handed those in and already owns their text.
+    private var cueHandler: (@Sendable (TimedTextCue) -> Void)?
+    /// Everything delivered so far, so a handler registered after cues were
+    /// already produced starts complete instead of mid-film. Bounded by the
+    /// nature of the data: a subtitle track is a few thousand short strings.
+    private var emittedCues: [TimedTextCue] = []
+    /// Dedup for the demux revisiting a region (a demand-driven seek re-reads
+    /// packets it already converted): the same source cue must not reach the
+    /// host twice, or a replay would double every line.
+    private var emittedKeys: Set<String> = []
+    /// Cues converted before the presentation origin was known — they can't
+    /// be rebased onto the played timeline yet, so they wait for
+    /// `setTimelineOrigin`. In practice subtitle packets follow the first
+    /// video keyframe, but "in practice" is not an ordering guarantee.
+    private var preOriginCues: [(streamIndex: Int32, cue: SubtitleCue)] = []
+    private var timelineOriginSeconds: Double = 0
+
     init(outputDirectory: URL) {
         self.outputDirectory = outputDirectory
     }
@@ -358,6 +379,68 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         guard !originSet else { return }
         originSet = true
         for track in tracks { track.writer.setTimelineOrigin(seconds: seconds) }
+
+        // The origin is what the host tap rebases against — flush whatever
+        // arrived before it existed.
+        var toDeliver: [TimedTextCue] = []
+        var handler: (@Sendable (TimedTextCue) -> Void)?
+        lock.withLock {
+            timelineOriginSeconds = max(0, seconds)
+            for pending in preOriginCues {
+                if let rebased = rebasedLocked(streamIndex: pending.streamIndex, pending.cue) {
+                    toDeliver.append(rebased)
+                }
+            }
+            preOriginCues = []
+            handler = cueHandler
+        }
+        if let handler {
+            for cue in toDeliver { handler(cue) }
+        }
+    }
+
+    // MARK: - Host cue tap
+
+    /// Register (or clear) the host's cue sink. Everything already produced is
+    /// replayed to a new handler first, in production order — a host that
+    /// attaches after `start()` returned must not miss the opening dialogue.
+    func setCueHandler(_ handler: (@Sendable (TimedTextCue) -> Void)?) {
+        let replay: [TimedTextCue] = lock.withLock {
+            cueHandler = handler
+            return handler != nil ? emittedCues : []
+        }
+        guard let handler else { return }
+        for cue in replay { handler(cue) }
+    }
+
+    /// Rebase one produced cue onto the played timeline and hand it to the
+    /// host — or hold it until the origin exists.
+    private func emitHostCue(streamIndex: Int32, _ cue: SubtitleCue) {
+        var toDeliver: TimedTextCue?
+        var handler: (@Sendable (TimedTextCue) -> Void)?
+        lock.withLock {
+            guard originSet else {
+                preOriginCues.append((streamIndex, cue))
+                return
+            }
+            toDeliver = rebasedLocked(streamIndex: streamIndex, cue)
+            handler = cueHandler
+        }
+        if let handler, let toDeliver { handler(toDeliver) }
+    }
+
+    /// Origin-rebased, deduplicated host cue — `nil` for an empty, inverted or
+    /// already-emitted one. Caller holds `lock`.
+    private func rebasedLocked(streamIndex: Int32, _ cue: SubtitleCue) -> TimedTextCue? {
+        guard !cue.text.isEmpty else { return nil }
+        let start = Swift.max(0, cue.start - timelineOriginSeconds)
+        let end = cue.end - timelineOriginSeconds
+        guard end > start else { return nil }
+        let key = "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+        guard emittedKeys.insert(key).inserted else { return nil }
+        let rebased = TimedTextCue(streamIndex: streamIndex, start: start, end: end, text: cue.text)
+        emittedCues.append(rebased)
+        return rebased
     }
 
     // MARK: - Production
@@ -377,6 +460,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             // one composition over several packets).
             for cue in bitmap.ingest(packet) {
                 track.writer.add(cue)
+                emitHostCue(streamIndex: streamIndex, cue)
             }
         case .text(let kind):
             guard let timeBase = track.timeBase,
@@ -391,7 +475,9 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             let duration = packet.pointee.duration > 0
                 ? Double(packet.pointee.duration) * tick
                 : WebVTTRenditionWriter.fallbackCueSeconds
-            track.writer.add(SubtitleCue(start: start, end: start + duration, text: text))
+            let cue = SubtitleCue(start: start, end: start + duration, text: text)
+            track.writer.add(cue)
+            emitHostCue(streamIndex: streamIndex, cue)
         }
     }
 

@@ -69,6 +69,9 @@ public actor PrismCoreSession {
     private let configuration: Configuration
     /// External subtitle registrations, replayed onto a fallback session.
     private var externalSubtitles: [(url: URL, language: String?, name: String?, isForced: Bool)] = []
+    /// The host's cue sink, replayed onto a fallback session the same way —
+    /// a master rejection must not silently cost the host its captions.
+    private var timedTextCueHandler: (@Sendable (TimedTextCue) -> Void)?
     /// Where this session's playlists and segments live. Internal so the
     /// startup-cost benchmark can watch artifacts appear as they land.
     let workDirectory: URL
@@ -330,7 +333,9 @@ public actor PrismCoreSession {
 
     /// Registered external subtitles are part of the source's identity as far
     /// as fallbacks are concerned — every clone replays them so the host
-    /// doesn't have to remember what it registered.
+    /// doesn't have to remember what it registered. The timed-text cue handler
+    /// rides along for the same reason: a master rejection must not silently
+    /// cost the host its captions.
     private func replayExternalSubtitles(onto fallback: PrismCoreSession) async throws {
         for subtitle in externalSubtitles {
             try await fallback.addExternalSubtitle(
@@ -339,6 +344,9 @@ public actor PrismCoreSession {
                 name: subtitle.name,
                 isForced: subtitle.isForced
             )
+        }
+        if let handler = timedTextCueHandler {
+            await fallback.setTimedTextCueHandler(handler)
         }
     }
 
@@ -373,6 +381,25 @@ public actor PrismCoreSession {
         )
         // Remembered so a muxed fallback session can be a faithful clone.
         externalSubtitles.append((url: url, language: language, name: name, isForced: isForced))
+    }
+
+    /// Stream every embedded subtitle cue to the host as the demux produces
+    /// it, rebased onto the played timeline (see `TimedTextCue`).
+    ///
+    /// The WebVTT renditions keep working regardless — this is the *other*
+    /// delivery, for a host that draws captions itself and wants them on the
+    /// player's own clock instead of AVPlayer's rendition schedule. Callable
+    /// before or after `start()`: a handler registered late is first replayed
+    /// everything produced so far, in production order, so it can't miss the
+    /// opening dialogue. Cues follow the demux, which follows playback — a
+    /// seek forward means that region's cues arrive when the remux reaches
+    /// it, and a re-demuxed region is deduplicated here, not by the host.
+    ///
+    /// External files registered via `addExternalSubtitle` are *not* streamed:
+    /// the host handed those in and already owns their text.
+    public func setTimedTextCueHandler(_ handler: (@Sendable (TimedTextCue) -> Void)?) {
+        timedTextCueHandler = handler
+        remuxer.subtitles.setCueHandler(handler)
     }
 
     /// The WebVTT subtitle renditions this session serves, in declaration order
