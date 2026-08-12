@@ -52,8 +52,17 @@ final class AudioRenditionWriter {
     /// `isObjectAudio`: the probe knows the track *claims* Atmos, but the index
     /// is a number only the frame carries, and the box needs the number.
     private var atmosComplexityIndex: Int?
-    /// Stop paying for the walk once it has answered.
+    /// Stop paying for the walk once the question is settled — answered, or
+    /// asked of `atmosSniffPacketBudget` frames without one.
     private var atmosSniffDone = false
+    /// Frames the walk may read before it accepts "no JOC here" as the answer.
+    /// A partial first frame is normal, so one packet is not enough to conclude
+    /// anything; ~24 E-AC-3 frames is under a second of audio and the walk is
+    /// bytes, not decode.
+    private static let atmosSniffPacketBudget = 24
+    private var atmosSniffPacketsRead = 0
+    /// Reports the settled question to the remux, once. Set by the remuxer.
+    var onObjectAudioSettled: ((ObjectAudioFinding) -> Void)?
 
     static let initFileName = "init.mp4"
 
@@ -160,24 +169,48 @@ final class AudioRenditionWriter {
         )
     }
 
-    /// Look for the JOC declaration in the first readable E-AC-3 syncframe.
+    /// Look for the JOC declaration in this track's first readable E-AC-3
+    /// syncframes.
     ///
-    /// Stream-copy only, and only when the probe already said this track claims
-    /// object audio — a bridged track's output is the encoder's and carries no
-    /// JOC, so declaring it there would promise Atmos that the bridge destroyed.
+    /// Stream-copy only — a bridged track's output is the encoder's and carries
+    /// no JOC, so declaring it there would promise Atmos the bridge destroyed.
+    ///
+    /// Deliberately **not** gated on the probe's `isObjectAudio`. That flag
+    /// comes from `AVCodecParameters.profile`, which libavformat fills in only
+    /// when `avformat_find_stream_info` happened to decode an audio frame — so
+    /// gating on it meant a real Atmos track whose profile went unset was never
+    /// even asked, its `dec3` shipped without the extension, and it played as
+    /// plain DD+ with nothing anywhere reporting a problem. The bitstream is
+    /// cheap to ask and is the only thing that actually knows.
     private func sniffAtmosIfNeeded(_ packet: UnsafeMutablePointer<AVPacket>) {
         guard !atmosSniffDone, route.mode == .streamCopy,
-              track.isObjectAudio, track.codecName == "eac3",
+              track.codecName == "eac3",
               let data = packet.pointee.data, packet.pointee.size > 0
         else { return }
+        atmosSniffPacketsRead += 1
         let bytes = [UInt8](UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)))
         if let index = EAC3Syncframe.atmosComplexityIndex(in: bytes) {
             atmosComplexityIndex = index
-            atmosSniffDone = true
+            settleAtmos()
+            return
         }
         // A frame that didn't answer leaves the sniff open: the first packet of a
         // stream-copied track can be a partial frame, and the next one usually
-        // isn't.
+        // isn't. The budget is what turns "kept looking" into "there is none" —
+        // without it, a plain DD+ track pays the walk on every packet of a film.
+        if atmosSniffPacketsRead >= Self.atmosSniffPacketBudget { settleAtmos() }
+    }
+
+    /// The question is answered — publish it and stop paying for the walk.
+    private func settleAtmos() {
+        atmosSniffDone = true
+        onObjectAudioSettled?(
+            ObjectAudioFinding(
+                streamIndex: track.streamIndex,
+                complexityIndex: atmosComplexityIndex,
+                claimedByMetadata: track.isObjectAudio
+            )
+        )
     }
 
     /// Rescale onto this rendition's single output stream and mux.

@@ -6,6 +6,40 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.7.0] — 2026-08-12
+
+### Fixed
+
+- **The JOC declaration no longer depends on the container admitting to it.**
+  The syncframe walk that finds `complexity_index_type_a` — the number the
+  `dec3` box needs, and the difference between Atmos and plain DD+ at the
+  speaker — only ran on tracks the probe had already flagged as object audio.
+  That flag is `AVCodecParameters.profile`, which libavformat fills in **only
+  when `avformat_find_stream_info` happened to decode an E-AC-3 frame while
+  sampling**. Nothing guarantees it did, and this engine makes it less likely
+  than most: since 1.2.0 the open is capped at a 4 MB probe and 2 s of
+  analysis (`SourceOpenTuning`), so a UHD remux whose audio is sparsely
+  interleaved can finish analysis without an audio frame ever being decoded.
+  A real Atmos track then reached the muxer unasked, its `dec3` shipped
+  without the extension, and it played as DD+ — silently, since every other
+  part of the pipeline was working as designed.
+
+  The walk now runs on **every stream-copied E-AC-3 track**, whatever the
+  metadata claims, in both output shapes. It is bytes, not decode, and it is
+  bounded: 24 frames (under a second of audio) after which "no JOC" is the
+  answer. Previously an unanswered sniff stayed open for the length of the
+  file. A bridged track is still never asked — the encoder's output carries no
+  JOC and declaring it there would promise Atmos the bridge destroyed.
+
+### Added
+
+- **`PrismCoreSession.objectAudio`** — `[ObjectAudioFinding]`, what the
+  bitstream said, one settled finding per stream-copied E-AC-3 track:
+  `complexityIndex` (nil = asked and answered no), `claimedByMetadata`, and
+  `wasMissedByMetadata` for the disagreement that matters. A host that shows a
+  Dolby Atmos badge can now state a fact rather than repeat
+  `AudioTrackInfo.isObjectAudio`, which remains the container's claim.
+
 ## [1.6.2] — 2026-08-12
 
 ### Changed

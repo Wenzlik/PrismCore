@@ -692,6 +692,50 @@ struct EAC3ConfigurationTests {
         // will use.
         #expect(config.declaresAtmos == false)
         #expect(config.channelCount > 0)
+
+        // The same track, as the session reports it. This is the negative half
+        // of the JOC walk and the reason it can be trusted to run on EVERY
+        // stream-copied E-AC-3 track: asked of a plain DD+ stream, it answers
+        // no rather than inventing a plausible index.
+        let findings = await session.objectAudio
+        let finding = try #require(findings.first, "the eac3 track was never asked")
+        #expect(finding.isObjectAudio == false)
+        #expect(finding.complexityIndex == nil)
+        #expect(finding.claimedByMetadata == false)
+        #expect(finding.wasMissedByMetadata == false)
+    }
+}
+
+/// The finding type's own semantics — small, but the meaning of
+/// `wasMissedByMetadata` is the whole point of publishing it.
+@Suite("Object audio findings")
+struct ObjectAudioFindingTests {
+
+    @Test("A metadata claim the bitstream confirms is not a miss")
+    func confirmedClaim() {
+        let finding = ObjectAudioFinding(
+            streamIndex: 1, complexityIndex: 16, claimedByMetadata: true
+        )
+        #expect(finding.isObjectAudio)
+        #expect(finding.wasMissedByMetadata == false)
+    }
+
+    @Test("Atmos the container never claimed is the case worth reporting")
+    func silentAtmos() {
+        let finding = ObjectAudioFinding(
+            streamIndex: 1, complexityIndex: 16, claimedByMetadata: false
+        )
+        #expect(finding.isObjectAudio)
+        #expect(finding.wasMissedByMetadata)
+    }
+
+    @Test("Asked and answered no — a settled negative, not an absent answer")
+    func settledNegative() {
+        let finding = ObjectAudioFinding(
+            streamIndex: 1, complexityIndex: nil, claimedByMetadata: true
+        )
+        #expect(finding.isObjectAudio == false)
+        #expect(finding.wasMissedByMetadata == false)
     }
 }
 
