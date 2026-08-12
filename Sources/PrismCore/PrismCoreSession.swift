@@ -77,7 +77,10 @@ public actor PrismCoreSession {
     let workDirectory: URL
     private let server: LoopbackHTTPServer
     private let remuxer: HLSRemuxer
-    private var remuxTask: Task<Void, Error>?
+    /// The remux's own thread. Not a `Task`: `run()` blocks in FFmpeg reads and
+    /// parks at EOF, which is a contract violation on the cooperative pool and
+    /// a deadlock once several sessions do it at once (#44, `ProducerThread`).
+    private var producer: ProducerThread?
     private var started = false
 
     /// What the Profile 7 → 8.1 conversion did, or `nil` when this source isn't a
@@ -424,11 +427,11 @@ public actor PrismCoreSession {
         let base = try await server.start()
 
         let remuxer = self.remuxer
-        let task = Task.detached(priority: .userInitiated) {
+        let producer = ProducerThread(name: "cz.zmrhal.prismcore.remux") {
             try remuxer.run()
         }
-        remuxTask = task
-        watchForTerminalError(task)
+        self.producer = producer
+        watchForTerminalError(producer)
 
         let deadline = ContinuousClock.now.advanced(by: startupTimeout)
         while ContinuousClock.now < deadline {
@@ -436,8 +439,16 @@ public actor PrismCoreSession {
                 return base.appendingPathComponent(ready)
             }
             // A remux that already died will never produce the playlist —
-            // surface its error instead of burning the whole timeout.
-            if task.isCancelled { break }
+            // surface its error instead of burning the whole timeout. The
+            // producer's own record is read here rather than `remuxError`: the
+            // watcher that copies it over is a Task, and a startup that fails
+            // in the first millisecond can beat it.
+            if let failure = producer.failureIfAny {
+                throw SessionError.startupTimedOut(underlying: failure)
+            }
+            // Finished without a playlist and without throwing: nothing more is
+            // coming, so don't burn the rest of the timeout waiting for it.
+            if producer.isFinished { break }
             if let remuxError { throw SessionError.startupTimedOut(underlying: remuxError) }
             // 10 ms, not 100: readiness lands ~30 ms after start on a warm
             // source, and a coarser poll was quantizing every startup up to
@@ -450,9 +461,11 @@ public actor PrismCoreSession {
 
     /// Cancel the remux, stop serving, and remove the session's segments.
     public func stop() async {
+        // `cancel()` is the only stop signal the producer has (it also wakes a
+        // parked one); the join then waits for the thread to notice, exactly as
+        // awaiting the task's value used to.
         remuxer.cancel()
-        remuxTask?.cancel()
-        _ = try? await remuxTask?.value
+        await producer?.join()
         await server.stop()
         try? FileManager.default.removeItem(at: workDirectory)
     }
@@ -529,12 +542,11 @@ public actor PrismCoreSession {
         return FileManager.default.fileExists(atPath: initSegment.path)
     }
 
-    private func watchForTerminalError(_ task: Task<Void, Error>) {
+    private func watchForTerminalError(_ producer: ProducerThread) {
         Task { [weak self] in
-            do {
-                try await task.value
-            } catch {
-                await self?.record(error: error)
+            await producer.join()
+            if let failure = producer.failureIfAny {
+                await self?.record(error: failure)
             }
         }
     }

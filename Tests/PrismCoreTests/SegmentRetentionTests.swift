@@ -140,8 +140,11 @@ struct SegmentRetentionTests {
             demand: demand,
             segmentCacheBytes: 1
         )
-        let task = Task.detached { try remuxer.run() }
-        defer { remuxer.cancel(); Task { _ = try? await task.value } }
+        // A real thread, like the session's own: `run()` parks at EOF, and a
+        // parked producer on the cooperative pool is what used to hang the
+        // suite (#44).
+        let producer = ProducerThread(name: "prismcore.tests.retention") { try remuxer.run() }
+        defer { remuxer.cancel(); Task { await producer.join() } }
 
         // Wait until the last planned segment lands (production complete).
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))

@@ -128,6 +128,24 @@ API surface.
   decodes to green-and-purple. Profile 8.x deliberately keeps `hvc1`, because
   its base layer *is* the fallback.
 
+### Threading
+
+- **The producer owns a thread; never put it back on the pool.**
+  `HLSRemuxer.run()` blocks in FFmpeg reads and then parks at EOF for the whole
+  session, so it runs on a `ProducerThread`, not a `Task.detached`. On the
+  cooperative pool it holds a thread for the length of a film, and several
+  sessions at once park enough producers to saturate the pool — at which point
+  the async work that would release them (`stop()`, a demand fetch) cannot run
+  and everything deadlocks. That was a suite hang, once in four runs (#44).
+  Tests that drive `HLSRemuxer` directly use `ProducerThread` for the same
+  reason.
+- **A condition signal needs a state change behind it.** `DemandCoordinator`'s
+  park is woken by `requestProduction` (which sets `requestedAnchor` under the
+  lock) or by `cancel()` — which sets its flag *first* and then calls `wake()`.
+  A bare `wake()` can be lost to a producer that has not yet reached its wait,
+  which is what the one-second backstop in `waitForAnchorRequest` is for: a
+  safety net, not the mechanism.
+
 ### tvOS display handshake (`DisplayCriteriaController`)
 
 - Criteria must be programmed and settled **before** the host loads the

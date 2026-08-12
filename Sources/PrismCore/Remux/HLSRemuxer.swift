@@ -232,11 +232,15 @@ final class HLSRemuxer: @unchecked Sendable {
 
     func cancel() {
         cancelled.set()
+        // A producer parked at EOF is asleep on the coordinator, not spinning —
+        // setting the flag is not enough to get its thread back.
+        demand?.wake()
     }
 
-    /// Runs the whole demux → remux loop synchronously; call on a background
-    /// task. Returns normally on EOF or cancellation, throws on setup/write
-    /// failures.
+    /// Runs the whole demux → remux loop synchronously; call on a **dedicated
+    /// thread**, never a cooperative-pool one: it blocks in FFmpeg reads for as
+    /// long as production takes and parks at EOF for the length of the session.
+    /// Returns normally on EOF or cancellation, throws on setup/write failures.
     func run() throws {
         var input: UnsafeMutablePointer<AVFormatContext>?
 
@@ -973,11 +977,13 @@ final class HLSRemuxer: @unchecked Sendable {
                     idleAnchor = anchor
                     break
                 }
-                // Parked is where a SEEK finds the producer, so this wake
-                // interval is the first hop of seek latency (then production,
-                // then the provider's own poll notices the file). Matched to
-                // the provider's 10 ms cadence.
-                Thread.sleep(forTimeInterval: 0.01)
+                // Parked is where a SEEK finds the producer, so this wait was
+                // the first hop of seek latency. It is now a real block on the
+                // coordinator's condition: the fetch that asks for a segment
+                // signals it, so the hop costs nothing at all, and a parked
+                // producer stops burning a thread's worth of wakeups for the
+                // length of a film (#44).
+                demand?.waitForAnchorRequest(isCancelled: { [cancelled] in cancelled.isSet })
             }
             guard let anchor = idleAnchor else { break produce }
             try reanchor(to: anchor)
