@@ -6,6 +6,34 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.6.2] — 2026-08-12
+
+### Changed
+
+- **The remux runs on a thread of its own, not on the cooperative pool** (#44).
+  `HLSRemuxer.run()` is synchronous by design: it blocks in FFmpeg reads for as
+  long as production takes and then parks at EOF for the rest of the session.
+  Started with `Task.detached`, it therefore held one thread of the global
+  cooperative pool permanently — on an Apple TV, a quarter of the pool for the
+  length of a film — which is a standing violation of the pool's
+  don't-block contract even though the field case is bounded to one session.
+
+  In the test suite it was worse than a violation: enough concurrent sessions
+  park enough producers to saturate the pool, and then the async work that
+  would release them (`stop()`, a demand fetch) can never run. That was a full
+  suite hang, seen once in four runs on 2026-08-10.
+
+  `ProducerThread` gives the producer a real thread and an `async` `join()` —
+  a continuation, not a poll — so `stop()` still waits for the exit exactly as
+  awaiting the task's value did. The suite ran twelve consecutive times clean
+  on this change (was 3 of 4).
+
+  The park loop also stops polling: it blocks on the coordinator's condition
+  and the demand fetch that needs it signals. Worth ~5 ms on the average cold
+  seek — the old interval was 10 ms — so the point is the thread, not the
+  latency. `HLSRemuxer.cancel()` now wakes a parked producer (flag first, then
+  the wake: a condition signal with no state change behind it can be lost).
+
 ## [1.6.1] — 2026-08-12
 
 ### Fixed

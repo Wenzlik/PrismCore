@@ -385,3 +385,80 @@ struct PlannedSubtitleServeTests {
         }
     }
 }
+
+/// The producer's park: a thread that is asleep on the coordinator rather than
+/// polling, and gets woken by the fetch that needs it (#44).
+@Suite("Parked producer")
+struct ParkedProducerTests {
+
+    /// Long enough that a wake can only have come from a signal — the
+    /// coordinator's own backstop is a full second.
+    private static let signalWindow = DispatchTime.now() + .milliseconds(500)
+
+    /// Parks a thread on `coordinator` and hands back a semaphore that is
+    /// signalled when the park returns.
+    private func park(
+        on coordinator: DemandCoordinator,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> DispatchSemaphore {
+        let returned = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            coordinator.waitForAnchorRequest(isCancelled: isCancelled)
+            returned.signal()
+        }
+        thread.start()
+        return returned
+    }
+
+    @Test("A demand fetch wakes the parked producer immediately")
+    func requestWakesThePark() throws {
+        let coordinator = DemandCoordinator()
+        let returned = park(on: coordinator)
+
+        // No handshake needed before requesting: the park re-checks the pending
+        // request under the same lock the request is set behind, so a request
+        // that arrives before the wait is entered is seen, not missed.
+        coordinator.requestProduction(of: 7)
+
+        #expect(returned.wait(timeout: Self.signalWindow) == .success)
+        #expect(coordinator.takeAnchorRequest() == 7)
+    }
+
+    @Test("Cancellation releases the park with no anchor to offer")
+    func cancellationReleasesThePark() throws {
+        let coordinator = DemandCoordinator()
+        let cancelled = LockedFlag()
+        let returned = park(on: coordinator, isCancelled: { cancelled.isSet })
+
+        // The order `HLSRemuxer.cancel()` uses, and the order that makes this
+        // race-free: the flag first, the wake second. A park that hasn't
+        // reached the wait yet sees the flag and never sleeps; one already
+        // asleep is woken. A `wake()` on its own guarantees neither — a
+        // condition signal with no state change behind it can be lost, which
+        // is why nothing calls it that way.
+        cancelled.set()
+        coordinator.wake()
+
+        #expect(returned.wait(timeout: Self.signalWindow) == .success)
+        #expect(coordinator.takeAnchorRequest() == nil)
+    }
+
+    @Test("A producer already told to stop never parks at all")
+    func cancelledProducerDoesNotPark() throws {
+        let coordinator = DemandCoordinator()
+        let returned = park(on: coordinator, isCancelled: { true })
+        #expect(returned.wait(timeout: Self.signalWindow) == .success)
+    }
+
+    @Test("A producer thread carries its failure out and releases every joiner")
+    func producerThreadReportsFailure() async throws {
+        struct Boom: Error {}
+        let producer = ProducerThread(name: "prismcore.tests.producer") { throw Boom() }
+        await producer.join()
+        #expect(producer.isFinished)
+        #expect(producer.failureIfAny is Boom)
+        // A join after the fact resumes rather than hanging — the session's
+        // stop() takes exactly this path when the remux already ended.
+        await producer.join()
+    }
+}
