@@ -56,6 +56,15 @@ API surface.
 
 ### FFmpeg / libavformat
 
+- **`AVCodecParameters.profile` is a claim, not a fact — never gate behaviour
+  on it.** `AV_PROFILE_EAC3_DDP_ATMOS` appears only when
+  `avformat_find_stream_info` happened to decode an E-AC-3 frame while
+  sampling, and `SourceOpenTuning` caps that sampling at 4 MB / 2 s, so a
+  sparsely interleaved UHD remux can analyse clean with the flag unset. The
+  JOC declaration used to be gated on it and silently downgraded real Atmos to
+  DD+; `EAC3Syncframe` reads the bitstream instead, on every stream-copied
+  E-AC-3 track, and `ObjectAudioFinding` publishes what it found. The same
+  caution applies to any other profile-derived verdict.
 - **`avformat_find_stream_info` is not optional, and not just knowledge.** It
   also fills fields the *muxer* needs — an EAC3 track's frame size most
   sharply. A context that skipped it produces a perfectly correct-looking

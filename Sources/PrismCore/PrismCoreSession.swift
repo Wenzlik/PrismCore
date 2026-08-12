@@ -93,6 +93,23 @@ public actor PrismCoreSession {
         remuxer.dolbyVisionConversionStats
     }
 
+    /// What the **bitstream** said about object audio on this session's
+    /// stream-copied E-AC-3 tracks, one finding per track, in stream order.
+    ///
+    /// Empty until the first such track has been asked (a segment's worth of
+    /// packets into production), and it stays empty for a source that has no
+    /// stream-copied E-AC-3 track to ask about. A track that never appears here
+    /// was never a candidate; a track that appears with `isObjectAudio == false`
+    /// was asked and answered no.
+    ///
+    /// Worth surfacing rather than repeating `AudioTrackInfo.isObjectAudio`:
+    /// that flag is the container's claim, and the container is frequently
+    /// silent about JOC. `wasMissedByMetadata` is exactly the case where saying
+    /// "Dolby Atmos" needs this answer instead of that one.
+    public var objectAudio: [ObjectAudioFinding] {
+        remuxer.objectAudioFindings
+    }
+
     /// The remux's terminal error, if it failed after startup. Hosts can poll
     /// this when AVPlayer reports a stalled item.
     public private(set) var remuxError: Error?

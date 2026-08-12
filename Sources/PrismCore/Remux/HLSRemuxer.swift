@@ -173,6 +173,28 @@ final class HLSRemuxer: @unchecked Sendable {
         conversionStatsLock.withLock { storedConversionStats }
     }
 
+    /// Frames a JOC walk may read before "no JOC" is the answer. Shared by both
+    /// output shapes so a source's verdict can't depend on which one carried it.
+    static let atmosSniffPacketBudget = 24
+
+    /// What the bitstream said about object audio, per source stream index —
+    /// written from the producer thread as each track settles, read by the
+    /// session from wherever the host asks.
+    private let objectAudioLock = NSLock()
+    private var storedObjectAudio: [Int: ObjectAudioFinding] = [:]
+
+    /// Settled findings, in stream order. Empty until the first
+    /// stream-copied E-AC-3 track has been asked.
+    var objectAudioFindings: [ObjectAudioFinding] {
+        objectAudioLock.withLock {
+            storedObjectAudio.values.sorted { $0.streamIndex < $1.streamIndex }
+        }
+    }
+
+    func recordObjectAudio(_ finding: ObjectAudioFinding) {
+        objectAudioLock.withLock { storedObjectAudio[finding.streamIndex] = finding }
+    }
+
     /// The display criteria this session wants programmed before AVPlayer
     /// loads its playlist. Known once the probe has run — i.e. from the
     /// moment the playlists exist — and `nil` before that.
@@ -468,6 +490,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     ordinal: ordinal,
                     parent: outputDirectory
                 )
+                rendition.onObjectAudioSettled = { [weak self] finding in
+                    self?.recordObjectAudio(finding)
+                }
                 // One track that can't be set up (a channel layout the EAC3
                 // encoder can't express, say) costs that rendition, not the
                 // session: the other tracks and the picture still play, which
@@ -615,13 +640,17 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
 
-        // The muxed shape's Atmos track, if it has one. Only a stream-copied
-        // E-AC-3 track qualifies: the bridge's output carries no JOC.
+        // The muxed shape's candidate for a JOC declaration: any stream-copied
+        // E-AC-3 track. The bridge's output carries no JOC, so it never
+        // qualifies — but the probe's `isObjectAudio` deliberately does NOT
+        // narrow this (see `AudioRenditionWriter.sniffAtmosIfNeeded`): that flag
+        // is a metadata claim libavformat often cannot make, and gating on it
+        // silently downgraded real Atmos to DD+.
         let muxedAtmosTrack: AudioTrackInfo? = {
             guard case .muxed(let audio) = shape, let audio, audio.mode == .streamCopy
             else { return nil }
             return info.audioTracks.first {
-                $0.streamIndex == Int(audio.index) && $0.isObjectAudio && $0.codecName == "eac3"
+                $0.streamIndex == Int(audio.index) && $0.codecName == "eac3"
             }
         }()
         /// `complexity_index_type_a` read out of the first readable syncframe.
@@ -629,6 +658,10 @@ final class HLSRemuxer: @unchecked Sendable {
         /// first cut mints the moov — by then plenty of audio packets have gone
         /// past, so it is there.
         var muxedAtmosComplexityIndex: Int?
+        /// Frames the walk has read, and whether it has settled — same budget
+        /// and same meaning as the rendition writer's.
+        var muxedAtmosPacketsRead = 0
+        var muxedAtmosSettled = false
 
         // Sources whose VPS/SPS/PPS travel in band ship a 23-byte `hvcC` with no
         // arrays, and FFmpeg then writes an empty box — an `hvc1` entry promising
@@ -889,16 +922,30 @@ final class HLSRemuxer: @unchecked Sendable {
                     continue
                 }
 
-                if let muxedAtmosTrack, muxedAtmosComplexityIndex == nil,
+                if let muxedAtmosTrack, !muxedAtmosSettled,
                    streamIndex == muxedAtmosTrack.streamIndex,
                    let data = packet.pointee.data, packet.pointee.size > 0 {
                     // A partial first frame simply doesn't answer; the next one
-                    // usually does, so the sniff stays open until it succeeds.
+                    // usually does, so the sniff stays open — but only for a
+                    // bounded number of frames, after which "no JOC" is the
+                    // answer rather than a question nobody closed.
+                    muxedAtmosPacketsRead += 1
                     muxedAtmosComplexityIndex = EAC3Syncframe.atmosComplexityIndex(
                         in: [UInt8](
                             UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
                         )
                     )
+                    if muxedAtmosComplexityIndex != nil
+                        || muxedAtmosPacketsRead >= Self.atmosSniffPacketBudget {
+                        muxedAtmosSettled = true
+                        recordObjectAudio(
+                            ObjectAudioFinding(
+                                streamIndex: muxedAtmosTrack.streamIndex,
+                                complexityIndex: muxedAtmosComplexityIndex,
+                                claimedByMetadata: muxedAtmosTrack.isObjectAudio
+                            )
+                        )
+                    }
                 }
 
                 try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
