@@ -6,6 +6,26 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.6.1] — 2026-08-12
+
+### Fixed
+
+- **A cue-less subtitle segment no longer parses as a broken cue.** Every
+  segment ends its header block with a blank line now, whether or not a cue
+  follows. A segment with cues got one for free — each cue was written with a
+  leading newline — but an empty one ended on the `X-TIMESTAMP-MAP` line with
+  the header still open, and AVFoundation then read that line as a cue with no
+  timings: `kFigWebVTTSampleBufferError_CueParseError`, "Couldn't find --> in
+  cue", once per empty segment. Since a rendition is cut on the *video's*
+  boundaries, most of a film's segments carry no dialogue at all, so the error
+  repeated through the whole playback. Reported from a device run on a 3-track
+  MKV.
+
+  The last cue now ends with a blank line too — a cue block closed by EOF is
+  the same hazard in a different place — and a test walks each segment shape as
+  the parser does (split on blank lines; the first block is the header, every
+  other must open with a timing line).
+
 ## [1.6.0] — 2026-08-11
 
 ### Added

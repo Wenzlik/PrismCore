@@ -190,12 +190,45 @@ struct SubtitleConversionTests {
         try writer.finish()
 
         let segment = try String(contentsOf: root.appendingPathComponent("subs0/seg00000.vtt"), encoding: .utf8)
-        #expect(segment == "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n")
+        // The blank line matters: without it the header block never ends and
+        // the parser reads the map line itself as a cue with no timings.
+        #expect(segment == "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n")
 
         let playlist = try String(contentsOf: root.appendingPathComponent("subs0/index.m3u8"), encoding: .utf8)
         #expect(playlist.contains("seg00000.vtt"))
         #expect(playlist.contains("#EXT-X-ENDLIST"))
         // A WebVTT rendition has no init segment to map.
         #expect(!playlist.contains("#EXT-X-MAP"))
+    }
+
+    @Test("Every segment shape parses as blocks: header ended, no cue left open")
+    func everySegmentIsBlockWellFormed() throws {
+        let bodies = [
+            WebVTTRenditionWriter.render(cues: [], mpegtsOffset: 0),
+            WebVTTRenditionWriter.render(
+                cues: [SubtitleCue(start: 1, end: 2, text: "one")], mpegtsOffset: 900_000
+            ),
+            WebVTTRenditionWriter.render(
+                cues: [
+                    SubtitleCue(start: 1, end: 2, text: "one"),
+                    SubtitleCue(start: 3, end: 4, text: "two\nlines"),
+                ],
+                mpegtsOffset: 0
+            ),
+        ]
+
+        for body in bodies {
+            // Blocks are what the parser sees: split on blank lines, the first
+            // is the header and every other one must open with a timing line.
+            // This is the check that would have caught the empty segment whose
+            // map line became a cue.
+            let blocks = body
+                .components(separatedBy: "\n\n")
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            #expect(blocks.first?.hasPrefix("WEBVTT\n") == true)
+            for block in blocks.dropFirst() {
+                #expect(block.split(separator: "\n").first?.contains(" --> ") == true)
+            }
+        }
     }
 }

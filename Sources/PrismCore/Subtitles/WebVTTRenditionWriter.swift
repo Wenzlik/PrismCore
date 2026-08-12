@@ -126,13 +126,25 @@ final class WebVTTRenditionWriter {
     }
 
     /// The WebVTT body for one segment.
+    ///
+    /// The blank line after the timestamp map is **not** cosmetic: it is what
+    /// ends the header block. A segment with cues used to get one for free
+    /// (each cue was written with a leading newline), but a cue-less segment —
+    /// the common case, since a rendition is cut on the video's boundaries and
+    /// most of a film's segments carry no dialogue — ended on the map line with
+    /// the header still open, and the parser then read that line as a cue
+    /// without timings (`kFigWebVTTSampleBufferError_CueParseError`, "Couldn't
+    /// find --> in cue", once per empty segment for the whole playback).
+    /// So the header is terminated here, once, whether or not a cue follows.
     static func render(cues: [SubtitleCue], mpegtsOffset: Int64) -> String {
         var text = "WEBVTT\n"
-        text += "X-TIMESTAMP-MAP=MPEGTS:\(mpegtsOffset),LOCAL:00:00:00.000\n"
+        text += "X-TIMESTAMP-MAP=MPEGTS:\(mpegtsOffset),LOCAL:00:00:00.000\n\n"
         for cue in cues {
-            text += "\n"
             text += "\(webVTTTimestamp(cue.start)) --> \(webVTTTimestamp(cue.end))\n"
-            text += cue.text + "\n"
+            // Every cue ends with its own blank line, so the last one leaves the
+            // file terminated too — a cue block cut off by EOF is the same
+            // parse hazard in a different place.
+            text += cue.text + "\n\n"
         }
         return text
     }
