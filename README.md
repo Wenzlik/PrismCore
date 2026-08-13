@@ -64,7 +64,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC, AC3, EAC3, FLAC, ALAC — bit-for-bit |
 | Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel. Needs an FFmpeg build with the **`eac3` encoder**; without it those sources take the software path instead, which decodes them itself |
-| Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on |
+| Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
 | Subtitles (text) | SubRip / ASS / SSA / WebVTT / mov_text converted during the remux read into segmented WebVTT renditions, cut on the video's own boundaries — so text survives PiP and AirPlay instead of living in a host overlay. External `.srt` / `.vtt` register as first-class renditions |
 | Subtitles (bitmap) | PGS / DVB / DVD read by on-device Vision OCR into the same rendition machinery. Lossy by design — typography dies, text survives — and the raw tracks stay surfaced for a host that wants to draw them pixel-accurately |
 | Seek & cache | Keyframe-aligned segment plan published upfront, demand-driven production with re-anchoring, absolute-`tfdt` continuity across restarts, byte-budgeted retention (1 GiB default; an evicted segment is reproduced on demand, so the budget bounds disk, not seekability) |
@@ -376,8 +376,11 @@ The software path is exercised headless as far as it can be — the VP9 fixture 
 to `CVPixelBuffer`s of the right shape on a monotonic, source-anchored timeline, and
 the pipeline runs demux → decode → stamp → back-pressure → enqueue against renderer
 stand-ins, including the case where a stalled video renderer must not starve audio.
+Audio track switching is proven the same way: the multi-audio fixture's tracks differ
+in channel count (AAC stereo vs AC-3 5.1), so the renderer-side buffers *show* which
+track is playing, and the video assertions show the switch never touched the picture.
 What no headless test can assert is that a frame reached a display. Still open there:
-subtitles, track switching, and frame-accurate seek.
+subtitles (rendering and, with it, subtitle track selection) and frame-accurate seek.
 
 ## Support
 

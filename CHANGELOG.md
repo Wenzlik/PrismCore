@@ -10,6 +10,34 @@ source-compatible.)
 
 ### Added
 
+- **The software pipeline switches audio tracks mid-playback** (#35, the
+  audio half). `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps
+  the audio decoder while the clock and the video renderer stay untouched —
+  the most visible gap between the software path and the remux path, which
+  gets track selection for free from AVPlayer's media selection.
+
+  The order of operations is the design: the new track's decoder is built
+  *before* the old one is torn down, so a track whose decoder can't open
+  leaves the current track playing rather than leaving silence. The demuxer
+  is then rewound to the clock's present — the read cursor runs ahead of the
+  playhead by the queue's look-ahead, and joining the new track there would
+  skip what the listener hasn't heard yet. The rewind re-reads video the
+  renderer already holds; those frames are dropped by timestamp instead of
+  re-enqueued (the renderer sees no flush, no duplicate, no timestamp
+  regression), and the new track's audio from before the playhead is dropped
+  the same way — late while playing, and a stale burst on resume while
+  paused. A source that refuses the rewind (no index) joins at the read
+  position instead: a gap of the look-ahead beats a refused switch.
+
+  Enumeration and publication come with it: `selectableAudioTracks` lists
+  what this build can actually decode (language, title, channel count — the
+  same `AudioTrackInfo` the probe reports), `selectedAudioStreamIndex` is the
+  settled selection for a host's menu checkmark, and `sourceInfo` carries the
+  probe's whole description of the loaded source — subtitle tracks and
+  chapters included — read off the pipeline's own context at `load`. Subtitle
+  track *selection* waits for subtitle rendering to exist in this path at
+  all; the enumeration half is already here.
+
 - **Container chapters surface as API.** A Matroska `Chapters` edition or an
   MP4 chapter track — how films and rips mark their scenes — was read by
   libavformat all along and then dropped on the floor. Now

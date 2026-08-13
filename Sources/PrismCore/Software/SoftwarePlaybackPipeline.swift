@@ -40,11 +40,26 @@ import Libavutil
 /// instead of growing memory — the honest failure. An independent
 /// audio look-ahead cursor is the refinement this shape leaves room for.
 ///
+/// ## Audio track switching
+///
+/// `selectAudioTrack(streamIndex:)` swaps the audio decoder mid-playback,
+/// leaving the clock and the video renderer untouched (issue #35). The new
+/// decoder is built *before* the old one is torn down — a track whose decoder
+/// can't open leaves the current track playing rather than leaving silence —
+/// and the demuxer is then rewound to the clock's present so the new track
+/// starts where the listener is, not where the read cursor had run ahead to.
+/// The rewind re-reads video the renderer already holds; those frames are
+/// dropped by timestamp instead of re-enqueued, which is what keeps the video
+/// path a bystander. On a source that refuses the rewind (no index), the new
+/// track joins at the read position instead — a gap of the queue's look-ahead,
+/// which beats refusing the switch.
+///
 /// ## Not here yet
 ///
 /// Integration with `PrismCoreSession` and the loopback (deliberately out of
 /// scope for this skeleton), deinterlacing for interlaced H.264, subtitle
-/// rendering, track switching, and an exact end-of-playout signal (`.ended`
+/// rendering, subtitle track selection (nothing renders them here yet — see
+/// `sourceInfo` for what exists to select), and an exact end-of-playout signal (`.ended`
 /// fires when the last decoded buffer has been *enqueued*, not when the speaker
 /// has finished it; a host that needs the latter should observe the
 /// synchronizer's boundary time).
@@ -137,6 +152,36 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             .joined(separator: "; ")
     }
 
+    /// The probe's description of the loaded source — the same facts
+    /// `SourceProbe` reports for routing (tracks with language/title/channels,
+    /// chapters, subtitle streams), read off this pipeline's own context at
+    /// `load`. `nil` before `load`.
+    ///
+    /// This is the enumeration half of track selection: a host transport lists
+    /// `sourceInfo.audioTracks` (or `selectableAudioTracks`, already filtered
+    /// to what this build can decode) and drives `selectAudioTrack` with the
+    /// entry's `streamIndex`.
+    public var sourceInfo: SourceInfo? {
+        stateLock.withLock { storedSourceInfo }
+    }
+
+    /// The audio tracks `selectAudioTrack(streamIndex:)` will accept: every
+    /// audio stream this build has a decoder for, in stream order. A track in
+    /// `sourceInfo.audioTracks` but not here exists in the container and cannot
+    /// be played by this build — worth showing disabled, not hiding.
+    public var selectableAudioTracks: [AudioTrackInfo] {
+        stateLock.withLock { storedSelectableAudioTracks }
+    }
+
+    /// The source stream index of the audio track currently feeding the
+    /// renderer — the selection a host's audio menu marks. `nil` when the
+    /// source has no decodable audio (or before `load`).
+    public var selectedAudioStreamIndex: Int? {
+        stateLock.withLock {
+            storedSelectedAudioStreamIndex >= 0 ? Int(storedSelectedAudioStreamIndex) : nil
+        }
+    }
+
     // MARK: - Collaborators
 
     private let videoSink: VideoSampleSink
@@ -154,6 +199,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private let stateLock = NSLock()
     private var storedState: State = .idle
     private var storedDurationSeconds: Double?
+    private var storedSourceInfo: SourceInfo?
+    private var storedSelectableAudioTracks: [AudioTrackInfo] = []
+    /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
+    private var storedSelectedAudioStreamIndex: Int32 = -1
 
     // MARK: - Feed-queue state
 
@@ -169,6 +218,19 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     private var reachedEOF = false
     private var stopped = false
+    /// The newest video PTS handed to the sink — where the renderer's picture
+    /// horizon is. A track switch rewinds the demuxer to the clock's present,
+    /// so the video decoder re-emits frames the renderer already holds; this
+    /// is the watermark that identifies them.
+    private var lastEnqueuedVideoPTS: CMTime = .invalid
+    /// Set by a track switch: drop re-decoded video up to and including this
+    /// PTS (the renderer already has it), cleared once a frame passes it.
+    private var discardVideoUpTo: CMTime = .invalid
+    /// Set by a track switch: drop audio that ends at or before this time —
+    /// the rewind lands on a keyframe *before* the clock's present, and audio
+    /// from that gap would either be dropped late by the renderer (playing) or
+    /// worse, played as a stale burst (paused). Cleared once a buffer crosses it.
+    private var discardAudioBefore: CMTime = .invalid
     /// False until the master clock has been parked on the first decoded
     /// buffer's timestamp. Cleared by a seek, which re-anchors on the first
     /// buffer after it.
@@ -296,12 +358,123 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             audioSink.flush()
             reachedEOF = false
             clockAnchored = false
+            // The renderer's queue is gone with the flush, and any in-flight
+            // track-switch discard is moot — the seek moved the target.
+            lastEnqueuedVideoPTS = .invalid
+            discardVideoUpTo = .invalid
+            discardAudioBefore = .invalid
 
             pump()
             setState(wasPlaying ? .playing : .paused)
             if wasPlaying {
                 timeline.setRate(1, time: anchorTime)
             }
+        }
+    }
+
+    /// Switch the audio to another of the source's tracks, mid-playback,
+    /// without touching the clock or the video renderer (issue #35).
+    ///
+    /// `streamIndex` is the source stream index, i.e.
+    /// `AudioTrackInfo.streamIndex` from `selectableAudioTracks`. Selecting the
+    /// already-playing track is a no-op that still reports success. The switch
+    /// is refused (`completion(false)`) when the pipeline isn't in a playable
+    /// state, the index isn't a selectable audio stream, or the new track's
+    /// decoder fails to open — in every refusal the current track keeps
+    /// playing, because the old decoder is only torn down *after* the new one
+    /// stands.
+    ///
+    /// The audible gap is the seek + decode-to-playhead time, tens of
+    /// milliseconds on a local source; the clock never stops, so A/V sync and
+    /// the picture are unaffected. Works identically while paused — the new
+    /// track is primed at the paused position and plays on `play()`.
+    ///
+    /// - Parameter completion: called on the feed queue with whether the
+    ///   switch happened. Optional — fire-and-forget is fine for a menu tap;
+    ///   read `selectedAudioStreamIndex` for the settled answer.
+    public func selectAudioTrack(
+        streamIndex: Int,
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        feedQueue.async { [self] in
+            guard let input, !stopped, storedStateIsResumable else {
+                completion?(false)
+                return
+            }
+            guard Int32(streamIndex) != audioStreamIndex else {
+                completion?(true)
+                return
+            }
+            guard streamIndex >= 0, streamIndex < Int(input.pointee.nb_streams),
+                  let stream = input.pointee.streams[streamIndex],
+                  stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
+            else {
+                completion?(false)
+                return
+            }
+
+            // New decoder first: a track whose decoder can't open must leave
+            // the current track playing, not playback silent.
+            let newDecoder: SoftwareAudioDecoder
+            do {
+                newDecoder = try SoftwareAudioDecoder(
+                    codecpar: stream.pointee.codecpar,
+                    timeBase: stream.pointee.time_base
+                )
+            } catch {
+                completion?(false)
+                return
+            }
+
+            // Rewind the demuxer to the clock's present so the new track picks
+            // up where the listener is, not where the read cursor had run
+            // ahead to. `.invalid` clock (never anchored) means nothing has
+            // played yet — the read position IS the present, skip the seek.
+            let now = timeline.currentTime
+            var rewound = false
+            if now.isValid {
+                let target = max(0, Int64(CMTimeGetSeconds(now) * Double(AV_TIME_BASE)))
+                rewound = av_seek_frame(input, -1, target, AVSEEK_FLAG_BACKWARD) >= 0
+                // A source with no index can refuse — the new track then joins
+                // at the read position, a gap of the queue's look-ahead. Worse
+                // than seamless, better than refusing the switch.
+            }
+
+            let hadAudio = audioDecoder != nil
+            audioDecoder?.close()
+            audioDecoder = newDecoder
+            audioStreamIndex = Int32(streamIndex)
+            stateLock.withLock { storedSelectedAudioStreamIndex = Int32(streamIndex) }
+            pendingAudio.removeAll()
+            audioSink.flush()
+
+            if rewound {
+                // The rewind re-reads video the renderer already holds: flush
+                // the decoder (its reference chain broke with the seek) and
+                // drop re-decoded frames up to the renderer's horizon, so the
+                // video path never notices the switch happened.
+                videoDecoder?.flushBuffers()
+                pendingVideo.removeAll()
+                discardVideoUpTo = lastEnqueuedVideoPTS
+                // The rewind lands on a keyframe before the present; audio
+                // from that gap is late (playing) or a stale burst on resume
+                // (paused) — drop it here rather than trusting the renderer.
+                discardAudioBefore = now
+                reachedEOF = false
+            }
+
+            if !hadAudio {
+                // The source loaded without a working audio decoder (the best
+                // stream's codec is missing from this build) — the sink was
+                // never attached, so the switch is also the audio bring-up.
+                timeline.attach(audioSink)
+                audioSink.requestSamples(on: feedQueue) { [weak self] in
+                    self?.pump()
+                }
+            }
+
+            pump()
+            completion?(true)
         }
     }
 
@@ -355,6 +528,24 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             stateLock.withLock { storedDurationSeconds = Double(known) / Double(AV_TIME_BASE) }
         }
 
+        // The probe's per-stream description, off this very context — track
+        // menus and chapter markers for the host, plus the enumeration half of
+        // audio selection. No interlace verification: that read consumes
+        // packets, and this context's read position is the playback.
+        if let context {
+            let info = SourceProbe.describe(input: context)
+            let selectable = info.audioTracks.filter { track in
+                guard track.streamIndex < Int(context.pointee.nb_streams),
+                      let stream = context.pointee.streams[track.streamIndex]
+                else { return false }
+                return avcodec_find_decoder(stream.pointee.codecpar.pointee.codec_id) != nil
+            }
+            stateLock.withLock {
+                storedSourceInfo = info
+                storedSelectableAudioTracks = selectable
+            }
+        }
+
         guard let allocated = av_packet_alloc() else {
             throw FFmpegError(code: -1, operation: "av_packet_alloc")
         }
@@ -405,6 +596,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                     timeBase: stream.pointee.time_base
                 )
                 audioStreamIndex = audio
+                stateLock.withLock { storedSelectedAudioStreamIndex = audio }
                 timeline.attach(audioSink)
             } catch {
                 audioDecoder = nil
@@ -472,6 +664,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         while let next = pendingVideo.first, videoSink.isReadyForMoreSamples {
             videoSink.enqueue(next)
             pendingVideo.removeFirst()
+            let pts = CMSampleBufferGetPresentationTimeStamp(next)
+            if pts.isValid, !lastEnqueuedVideoPTS.isValid || pts > lastEnqueuedVideoPTS {
+                lastEnqueuedVideoPTS = pts
+            }
         }
         while let next = pendingAudio.first, audioSink.isReadyForMoreSamples {
             audioSink.enqueue(next)
@@ -505,11 +701,29 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     }
 
     private func acceptVideo(_ sampleBuffer: CMSampleBuffer) throws {
+        // A track switch's rewind re-decodes frames the renderer already
+        // holds; re-enqueuing them would make the video path a participant in
+        // an audio-only operation. Drop up to the watermark, then stand down.
+        if discardVideoUpTo.isValid {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            if pts.isValid, pts <= discardVideoUpTo { return }
+            discardVideoUpTo = .invalid
+        }
         anchorClock(on: sampleBuffer)
         pendingVideo.append(sampleBuffer)
     }
 
     private func acceptAudio(_ sampleBuffer: CMSampleBuffer) throws {
+        // The switch's rewind lands on a keyframe before the clock's present;
+        // the new track's audio from that gap must not reach the renderer
+        // (late while playing, a stale burst on resume while paused).
+        if discardAudioBefore.isValid {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let duration = CMSampleBufferGetDuration(sampleBuffer)
+            let end = duration.isValid ? pts + duration : pts
+            if end.isValid, end <= discardAudioBefore { return }
+            discardAudioBefore = .invalid
+        }
         // Video anchors the clock when there is video: starting the clock at an
         // audio buffer that precedes the first frame (common — audio leads in
         // most interleaves) would put the first frames in the clock's past.
@@ -571,6 +785,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         }
         videoStreamIndex = -1
         audioStreamIndex = -1
+        stateLock.withLock { storedSelectedAudioStreamIndex = -1 }
     }
 
     private func setState(_ newState: State) {
