@@ -6,6 +6,27 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.8.0] — 2026-08-13
+
+### Added
+
+- **Container chapters surface as API.** A Matroska `Chapters` edition or an
+  MP4 chapter track — how films and rips mark their scenes — was read by
+  libavformat all along and then dropped on the floor. Now
+  `SourceInfo.chapters` reports each mark (`ChapterInfo`: title, start, end in
+  seconds, sorted by start), and `PrismCoreSession.chapters` exposes the same
+  list the moment `start()` returns, on the same lifecycle as
+  `displayCriteria`.
+
+  Chapters are navigation metadata, not media: HLS has no way to carry them,
+  so nothing about the served playlist changes and AVPlayer never sees them.
+  They exist for the host's own chrome — timeline markers, a chapter-skip
+  button — which is also why the probe is the right place to read them: both
+  playback paths start from `SourceInfo`, so the software path gets them for
+  free. A declared end that doesn't follow its start reports as `nil` (no
+  end) rather than as a fact, and a negative start (an edition offset) clamps
+  to zero — the playable timeline has no position before it.
+
 ## [1.7.0] — 2026-08-12
 
 ### Fixed
@@ -583,6 +604,10 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.8.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.0
+[1.7.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.7.0
+[1.6.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.2
+[1.6.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.1
 [1.6.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.0
 [1.5.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.5.0
 [1.4.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.4.0
