@@ -110,6 +110,20 @@ public actor PrismCoreSession {
         remuxer.objectAudioFindings
     }
 
+    /// The source's chapter marks (Matroska `Chapters`, MP4 chapter tracks),
+    /// in start order — empty for a source without them.
+    ///
+    /// Populated once the remux has probed the source, so it is ready by the
+    /// time `start()` returns. Chapters are the host's to present: HLS has no
+    /// way to carry them, so nothing about the served playlist changes — this
+    /// is the data behind a chapter-skip button or timeline markers. A host
+    /// that routed via `SourceProbe.open` already holds the same list on
+    /// `ProbedSource.info.chapters` (which is also where the software path
+    /// gets it), and this property merely saves it the bookkeeping.
+    public var chapters: [ChapterInfo] {
+        remuxer.sourceChapters
+    }
+
     /// The remux's terminal error, if it failed after startup. Hosts can poll
     /// this when AVPlayer reports a stalled item.
     public private(set) var remuxError: Error?

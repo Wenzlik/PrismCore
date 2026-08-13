@@ -210,6 +210,16 @@ final class HLSRemuxer: @unchecked Sendable {
         criteriaChoiceLock.withLock { storedCriteriaChoice }
     }
 
+    /// The container's chapter marks, known once the probe has run — the same
+    /// lifecycle as `displayCriteriaChoice`. Written once from the producer
+    /// thread, read from the session's actor, hence the lock.
+    private let chaptersLock = NSLock()
+    private var storedChapters: [ChapterInfo] = []
+
+    var sourceChapters: [ChapterInfo] {
+        chaptersLock.withLock { storedChapters }
+    }
+
     var masterDeclaresDolbyVision: Bool {
         criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision }
     }
@@ -326,6 +336,10 @@ final class HLSRemuxer: @unchecked Sendable {
         // decoded frames and must not be paid twice); otherwise derive it here
         // from our own context.
         let info = adoptedInfo ?? SourceProbe.describe(input: input)
+        // Chapters can't ride the served HLS (the format has no way to carry
+        // them), so the session surfaces them as API instead — publish before
+        // any packet work so they are readable the moment `start()` returns.
+        chaptersLock.withLock { storedChapters = info.chapters }
         guard let videoTrack = info.video else { throw Failure.noVideoStream }
         guard videoTrack.copyability == .streamCopy else {
             throw Failure.videoCodecNotNativelyPlayable(videoTrack.codecName)

@@ -6,6 +6,55 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.8.0] — 2026-08-13
+
+### Added
+
+- **The software pipeline switches audio tracks mid-playback** (#35, the
+  audio half). `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps
+  the audio decoder while the clock and the video renderer stay untouched —
+  the most visible gap between the software path and the remux path, which
+  gets track selection for free from AVPlayer's media selection.
+
+  The order of operations is the design: the new track's decoder is built
+  *before* the old one is torn down, so a track whose decoder can't open
+  leaves the current track playing rather than leaving silence. The demuxer
+  is then rewound to the clock's present — the read cursor runs ahead of the
+  playhead by the queue's look-ahead, and joining the new track there would
+  skip what the listener hasn't heard yet. The rewind re-reads video the
+  renderer already holds; those frames are dropped by timestamp instead of
+  re-enqueued (the renderer sees no flush, no duplicate, no timestamp
+  regression), and the new track's audio from before the playhead is dropped
+  the same way — late while playing, and a stale burst on resume while
+  paused. A source that refuses the rewind (no index) joins at the read
+  position instead: a gap of the look-ahead beats a refused switch.
+
+  Enumeration and publication come with it: `selectableAudioTracks` lists
+  what this build can actually decode (language, title, channel count — the
+  same `AudioTrackInfo` the probe reports), `selectedAudioStreamIndex` is the
+  settled selection for a host's menu checkmark, and `sourceInfo` carries the
+  probe's whole description of the loaded source — subtitle tracks and
+  chapters included — read off the pipeline's own context at `load`. Subtitle
+  track *selection* waits for subtitle rendering to exist in this path at
+  all; the enumeration half is already here.
+
+- **Container chapters surface as API.** A Matroska `Chapters` edition or an
+  MP4 chapter track — how films and rips mark their scenes — was read by
+  libavformat all along and then dropped on the floor. Now
+  `SourceInfo.chapters` reports each mark (`ChapterInfo`: title, start, end in
+  seconds, sorted by start), and `PrismCoreSession.chapters` exposes the same
+  list the moment `start()` returns, on the same lifecycle as
+  `displayCriteria`.
+
+  Chapters are navigation metadata, not media: HLS has no way to carry them,
+  so nothing about the served playlist changes and AVPlayer never sees them.
+  They exist for the host's own chrome — timeline markers, a chapter-skip
+  button — which is also why the probe is the right place to read them: both
+  playback paths start from `SourceInfo`, so the software path gets them for
+  free. A declared end that doesn't follow its start reports as `nil` (no
+  end) rather than as a fact, and a negative start (an edition offset) clamps
+  to zero — the playable timeline has no position before it.
+
 ## [1.7.0] — 2026-08-12
 
 ### Fixed
@@ -583,6 +632,10 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.8.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.0
+[1.7.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.7.0
+[1.6.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.2
+[1.6.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.1
 [1.6.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.0
 [1.5.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.5.0
 [1.4.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.4.0

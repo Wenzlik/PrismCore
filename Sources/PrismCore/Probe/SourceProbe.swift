@@ -401,6 +401,35 @@ public struct SubtitleTrackInfo: Sendable, Equatable {
     public let isHearingImpaired: Bool
 }
 
+/// One chapter mark from the container — a Matroska `Chapters` edition entry
+/// or an MP4 chapter track, both of which libavformat parses into the same
+/// `AVChapter` list.
+///
+/// Chapters are navigation metadata, not media: HLS has no way to carry them,
+/// so they never reach AVPlayer through the served playlist. They are reported
+/// here so a host can draw its own chapter markers and drive its skip
+/// controls — the same facts either playback path can use, since both start
+/// from this probe.
+public struct ChapterInfo: Sendable, Equatable {
+    /// The chapter's display title, `nil` when the container tagged none.
+    public let title: String?
+    /// Start position in seconds on the source's timeline.
+    public let start: Double
+    /// End position in seconds; `nil` when the container declared none (or
+    /// declared one that doesn't follow the start — a chapter cannot honestly
+    /// end before it begins, so a nonsense end reports as "no end" rather
+    /// than as a fact). A host treating chapters as jump points can ignore
+    /// this; one drawing ranges should end an open chapter at the next
+    /// chapter's start, or the source's duration for the last.
+    public let end: Double?
+
+    public init(title: String?, start: Double, end: Double?) {
+        self.title = title
+        self.start = start
+        self.end = end
+    }
+}
+
 /// Everything Aether's engine routing needs to decide PrismCore vs Prism, and
 /// everything `MasterPlaylistBuilder` needs to sign the manifest — read in one
 /// libavformat open.
@@ -415,21 +444,26 @@ public struct SourceInfo: Sendable, Equatable {
     /// reported precisely because PrismCore does *not* carry them (phase 6),
     /// and the host has to know they exist to offer them in its own overlay.
     public let subtitleTracks: [SubtitleTrackInfo]
+    /// The container's chapter marks, in start order. Empty for a source
+    /// without them — most containers — never `nil`.
+    public let chapters: [ChapterInfo]
 
-    /// Explicit so `subtitleTracks` could be added without breaking callers
-    /// that predate it.
+    /// Explicit so `subtitleTracks` (and later `chapters`) could be added
+    /// without breaking callers that predate them.
     public init(
         formatName: String,
         duration: Double?,
         video: VideoTrackInfo?,
         audioTracks: [AudioTrackInfo],
-        subtitleTracks: [SubtitleTrackInfo] = []
+        subtitleTracks: [SubtitleTrackInfo] = [],
+        chapters: [ChapterInfo] = []
     ) {
         self.formatName = formatName
         self.duration = duration
         self.video = video
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
+        self.chapters = chapters
     }
 
     /// Text subtitle tracks PrismCore turns into WebVTT renditions.
@@ -676,8 +710,38 @@ public enum SourceProbe {
             duration: duration,
             video: video,
             audioTracks: audio,
-            subtitleTracks: subtitles
+            subtitleTracks: subtitles,
+            chapters: readChapters(input: input)
         )
+    }
+
+    /// The container's chapter list — `AVChapter`s, which the matroska and mov
+    /// demuxers fill from Matroska `Chapters` and MP4 chapter tracks
+    /// respectively. Each chapter carries its own `time_base`.
+    private static func readChapters(
+        input: UnsafeMutablePointer<AVFormatContext>
+    ) -> [ChapterInfo] {
+        guard input.pointee.nb_chapters > 0, let list = input.pointee.chapters else { return [] }
+        var chapters: [ChapterInfo] = []
+        for index in 0..<Int(input.pointee.nb_chapters) {
+            guard let chapter = list[index] else { continue }
+            let timeBase = av_q2d(chapter.pointee.time_base)
+            // A negative start exists in the wild (an edition offset); the
+            // playable timeline starts at zero, so clamp rather than report a
+            // position no seek can reach.
+            let start = max(0, Double(chapter.pointee.start) * timeBase)
+            let end: Double? = {
+                guard chapter.pointee.end != swift_AV_NOPTS_VALUE() else { return nil }
+                let end = Double(chapter.pointee.end) * timeBase
+                return end > start ? end : nil
+            }()
+            chapters.append(ChapterInfo(
+                title: avMetadataValue(chapter.pointee.metadata, "title"),
+                start: start,
+                end: end
+            ))
+        }
+        return chapters.sorted { $0.start < $1.start }
     }
 
     // MARK: - Per-stream reads
