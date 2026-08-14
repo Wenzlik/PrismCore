@@ -123,9 +123,15 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         timeline.currentTime
     }
 
-    /// Whole-source duration in seconds, `nil` until `load` — and for sources
-    /// whose container honestly doesn't know (live ingests). A host's seek bar
-    /// wants this once, not a stream to observe: it cannot change mid-file.
+    /// Whole-source duration in seconds — **what the pipeline currently
+    /// knows**, not a constant. `nil` until `load`, and possibly for a while
+    /// after: a container can withhold its duration (a Matroska written to a
+    /// pipe carries none, and libavformat does not estimate one for it), in
+    /// which case this becomes non-`nil` the moment the knowledge arrives —
+    /// at the latest on EOF, when the last timestamp read *is* the duration.
+    /// A host that copies this once at load keeps the `nil` forever; re-read
+    /// it alongside the position (#58). Stays `nil` only for sources that
+    /// genuinely have no end (live ingests).
     public var durationSeconds: Double? {
         stateLock.withLock { storedDurationSeconds }
     }
@@ -218,6 +224,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     private var reachedEOF = false
     private var stopped = false
+    /// The furthest packet end (PTS + duration, seconds) the demuxer has seen
+    /// — the duration-of-record for a container that never states one (#58).
+    /// Feed-queue confined, like the rest of the demux state; a seek can only
+    /// lower the current position, never this maximum.
+    private var maxSeenPacketEndSeconds: Double = 0
     /// The newest video PTS handed to the sink — where the renderer's picture
     /// horizon is. A track switch rewinds the demuxer to the clock's present,
     /// so the video decoder re-emits frames the renderer already holds; this
@@ -681,6 +692,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         let readResult = av_read_frame(input, packet)
         if readResult == swift_AVERROR_EOF() {
             reachedEOF = true
+            // A container that never stated its duration has now been read to
+            // the end, and the furthest packet end IS the duration — the one
+            // moment the pipeline can stop answering nil honestly (#58).
+            if maxSeenPacketEndSeconds > 0,
+               stateLock.withLock({ storedDurationSeconds == nil }) {
+                stateLock.withLock { storedDurationSeconds = maxSeenPacketEndSeconds }
+            }
             // Drain the decoders: a frame-threaded decoder holds several frames
             // at EOF, and they are real picture.
             try videoDecoder?.decode(nil, emit: acceptVideo)
@@ -689,6 +707,25 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         }
         try FFmpegError.check(readResult, "av_read_frame")
         defer { av_packet_unref(packet) }
+
+        // The duration is knowledge, not a constant: the header may not have
+        // carried one at `load`, and libavformat can learn it later. While the
+        // answer is still nil, keep looking — one comparison per packet, and
+        // it stops mattering the moment either source of truth lands (#58).
+        if stateLock.withLock({ storedDurationSeconds == nil }) {
+            let known = input.pointee.duration
+            if known != swift_AV_NOPTS_VALUE(), known > 0 {
+                stateLock.withLock { storedDurationSeconds = Double(known) / Double(AV_TIME_BASE) }
+            }
+            let streamIndex = Int(packet.pointee.stream_index)
+            if packet.pointee.pts != swift_AV_NOPTS_VALUE(),
+               streamIndex < Int(input.pointee.nb_streams),
+               let stream = input.pointee.streams[streamIndex] {
+                let end = Double(packet.pointee.pts + max(packet.pointee.duration, 0))
+                    * av_q2d(stream.pointee.time_base)
+                if end > maxSeenPacketEndSeconds { maxSeenPacketEndSeconds = end }
+            }
+        }
 
         switch Int32(packet.pointee.stream_index) {
         case videoStreamIndex:

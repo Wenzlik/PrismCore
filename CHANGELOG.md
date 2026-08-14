@@ -6,6 +6,27 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.8.3] — 2026-08-14
+
+### Fixed
+
+- **The software path's `durationSeconds` is knowledge, not a constant**
+  (#58). It was read once, right after `avformat_find_stream_info`, and a
+  container that withheld its duration at that moment — a Matroska written to
+  a pipe carries none, and libavformat does not estimate one for it — left
+  the host without a timeline for the whole session. While the answer is
+  still `nil`, the demuxer now re-checks the context's duration as packets go
+  by, and at EOF settles it from the furthest packet end it has seen — the
+  one moment "no duration" stops being an honest answer for a finite file.
+  Live ingests keep their `nil`.
+
+  The property's doc comment used to promise the opposite ("wants this once,
+  not a stream to observe"); it now says to re-read alongside the position,
+  which Aether's software route already does. The other two shapes in #58
+  were deliberately not taken: a bitrate-derived estimate can be *wrong*,
+  which is worse for a seek bar than absent, and a change callback adds host
+  API that no host currently needs.
+
 ## [1.8.2] — 2026-08-14
 
 ### Fixed
@@ -693,6 +714,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.8.3]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.3
 [1.8.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.2
 [1.8.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.1
 [1.8.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.0

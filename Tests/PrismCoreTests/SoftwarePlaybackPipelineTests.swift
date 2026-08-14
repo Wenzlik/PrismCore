@@ -227,6 +227,33 @@ struct SoftwarePlaybackPipelineTests {
         #expect(timeline.rate == 0)
     }
 
+    @Test("A duration the container never stated is learned by EOF at the latest")
+    func lateDurationIsLearned() throws {
+        // A Matroska written to a pipe carries no duration element, and
+        // libavformat does not estimate one for it — `ffprobe` answers N/A
+        // even on a local file. Before #58 this pipeline answered nil for the
+        // whole session; a host's seek bar had no timeline and nothing to
+        // wait for.
+        let (pipeline, video, audio, _) = makePipeline()
+        try pipeline.load(url: try fixture("h264_aac_noduration.mkv"))
+        defer { pipeline.stop() }
+        #expect(pipeline.durationSeconds == nil, "the fixture must not know its duration at load")
+
+        pipeline.play()
+        pipeline.waitForFeedQueue()
+        var pulls = 0
+        while pipeline.state != .ended, pulls < 1_000 {
+            video.playOut()
+            audio.playOut()
+            pulls += 1
+        }
+        #expect(pipeline.state == .ended)
+
+        // 2 s of content: the furthest packet end is the duration of record.
+        let learned = try #require(pipeline.durationSeconds)
+        #expect(learned > 1.5 && learned < 2.5, "learned \(learned)s for a 2 s source")
+    }
+
     @Test("Draining to EOF delivers every frame in order and ends")
     func drainsToEndOfStream() throws {
         let (pipeline, video, audio, _) = makePipeline()
