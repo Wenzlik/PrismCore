@@ -20,13 +20,13 @@ final class ProducerThread: @unchecked Sendable {
     /// on when the body is still running.
     private let lock = NSLock()
     private var finished = false
-    private var failure: Error?
+    private var failure: (any Error)?
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     /// Starts `body` immediately on a new thread named `name`.
     init(name: String, body: @escaping @Sendable () throws -> Void) {
         let thread = Thread { [self] in
-            var thrown: Error?
+            var thrown: (any Error)?
             do {
                 try body()
             } catch {
@@ -46,7 +46,7 @@ final class ProducerThread: @unchecked Sendable {
 
     /// The error the body threw, once it has finished. `nil` while it runs and
     /// after a clean exit.
-    var failureIfAny: Error? { lock.withLock { failure } }
+    var failureIfAny: (any Error)? { lock.withLock { failure } }
 
     /// Suspend until the body exits. Resumes immediately if it already has.
     ///
@@ -67,7 +67,7 @@ final class ProducerThread: @unchecked Sendable {
         }
     }
 
-    private func finish(with error: Error?) {
+    private func finish(with error: (any Error)?) {
         let toResume: [CheckedContinuation<Void, Never>] = lock.withLock {
             finished = true
             failure = error

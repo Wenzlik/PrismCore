@@ -752,7 +752,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         }
     }
 
-    private func fail(_ error: Error) {
+    private func fail(_ error: any Error) {
         // A read or decode error ends the session: the renderers keep whatever
         // they were given (so the last second still plays out) and the state
         // tells the host to route elsewhere.
@@ -764,7 +764,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     }
 
     /// The terminal error, if any. Polled by a host that saw `.failed`.
-    public private(set) var failureError: Error?
+    public private(set) var failureError: (any Error)?
 
     // MARK: - Teardown
 

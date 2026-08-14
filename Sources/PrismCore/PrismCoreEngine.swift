@@ -43,7 +43,7 @@ public enum PrismCoreEngine {
     public enum RoutingFailure: Error, CustomStringConvertible {
         /// libavformat couldn't open or describe the source (an expired token, a
         /// proxy that isn't up yet, genuinely unreadable bytes).
-        case probeFailed(underlying: Error)
+        case probeFailed(underlying: any Error)
         /// No video stream at all. PrismCore is a video path; an audio-only
         /// source belongs to whatever the host plays music with.
         case noVideoStream
@@ -53,7 +53,7 @@ public enum PrismCoreEngine {
         case noDecoderForVideo(codecName: String)
         /// The engine started but never produced a playable presentation inside
         /// its startup budget.
-        case startupFailed(underlying: Error)
+        case startupFailed(underlying: any Error)
 
         public var description: String {
             switch self {
