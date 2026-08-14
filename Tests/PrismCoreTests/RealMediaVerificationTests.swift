@@ -136,6 +136,53 @@ struct RealMediaVerificationTests {
         print("(dropped EL NALs = \(result.droppedEnhancementLayerNALs); zero is expected for Matroska)")
     }
 
+    /// Fetch the served init segment, waiting for the producer to mint it.
+    private func fetchInitSegment(base: URL) async throws -> Data {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(60))
+        while ContinuousClock.now < deadline {
+            if let (data, response) = try? await URLSession.shared.data(
+                   from: base.appendingPathComponent("init.mp4")
+               ),
+               (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
+                return data
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        return Data()
+    }
+
+    /// A display that cannot present Dolby Vision must not be served a `dvvC`
+    /// box, however the manifest is written: `hvc1` + `dvvC` is refused by
+    /// AVPlayer's compatibility gate on its own. This is the case the
+    /// master-rejection fallback's DV-less tier lands in, and while it still
+    /// served the record that tier could never win — it bought a second
+    /// identical `-11868` for the price of a whole new session.
+    ///
+    /// Profile 5 is exempt and is skipped here: its record describes an
+    /// IPT-PQc2 picture rather than upgrading a base layer, so stripping it
+    /// would be the green-and-purple misread. Such a source is refused a
+    /// master a level up instead.
+    @Test("a non-DV display is served no Dolby Vision record")
+    func nonDVDisplayGetsNoDVRecord() async throws {
+        let info = try SourceProbe.probe(url: mediaURL)
+        let dv = try #require(
+            info.video?.dolbyVision, "source carries no Dolby Vision — nothing to strip"
+        )
+        try #require(!dv.isSingleLayerDVOnly, "profile 5 keeps its record by design")
+
+        let session = try PrismCoreSession(
+            url: mediaURL,
+            display: DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: false)
+        )
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        let initSegment = try await fetchInitSegment(base: playlist.deletingLastPathComponent())
+        try #require(!initSegment.isEmpty, "no init segment was served")
+        #expect(findBoxPayload("dvvC", in: initSegment) == nil)
+        #expect(findBoxPayload("dvcC", in: initSegment) == nil)
+    }
+
     /// The init segment is what AVPlayer parses, so it is what has to be right:
     /// the `hvcC` in `hvc1` form, the sample entry's fourcc, and the DV record
     /// rewritten to whatever we now claim.
@@ -150,18 +197,7 @@ struct RealMediaVerificationTests {
         defer { Task { await session.stop() } }
 
         let base = playlist.deletingLastPathComponent()
-        var initSegment = Data()
-        let deadline = ContinuousClock.now.advanced(by: .seconds(60))
-        while ContinuousClock.now < deadline, initSegment.isEmpty {
-            if let (data, response) = try? await URLSession.shared.data(
-                   from: base.appendingPathComponent("init.mp4")
-               ),
-               (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
-                initSegment = data
-                break
-            }
-            try await Task.sleep(for: .milliseconds(200))
-        }
+        let initSegment = try await fetchInitSegment(base: base)
         try #require(!initSegment.isEmpty, "no init segment was served")
 
         // hvcC: nothing left to normalize, and the PTL unchanged from the source.

@@ -486,7 +486,10 @@ final class HLSRemuxer: @unchecked Sendable {
                     // Profile 5 stream needs `dvh1` whatever else is true.
                     declaredDolbyVision: outputDolbyVision,
                     // Only a conversion has to replace the source's own record.
-                    rewriteDolbyVisionRecord: dolbyVisionConverter != nil
+                    rewriteDolbyVisionRecord: dolbyVisionConverter != nil,
+                    // A display that cannot present Dolby Vision must not be
+                    // sent a `dvvC` box, whatever the manifest says.
+                    stripDolbyVisionRecord: !displayIsDolbyVisionCapable
                 )
             }
         ]
@@ -1171,7 +1174,8 @@ final class HLSRemuxer: @unchecked Sendable {
         input: UnsafeMutablePointer<AVFormatContext>,
         videoIndex: Int32,
         declaredDolbyVision: DolbyVisionConfiguration?,
-        rewriteDolbyVisionRecord: Bool
+        rewriteDolbyVisionRecord: Bool,
+        stripDolbyVisionRecord: Bool
     ) throws {
         let inStream = input.pointee.streams[Int(videoIndex)]!
         try FFmpegError.check(
@@ -1231,6 +1235,58 @@ final class HLSRemuxer: @unchecked Sendable {
         if rewriteDolbyVisionRecord, let declaredDolbyVision {
             try Self.setDolbyVisionConfiguration(declaredDolbyVision, on: par)
         }
+
+        // Dropping the manifest's Dolby Vision claim is only half of dropping
+        // Dolby Vision. `avcodec_parameters_copy` brought the source's
+        // `AV_PKT_DATA_DOVI_CONF` across, movenc writes it into the sample
+        // entry as a `dvvC` box, and a `hvc1` entry carrying a `dvvC` is
+        // refused by AVPlayer's compatibility gate **on its own** — with or
+        // without a `SUPPLEMENTAL-CODECS` attribute in the manifest.
+        //
+        // That made the master-rejection fallback's first tier unwinnable for
+        // every Dolby Vision source. The tier exists to retry without the DV
+        // claim; it re-served the same `dvvC`, was refused for the same reason,
+        // and its whole cost — a new session, which over a network means
+        // reopening and reprobing the source and producing its first segments
+        // again, ~6.4 s in one field log — bought a second identical `-11868`
+        // before the muxed tier finally played.
+        //
+        // Only ever for a profile with a real base layer. Profile 5's picture
+        // is IPT-PQc2 and the record is what says so: strip it there and the
+        // green-and-purple misread is what plays. P5 on a non-DV display is
+        // already handled a level up, by refusing to build a master at all.
+        if Self.shouldStripDolbyVisionRecord(
+            declared: declaredDolbyVision, displayIsDolbyVisionCapable: !stripDolbyVisionRecord
+        ) {
+            av_packet_side_data_remove(
+                par.pointee.coded_side_data,
+                &par.pointee.nb_coded_side_data,
+                AV_PKT_DATA_DOVI_CONF
+            )
+        }
+    }
+
+    /// Whether the served sample entry must carry **no** `dvvC`/`dvcC` box.
+    ///
+    /// Pure, and separate from the muxer plumbing above, because the rule is
+    /// what is worth pinning: the byte-level effect needs a real Dolby Vision
+    /// source (ffmpeg cannot synthesize an RPU, hence `RealMediaVerification`),
+    /// while the decision is three cases that must not drift.
+    ///
+    /// - A DV-capable display keeps the record: it is what engages DV.
+    /// - Profile 5 keeps it on any display, because for P5 the record is not an
+    ///   upgrade but the *description* — its picture is IPT-PQc2, and an entry
+    ///   that omits the record has it read as YCbCr (the green-and-purple
+    ///   misread). P5 on a non-DV display is refused a master a level up
+    ///   instead, which is the honest answer there.
+    /// - Everything else — a base-layer-compatible profile going to a display
+    ///   that cannot present DV — is stripped, so the sample entry matches a
+    ///   manifest that is no longer claiming DV.
+    static func shouldStripDolbyVisionRecord(
+        declared: DolbyVisionConfiguration?, displayIsDolbyVisionCapable: Bool
+    ) -> Bool {
+        guard let declared, !displayIsDolbyVisionCapable else { return false }
+        return !declared.isSingleLayerDVOnly
     }
 
     /// A big-endian fourcc as libavcodec's `codec_tag` wants it: first character
