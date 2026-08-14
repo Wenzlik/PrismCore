@@ -508,7 +508,7 @@ public struct SourceInfo: Sendable, Equatable {
 public enum SourceProbe {
 
     public enum Failure: Error {
-        case openFailed(Error)
+        case openFailed(any Error)
         case noStreams
     }
 

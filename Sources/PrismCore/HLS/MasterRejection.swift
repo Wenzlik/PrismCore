@@ -42,7 +42,7 @@ public enum MasterRejection {
     /// `AVPlayerItem.error` is typically an `AVFoundationErrorDomain` wrapper
     /// whose underlying error carries the real reason, and checking only the
     /// outer layer misses most real rejections.
-    public static func matches(_ error: Error?) -> Bool {
+    public static func matches(_ error: (any Error)?) -> Bool {
         guard let error else { return false }
         var next: NSError? = error as NSError
         // Bounded rather than `while let`: an underlying-error chain is

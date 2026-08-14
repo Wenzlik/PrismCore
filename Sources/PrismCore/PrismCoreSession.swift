@@ -46,7 +46,7 @@ public actor PrismCoreSession {
 
     public enum SessionError: Error {
         /// The remux produced no playable playlist within the startup budget.
-        case startupTimedOut(underlying: Error?)
+        case startupTimedOut(underlying: (any Error)?)
         /// A registration call that only makes sense before `start()` arrived
         /// after it. Silently ignoring it would leave a subtitle track the host
         /// believes exists but that no rendition backs.
@@ -126,7 +126,7 @@ public actor PrismCoreSession {
 
     /// The remux's terminal error, if it failed after startup. Hosts can poll
     /// this when AVPlayer reports a stalled item.
-    public private(set) var remuxError: Error?
+    public private(set) var remuxError: (any Error)?
 
     /// The display criteria to program before AVPlayer loads this session's
     /// playlist — step 1 of the tvOS playback contract (see the type doc).
@@ -289,7 +289,7 @@ public actor PrismCoreSession {
     /// A host that gets `true` should stop this session, take
     /// `makeMuxedFallbackSession()`, and play that — *not* fall back to another
     /// engine, because the source itself was never the problem.
-    public static func isMasterRejection(_ error: Error?) -> Bool {
+    public static func isMasterRejection(_ error: (any Error)?) -> Bool {
         MasterRejection.matches(error)
     }
 
@@ -582,7 +582,7 @@ public actor PrismCoreSession {
         }
     }
 
-    private func record(error: Error) {
+    private func record(error: any Error) {
         remuxError = error
     }
 }
