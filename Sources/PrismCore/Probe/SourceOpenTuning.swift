@@ -30,6 +30,18 @@ public enum SourceOpenTuning {
     /// being clever about).
     public static let analyzeDurationMicroseconds = 2_000_000
 
+    /// How long a probe may spend before it answers with an error instead.
+    ///
+    /// A probe with no deadline is a playback with no fallback: a server that
+    /// accepts the connection and then starves the reads (busy transcoding,
+    /// sleeping disk) left the host with neither a verdict nor an error — the
+    /// 2026-08-14 field log shows five play attempts over four minutes with
+    /// no line from the engine at all, because `avformat_open_input` was
+    /// still blocked on the first. Generous on purpose: a healthy probe over
+    /// LAN answers in well under a second, so the budget only ever cuts off
+    /// sources that were not going to answer.
+    public static let probeBudget: Duration = .seconds(10)
+
     /// The options every open should carry: the caller's HTTP headers, the
     /// reconnect policy the demux side needs, and the caps above.
     ///

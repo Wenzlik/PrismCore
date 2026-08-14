@@ -6,6 +6,38 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.8.2] — 2026-08-14
+
+### Fixed
+
+- **A probe answers within a budget, or it answers with an error.** A server
+  that accepts the connection and then starves the reads (busy transcoding, a
+  sleeping disk) left the host with neither a verdict nor an error — an
+  Apple TV field log from 2026-08-14 shows five play attempts over four
+  minutes with no line from the engine at all, every one blocked inside
+  `avformat_open_input`. The probe's `ReadInterruptGuard` (installed at open
+  since 1.3.1, but resting disarmed) is now armed across the whole probe —
+  open, stream analysis, interlace verification — with a 10 s budget
+  (`SourceOpenTuning.probeBudget`, overridable per call). On expiry the probe
+  throws, which is what lets the host fall back to the server stream instead
+  of silence. The remuxer's fallback open is bounded the same way.
+
+  Two traps the implementation records: `avformat_find_stream_info`
+  *swallows* aborted reads and returns success with half-filled parameters
+  (the expiry has to be checked on the clock, not the return code — a
+  half-analysed context handed onward is 1.1.2's muxing failure wearing a
+  verdict), and a budget that expires during the interlace verification
+  degrades gracefully but latches `AVERROR_EXIT` in the `AVIOContext`, which
+  is cleared so the adopting producer's first read isn't the one that pays.
+
+### Added
+
+- **`ProbedSource.timing`** — where the probe's time went (`open`,
+  `streamInfo`, `describe`), for the host's log line or telemetry. Exists
+  because a 5.7 s probe on a device and a 135 ms probe on the bench were the
+  same code, and without the phases there is nothing to argue about but
+  intuition.
+
 ## [1.8.1] — 2026-08-14
 
 ### Fixed
@@ -661,6 +693,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.8.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.2
+[1.8.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.1
 [1.8.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.0
 [1.7.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.7.0
 [1.6.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.6.2
