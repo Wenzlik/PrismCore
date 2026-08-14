@@ -78,11 +78,16 @@ API surface.
   `s->interrupt_callback` directly — *not* the blocking reads. 1.1.1's bounded
   index-load seek made exactly this mistake and bounded nothing; since 1.3.1
   every open site installs a permanent, disarmed `ReadInterruptGuard` at
-  `avformat_alloc_context` time and arms it only around the seek. Two
-  corollaries: the guard must travel with an adopted context (`ProbedSource`
-  carries it), and an aborted read latches `AVERROR_EXIT` in
+  `avformat_alloc_context` time, armed around the bounded operations — the
+  index-load seek, thumbnail seeks, and (since 1.8.2) the whole probe and the
+  remuxer's fallback open, because a server that accepts and then starves the
+  reads had left the host with neither a verdict nor an error for minutes.
+  Three corollaries: the guard must travel with an adopted context
+  (`ProbedSource` carries it); an aborted read latches `AVERROR_EXIT` in
   `AVIOContext.error`, which has to be cleared before the context can read
-  again.
+  again; and `avformat_find_stream_info` SWALLOWS aborted reads — cut off
+  mid-analysis it returns success with half-filled parameters, so an expired
+  budget has to be checked on the clock, not inferred from the return code.
 - **Container-level aspect ratio lives on `AVStream.sample_aspect_ratio`**, not
   in codecpar. An MKV's `DisplayWidth`/`Height` — how anamorphic DVD rips are
   tagged — is dropped by a codecpar-only copy. FFmpeg's *own* hls demuxer has

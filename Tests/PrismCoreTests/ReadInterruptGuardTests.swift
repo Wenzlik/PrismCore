@@ -51,6 +51,65 @@ struct ReadInterruptGuardTests {
         )
     }
 
+    @Test("A probe against a starved server answers with an error, not silence")
+    func starvedProbeThrowsWithinBudget() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "h264_aac_30s", withExtension: "mkv", subdirectory: "Fixtures"
+        ))
+        // A prefix that accepts the connection and then starves the open
+        // itself — the shape of a server that is busy transcoding: reachable,
+        // answering headers, feeding nothing. This is the 2026-08-14 field
+        // case, where the probe's silence left the host with five play
+        // attempts and no fallback for four minutes. (16 KB was tried first
+        // and the probe SUCCEEDED from it — a Matroska header self-describes
+        // — which is why the prefix has to strangle the open, not the
+        // analysis.)
+        let server = try StallingHTTPServer(
+            data: Data(contentsOf: fixture), servedPrefixBytes: 2 << 10
+        )
+        defer { server.stop() }
+        let url = try #require(URL(string: "http://127.0.0.1:\(server.port)/starved.mkv"))
+
+        let started = ContinuousClock.now
+        enum Outcome { case answered(Result<ProbedSource, any Error>), timedOut }
+        let outcome = await withTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                .answered(Result { try SourceProbe.open(url: url, budget: .milliseconds(500)) })
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(20))
+                return .timedOut
+            }
+            let first = await group.next() ?? .timedOut
+            group.cancelAll()
+            return first
+        }
+
+        guard case .answered(let result) = outcome else {
+            Issue.record("the probe never answered — the budget is not reaching the blocking reads")
+            return
+        }
+        let elapsed = started.duration(to: .now)
+        #expect(elapsed < .seconds(10), "answering took \(elapsed) against a 0.5 s budget")
+        // The answer must be an ERROR — a half-analysed context that
+        // pretended to be a verdict is how 1.1.2's shortcut broke muxing.
+        #expect(throws: (any Error).self) { _ = try result.get() }
+    }
+
+    @Test("The probe reports where its time went")
+    func probeTimingIsPopulated() throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "h264_aac", withExtension: "mkv", subdirectory: "Fixtures"
+        ))
+        let probed = try SourceProbe.open(url: fixture)
+        // Zero is a legitimate duration for a warm local file; negative or
+        // wildly long means the phase boundaries are wrong.
+        #expect(probed.timing.open >= .zero)
+        #expect(probed.timing.streamInfo >= .zero)
+        #expect(probed.timing.describe >= .zero)
+        #expect(probed.timing.total < .seconds(10))
+    }
+
     @Test("A stalled transport cannot eat more than the index-load budget")
     func stalledIndexLoadAborts() async throws {
         let fixture = try #require(Bundle.module.url(

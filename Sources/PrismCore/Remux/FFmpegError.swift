@@ -60,3 +60,11 @@ func swift_AVERROR_EOF() -> Int32 {
         | (Int32(UInt8(ascii: "F")) << 16) | (Int32(UInt8(ascii: " ")) << 24)
     return -tag
 }
+
+/// `AVERROR_EXIT` — `FFERRTAG('E','X','I','T')` negated: what an interrupted
+/// read returns, and what a bounded probe reports when its budget ran out.
+func swift_AVERROR_EXIT() -> Int32 {
+    let tag = (Int32(UInt8(ascii: "E"))) | (Int32(UInt8(ascii: "X")) << 8)
+        | (Int32(UInt8(ascii: "I")) << 16) | (Int32(UInt8(ascii: "T")) << 24)
+    return -tag
+}

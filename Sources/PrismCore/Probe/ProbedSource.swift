@@ -26,6 +26,21 @@ import Libavformat
 /// deliberately does not make it so. The handover is a *move* across threads —
 /// the probing side must be finished with it, which consuming it exactly once
 /// enforces structurally — not a share.
+/// The probe's cost, phase by phase. Each phase blocks on the transport, so
+/// on a network source these are transport numbers, not CPU numbers.
+public struct ProbeTiming: Sendable, Equatable {
+    /// `avformat_open_input`: connect + container header.
+    public let open: Duration
+    /// `avformat_find_stream_info`: the bounded stream analysis.
+    public let streamInfo: Duration
+    /// Per-stream description, including the interlace verification when it
+    /// ran — the phase that DECODES, so a declared-interlaced H.264 source
+    /// pays for real packets here.
+    public let describe: Duration
+
+    public var total: Duration { open + streamInfo + describe }
+}
+
 public final class ProbedSource: @unchecked Sendable {
 
     /// What the probe found. Safe to read after the context has been consumed:
@@ -45,6 +60,12 @@ public final class ProbedSource: @unchecked Sendable {
     /// whole `ProbedSource`) guarantees.
     let interruptGuard: ReadInterruptGuard
 
+    /// Where the probe's time went — for the host's log line or telemetry.
+    /// Exists because a 5.7 s probe on a device and a 135 ms probe on the
+    /// bench were the same code, and without the phases there was nothing to
+    /// argue about but intuition.
+    public let timing: ProbeTiming
+
     private let lock = NSLock()
     private var context: UnsafeMutablePointer<AVFormatContext>?
 
@@ -53,13 +74,15 @@ public final class ProbedSource: @unchecked Sendable {
         url: URL,
         httpHeaders: [String: String],
         context: UnsafeMutablePointer<AVFormatContext>,
-        interruptGuard: ReadInterruptGuard
+        interruptGuard: ReadInterruptGuard,
+        timing: ProbeTiming
     ) {
         self.info = info
         self.url = url
         self.httpHeaders = httpHeaders
         self.context = context
         self.interruptGuard = interruptGuard
+        self.timing = timing
     }
 
     /// Take the open context, transferring ownership. Returns `nil` on every

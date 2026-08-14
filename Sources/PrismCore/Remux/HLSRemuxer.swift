@@ -309,6 +309,12 @@ final class HLSRemuxer: @unchecked Sendable {
 
             interruptGuard = ReadInterruptGuard()
             input = interruptGuard.makeContext()
+            // Bounded like the probe's open, and for the same reason: a
+            // server that accepts and then starves the reads would otherwise
+            // pin this producer forever — the session's startup timeout fires,
+            // but the blocked thread never comes back. On expiry the open
+            // throws and the session surfaces a startup error instead.
+            interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
             let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
             try FFmpegError.check(
                 avformat_open_input(&input, sourceSpec, nil, &openOptions),
@@ -318,6 +324,7 @@ final class HLSRemuxer: @unchecked Sendable {
             try FFmpegError.check(
                 avformat_find_stream_info(opened, nil), "avformat_find_stream_info"
             )
+            interruptGuard.disarm()
             adoptedInfo = nil
         }
         // Ours to close either way now: a consumed `ProbedSource` has given up

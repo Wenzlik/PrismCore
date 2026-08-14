@@ -579,7 +579,17 @@ public enum SourceProbe {
     /// context. A source that routes elsewhere simply releases it — see
     /// `ProbedSource` for why the context, and not merely its conclusions, is
     /// what has to travel.
-    public static func open(url: URL, httpHeaders: [String: String] = [:]) throws -> ProbedSource {
+    /// - Parameter budget: wall-clock bound on the WHOLE probe — open, stream
+    ///   analysis, interlace verification. On expiry the blocked read aborts
+    ///   and this throws, which is the property the router depends on: a
+    ///   probe that answers nothing is a playback that falls back to nothing
+    ///   (five silent play attempts over four minutes in the 2026-08-14
+    ///   field log, all blocked inside one open against a starved server).
+    public static func open(
+        url: URL,
+        httpHeaders: [String: String] = [:],
+        budget: Duration = SourceOpenTuning.probeBudget
+    ) throws -> ProbedSource {
         // The interrupt guard has to exist BEFORE the open — the blocking
         // reads check the URLContext's copy of the callback, taken at
         // creation — and this open is the one that decides whether the
@@ -587,6 +597,13 @@ public enum SourceProbe {
         // inherits this very context (see `ReadInterruptGuard`).
         let interruptGuard = ReadInterruptGuard()
         var input: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
+
+        // Armed across the whole probe, disarmed on every way out — the
+        // adopting producer wants the permanent-but-disarmed resting state.
+        interruptGuard.arm(budget: budget)
+        defer { interruptGuard.disarm() }
+        let clock = ContinuousClock()
+        let probeStart = clock.now
 
         // Same open pattern as HLSRemuxer: the caller's headers (Plex token,
         // WebDAV authorization) travel on the probe connection too, otherwise
@@ -606,6 +623,7 @@ public enum SourceProbe {
             throw Failure.openFailed(error)
         }
         guard let input else { throw Failure.noStreams }
+        let openedAt = clock.now
         // From here the context is owned by the `ProbedSource` we return; on
         // the throwing paths below it has no owner yet, so close it by hand.
         func closeAndThrow(_ failure: any Error) -> any Error {
@@ -630,6 +648,17 @@ public enum SourceProbe {
         } catch {
             throw closeAndThrow(error)
         }
+        // `find_stream_info` swallows aborted reads: cut off mid-analysis it
+        // returns success with half-filled parameters, and a half-analysed
+        // context handed onward is 1.1.2's muxing failure wearing a verdict.
+        // The clock is the honest witness — still-armed and expired means the
+        // analysis cannot be trusted, whatever it returned.
+        if interruptGuard.shouldInterrupt {
+            throw closeAndThrow(Failure.openFailed(
+                FFmpegError(code: swift_AVERROR_EXIT(), operation: "probe budget exhausted")
+            ))
+        }
+        let analyzedAt = clock.now
 
         // The interlace verification consumes packets, which is why it was
         // only ever safe on a one-shot context. It still is: the read position
@@ -637,9 +666,25 @@ public enum SourceProbe {
         // own start anyway), and the verdict is worth far more than the rewind
         // costs.
         let info = describe(input: input, verifyingInterlace: true)
+        let describedAt = clock.now
+
+        // A budget that expired mid-verification latched AVERROR_EXIT in the
+        // AVIOContext, and the adopting producer's first read would get it
+        // verbatim. The verification itself degraded gracefully (an aborted
+        // read just ends it early), so the verdict stands — only the latch
+        // must not travel.
+        if let pb = input.pointee.pb, pb.pointee.error < 0 {
+            pb.pointee.error = 0
+        }
+
         return ProbedSource(
             info: info, url: url, httpHeaders: httpHeaders,
-            context: input, interruptGuard: interruptGuard
+            context: input, interruptGuard: interruptGuard,
+            timing: ProbeTiming(
+                open: probeStart.duration(to: openedAt),
+                streamInfo: openedAt.duration(to: analyzedAt),
+                describe: analyzedAt.duration(to: describedAt)
+            )
         )
     }
 
