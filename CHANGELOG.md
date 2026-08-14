@@ -6,7 +6,7 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
-## [Unreleased]
+## [1.8.1] — 2026-08-14
 
 ### Fixed
 
