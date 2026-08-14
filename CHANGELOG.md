@@ -6,6 +6,35 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [Unreleased]
+
+### Fixed
+
+- **The master-rejection fallback's DV-less tier can now actually win.**
+  Dropping the manifest's Dolby Vision claim was only half of dropping Dolby
+  Vision: `avcodec_parameters_copy` carries the source's
+  `AV_PKT_DATA_DOVI_CONF` across, movenc writes it into the sample entry as a
+  `dvvC` box, and a `hvc1` entry carrying a `dvvC` is refused by AVPlayer's
+  compatibility gate **on its own** — no `SUPPLEMENTAL-CODECS` attribute
+  required. So the tier that exists to retry without the claim re-served the
+  exact byte that caused the refusal, and could never succeed for a Dolby
+  Vision source. It was not merely useless: a tier is a whole new session, and
+  over a network that means reopening the source, reprobing it and producing
+  its first segments again. In a host's field log (2026-08-14, HEVC/DV episode
+  over a WAN Plex server) the doomed tier cost 6.4 s of a 21 s time-to-picture,
+  and every play of that title paid it before the muxed tier played.
+
+  A display that cannot present Dolby Vision is now served no DV record at all.
+  Profile 5 is exempt on purpose and keeps its record on any display: there the
+  record is not an upgrade over a base layer but the *description* of an
+  IPT-PQc2 picture, and an entry without it has that picture read as YCbCr —
+  the green-and-purple misread. P5 on a non-DV display is refused a master a
+  level up instead, which is unchanged.
+
+  The rule is pinned by unit tests (`HLSRemuxer.shouldStripDolbyVisionRecord`);
+  the byte-level effect is asserted in `RealMediaVerification`, which needs a
+  real DV source because ffmpeg cannot synthesize an RPU.
+
 ## [1.8.0] — 2026-08-13
 
 ### Added

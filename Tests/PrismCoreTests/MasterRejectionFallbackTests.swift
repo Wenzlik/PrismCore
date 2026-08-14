@@ -76,6 +76,46 @@ struct MasterRejectionFallbackTests {
         ))
     }
 
+    // MARK: - The other half of dropping the claim
+
+    /// Dropping the manifest's claim is not dropping Dolby Vision: the sample
+    /// entry's `dvvC` box is refused by AVPlayer's compatibility gate on its
+    /// own, so a tier that re-serves it cannot win. Before this rule the
+    /// DV-less retry was unwinnable by construction for every DV source — it
+    /// paid a whole new session (reopen, reprobe, produce) to earn a second
+    /// identical `-11868`.
+    @Test("the DV-less tier strips the record, not just the claim")
+    func retryStripsTheRecord() {
+        #expect(HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile81(), displayIsDolbyVisionCapable: false
+        ))
+    }
+
+    @Test("a DV display keeps the record — it is what engages Dolby Vision")
+    func capableDisplayKeepsTheRecord() {
+        #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile81(), displayIsDolbyVisionCapable: true
+        ))
+    }
+
+    /// P5's record is not an upgrade over a base layer, it is the description
+    /// of a picture that has no base layer at all. Strip it and IPT-PQc2 is
+    /// read as YCbCr — the green-and-purple misread. A non-DV display is
+    /// refused a master a level up instead.
+    @Test("profile 5 keeps its record on any display")
+    func profile5NeverStripped() {
+        #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile5(), displayIsDolbyVisionCapable: false
+        ))
+    }
+
+    @Test("no Dolby Vision, nothing to strip")
+    func plainSourceIsUntouched() {
+        #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: nil, displayIsDolbyVisionCapable: false
+        ))
+    }
+
     // MARK: - The factory (end to end, no DV claim to drop)
 
     @Test("a master with no DV claim falls straight to the muxed shape")
