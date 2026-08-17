@@ -6,6 +6,48 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.8.4] — 2026-08-17
+
+### Fixed
+
+- **A mangled tag can no longer smuggle `-->` into a WebVTT cue.** The
+  sanitizer's tag scanner validated only the *name prefix* of a candidate tag
+  and emitted the rest verbatim — so `<i-->` (a typo'd italic close, the kind
+  of thing real SRT files carry) passed as a legal `<i…>` tag whose inner `--`
+  composed `-->` with the closing bracket. `-->` may never appear in a cue
+  payload: it reads as a timing arrow and ends the cue early. A tag whose
+  inner ends in `--` is now rejected, which routes the `<` to `&lt;` and the
+  arrow to the existing `--&gt;` neutralizer. Found by the new fuzz harness
+  within its first minute of mutation (`hunt text-subtitles`).
+
+### Added
+
+- **A fuzz harness for the hand-written bitstream parsers** — the JOC
+  syncframe walk, `dec3` parse + patch, HEVC NAL framing/rewrite, `hvcC`
+  normalization, the ISO-BMFF box splice, and the text-subtitle pipeline. All
+  of them read untrusted media, and none of them is FFmpeg's code, so none is
+  covered by FFmpeg's fuzzing. Three layers, one target table
+  (`FuzzTargets`, with invariants beyond "no crash": rewrite round-trips,
+  normalize idempotence, splice re-locatability, WebVTT safety):
+  - `FuzzSmokeTests` runs in every CI build — a few thousand deterministic
+    mutations of known-valid seeds per parser, sub-second total, every
+    failure reproducible by construction;
+  - `prismcore-fuzz hunt` mutates for as long as you give it (found the
+    `-->` escape above in under a minute);
+  - `prismcore-fuzz run` replays saved crash inputs, and a libFuzzer build
+    shape exists for coverage-guided runs on a swift.org toolchain — Xcode's
+    toolchain ships no fuzzer runtime (see AGENTS.md "Fuzzing").
+
+- **#52's file-URL question is measured, and the answer is no.** An
+  `AVPlayerItem` pointed at a *completed* session's `file://` master — or at
+  the media playlist directly — never leaves `.unknown`: no `.failed`, no
+  `error`, no error log, evaluation simply never starts (macOS 26 beta). The
+  hoped-for no-listener mode for sandboxed hosts is therefore not designable
+  today, and `LoopbackHTTPServer` stays load-bearing even for fully produced
+  output. `FileHLSPlaybackTests` pins the fact and is written to fail loudly
+  the day an OS starts evaluating file-URL HLS — that failure would mean
+  reopening #52, not a regression.
+
 ## [1.8.3] — 2026-08-14
 
 ### Fixed
@@ -714,6 +756,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.8.4]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.4
 [1.8.3]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.3
 [1.8.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.2
 [1.8.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.1

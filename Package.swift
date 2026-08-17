@@ -32,6 +32,13 @@ let package = Package(
                 .swiftLanguageMode(.v5),
             ]
         ),
+        .executableTarget(
+            name: "prismcore-fuzz",
+            dependencies: ["PrismCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+            ]
+        ),
         .testTarget(
             name: "PrismCoreTests",
             dependencies: ["PrismCore"],
