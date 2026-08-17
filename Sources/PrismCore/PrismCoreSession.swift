@@ -89,6 +89,14 @@ public actor PrismCoreSession {
     ///
     /// Worth logging rather than ignoring: `isClean` false means the master's
     /// `dvh1.08.xx/db1p` claim doesn't describe every frame.
+    /// Total compressed bytes the remux has read from the SOURCE — the number
+    /// behind an honest "network" figure for a session played off this
+    /// engine's loopback server, where AVFoundation's own access log can only
+    /// see the loopback. Monotonic from session start; differentiate between
+    /// two reads to get a rate. Slightly under the wire truth (container
+    /// framing isn't counted).
+    public var sourceBytesRead: Int64 { remuxer.sourceBytesRead }
+
     public var dolbyVisionConversion: DolbyVisionConversionStats? {
         remuxer.dolbyVisionConversionStats
     }

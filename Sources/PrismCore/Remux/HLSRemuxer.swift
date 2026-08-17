@@ -167,6 +167,27 @@ final class HLSRemuxer: @unchecked Sendable {
     /// without a count the only symptom of a broken conversion is a viewer saying
     /// the DV logo never appeared.
     private let conversionStatsLock = NSLock()
+
+    /// Total compressed bytes read from the SOURCE so far — the sum of packet
+    /// sizes the copy loop has pulled through `av_read_frame`. Slightly under
+    /// the wire truth (container framing isn't counted), which is the right
+    /// side to err on for a stats display. Monotonic; the host differentiates
+    /// it into a rate between its own polls.
+    private let sourceBytesLock = NSLock()
+    private var sourceBytesReadStorage: Int64 = 0
+
+    var sourceBytesRead: Int64 {
+        sourceBytesLock.lock()
+        defer { sourceBytesLock.unlock() }
+        return sourceBytesReadStorage
+    }
+
+    private func countSourceBytes(_ bytes: Int32) {
+        guard bytes > 0 else { return }
+        sourceBytesLock.lock()
+        sourceBytesReadStorage &+= Int64(bytes)
+        sourceBytesLock.unlock()
+    }
     private var storedConversionStats: DolbyVisionConversionStats?
 
     var dolbyVisionConversionStats: DolbyVisionConversionStats? {
@@ -827,6 +848,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     // to the last written segment).
                     throw FFmpegError(code: readResult, operation: "av_read_frame")
                 }
+                countSourceBytes(packet.pointee.size)
                 defer { av_packet_unref(packet) }
 
                 // A fetch outside the producer's window re-anchors it — checked

@@ -322,6 +322,9 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let isBT2020: Bool
     public let frameRate: Double?
     public let frameRateSource: FrameRateSource
+    /// The stream's declared bit rate in bits/second (`codecpar->bit_rate`),
+    /// `nil` when the container doesn't say — MKV video very often doesn't.
+    public let bitRate: Int64?
     /// Verified scan type; see `FieldOrder`. Interlaced video cannot ride the
     /// native path honestly — AVPlayer does not deinterlace, so a stream-copy
     /// would play with combing — which is why `copyability` reflects this.
@@ -343,6 +346,61 @@ public struct VideoTrackInfo: Sendable, Equatable {
     public let dynamicRange: DynamicRange
     public let copyability: StreamCopyability
 
+
+    /// Explicit, with new-field defaults — the SourceInfo rule: fields can be
+    /// added without breaking the tests (or hosts) that construct fixtures.
+    public init(
+        streamIndex: Int,
+        codecName: String,
+        profileName: String?,
+        profile: Int32,
+        level: Int32,
+        width: Int,
+        height: Int,
+        sampleAspectRatio: AspectRatio?,
+        bitDepth: Int?,
+        colorPrimariesName: String?,
+        colorTransferName: String?,
+        colorSpaceName: String?,
+        isBT2020: Bool,
+        frameRate: Double?,
+        frameRateSource: FrameRateSource,
+        bitRate: Int64? = nil,
+        fieldOrder: FieldOrder,
+        hevcConfiguration: HEVCConfigurationRecord?,
+        avcConfiguration: AVCConfigurationRecord?,
+        av1Configuration: AV1ConfigurationRecord?,
+        nalUnitLengthSize: Int?,
+        dolbyVision: DolbyVisionConfiguration?,
+        dynamicRange: DynamicRange,
+        copyability: StreamCopyability
+    ) {
+        self.streamIndex = streamIndex
+        self.codecName = codecName
+        self.profileName = profileName
+        self.profile = profile
+        self.level = level
+        self.width = width
+        self.height = height
+        self.sampleAspectRatio = sampleAspectRatio
+        self.bitDepth = bitDepth
+        self.colorPrimariesName = colorPrimariesName
+        self.colorTransferName = colorTransferName
+        self.colorSpaceName = colorSpaceName
+        self.isBT2020 = isBT2020
+        self.frameRate = frameRate
+        self.frameRateSource = frameRateSource
+        self.bitRate = bitRate
+        self.fieldOrder = fieldOrder
+        self.hevcConfiguration = hevcConfiguration
+        self.avcConfiguration = avcConfiguration
+        self.av1Configuration = av1Configuration
+        self.nalUnitLengthSize = nalUnitLengthSize
+        self.dolbyVision = dolbyVision
+        self.dynamicRange = dynamicRange
+        self.copyability = copyability
+    }
+
     public enum FrameRateSource: String, Sendable, Equatable {
         case averageFrameRate
         case realFrameRate
@@ -357,6 +415,9 @@ public struct AudioTrackInfo: Sendable, Equatable {
     public let channelCount: Int
     public let channelLayoutDescription: String?
     public let sampleRate: Int
+    /// Declared bits/second (`codecpar->bit_rate`); audio containers usually
+    /// carry it. `nil` when absent.
+    public let bitRate: Int64?
     public let language: String?
     public let title: String?
     /// Whether this track carries **object audio** — Dolby Atmos.
@@ -374,6 +435,33 @@ public struct AudioTrackInfo: Sendable, Equatable {
     /// `avformat_find_stream_info`, which `probe` always runs.
     public let isObjectAudio: Bool
     public let copyability: StreamCopyability
+
+    /// Explicit, with new-field defaults — same rule as `VideoTrackInfo`.
+    public init(
+        streamIndex: Int,
+        codecName: String,
+        profileName: String?,
+        channelCount: Int,
+        channelLayoutDescription: String?,
+        sampleRate: Int,
+        bitRate: Int64? = nil,
+        language: String?,
+        title: String?,
+        isObjectAudio: Bool,
+        copyability: StreamCopyability
+    ) {
+        self.streamIndex = streamIndex
+        self.codecName = codecName
+        self.profileName = profileName
+        self.channelCount = channelCount
+        self.channelLayoutDescription = channelLayoutDescription
+        self.sampleRate = sampleRate
+        self.bitRate = bitRate
+        self.language = language
+        self.title = title
+        self.isObjectAudio = isObjectAudio
+        self.copyability = copyability
+    }
 }
 
 public struct SubtitleTrackInfo: Sendable, Equatable {
@@ -976,6 +1064,7 @@ public enum SourceProbe {
             isBT2020: par.color_primaries == AVCOL_PRI_BT2020,
             frameRate: frameRate,
             frameRateSource: frameRateSource,
+            bitRate: par.bit_rate > 0 ? par.bit_rate : nil,
             fieldOrder: reportedFieldOrder,
             hevcConfiguration: hevcConfiguration,
             avcConfiguration: avcConfiguration,
@@ -1034,6 +1123,7 @@ public enum SourceProbe {
             channelCount: Int(par.ch_layout.nb_channels),
             channelLayoutDescription: layout,
             sampleRate: Int(par.sample_rate),
+            bitRate: par.bit_rate > 0 ? par.bit_rate : nil,
             language: avMetadataValue(stream.pointee.metadata, "language"),
             title: avMetadataValue(stream.pointee.metadata, "title"),
             isObjectAudio: isObjectAudio,
