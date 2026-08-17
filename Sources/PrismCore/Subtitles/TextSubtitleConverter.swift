@@ -333,6 +333,13 @@ enum TextSubtitleConverter {
         let nameField = inner.hasPrefix("/") ? inner.dropFirst() : inner[...]
         let name = String(nameField.prefix { $0.isLetter || $0.isNumber }).lowercased()
         guard allowedTags.contains(name) || name == "font" else { return nil }
+        // Only the name prefix is validated, so the rest of the tag is emitted
+        // verbatim — and an inner ending in `--` composes `-->` with the
+        // closing bracket, the one sequence that may never appear in a cue.
+        // `<i-->` in a mangled SRT did exactly that (found by the fuzz
+        // harness); rejecting it here routes the `<` to `&lt;` and the `--`
+        // to the `-->` neutralizer instead.
+        guard !inner.hasSuffix("--") else { return nil }
         return (name, String(tail[tail.startIndex...close]))
     }
 }

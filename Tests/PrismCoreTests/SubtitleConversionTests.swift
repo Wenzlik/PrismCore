@@ -19,6 +19,19 @@ struct SubtitleConversionTests {
         #expect(text == "Ahoj <i>světe</i>")
     }
 
+    @Test("A mangled tag ending in -- cannot smuggle --> into a cue")
+    func mangledTagCannotTerminateCue() throws {
+        // `<i-->`: the tag validator used to check only the name prefix ("i")
+        // and emit the rest verbatim — inner `i--` plus the closing bracket is
+        // `-->`, the one sequence that ends a WebVTT cue mid-payload. Found by
+        // the fuzz harness mutating an SRT seed (hunt, first minute).
+        let text = try #require(
+            TextSubtitleConverter.cueText(from: Data("before <i--> after".utf8), kind: .subrip)
+        )
+        #expect(!text.contains("-->"))
+        #expect(text.contains("after"), "the words around the mangled tag must survive")
+    }
+
     @Test("Matroska ASS event: 7 fields before the text, overrides stripped")
     func matroskaASSEvent() throws {
         let payload = "0,Default,,0,0,0,,{\\pos(192,240)}{\\i1}Ahoj{\\i0}\\Nsvěte"

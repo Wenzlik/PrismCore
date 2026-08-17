@@ -222,6 +222,40 @@ before the planner.
   pipeline, never the premium claims — Atmos and Dolby Vision need real media
   and a device.
 
+### Fuzzing
+
+Every hand-written bitstream parser (JOC walk, `dec3`, HEVC NAL framing,
+`hvcC` normalization, ISO-BMFF splice, text subtitles) is wired into
+`FuzzTargets` (`Sources/PrismCore/Fuzz/`) — uniform `bytes in → invariants
+checked` entry points, `package` access so the test target and the fuzzer
+executable share them. A target checks *wrong-answer* invariants, not just
+crashes: rewrite round-trips, normalize idempotence, splice re-locatability,
+WebVTT safety. New parser → new target + seed in `FuzzSeeds.corpus`, and the
+`seedsAreAccepted` test must prove the seed reaches the deep path.
+
+Three ways to run it:
+
+- `FuzzSmokeTests` — always on, deterministic, sub-second. CI-grade floor.
+- `swift run prismcore-fuzz hunt <target|all> [seconds] [rng-seed]` — blind
+  mutation of the seed corpus, bounded by time. Prints its rng-seed so any
+  crash reproduces. This found the `<i-->` cue escape in under a minute.
+- `swift run prismcore-fuzz run <target> <files…>` — replay saved inputs
+  (crash artifacts, corpus files).
+
+**Xcode's Swift toolchain cannot build the coverage-guided shape** — it ships
+no fuzzer runtime, and `-sanitize=fuzzer` is rejected outright ("unsupported
+option"), which is why `hunt` exists. On a swift.org toolchain the libFuzzer
+entry point builds with:
+
+```
+swift build --product prismcore-fuzz \
+  -Xswiftc -DLIBFUZZER -Xswiftc -parse-as-library \
+  -Xswiftc -sanitize=fuzzer,address
+PRISMCORE_FUZZ_TARGET=<target> .build/debug/prismcore-fuzz corpus/
+```
+
+(The `LIBFUZZER` define swaps out the CLI `main` — libFuzzer brings its own.)
+
 ---
 
 ## Releasing
