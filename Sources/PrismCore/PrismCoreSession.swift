@@ -95,7 +95,10 @@ public actor PrismCoreSession {
     /// see the loopback. Monotonic from session start; differentiate between
     /// two reads to get a rate. Slightly under the wire truth (container
     /// framing isn't counted).
-    public var sourceBytesRead: Int64 { remuxer.sourceBytesRead }
+    /// `nonisolated`: the counter is lock-guarded inside the remuxer, and the
+    /// host polls it from its stats timer — hopping the actor for a read
+    /// would serialize a diagnostics poll behind remux work.
+    public nonisolated var sourceBytesRead: Int64 { remuxer.sourceBytesRead }
 
     public var dolbyVisionConversion: DolbyVisionConversionStats? {
         remuxer.dolbyVisionConversionStats
