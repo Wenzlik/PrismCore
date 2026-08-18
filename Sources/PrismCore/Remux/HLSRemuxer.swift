@@ -906,6 +906,20 @@ final class HLSRemuxer: @unchecked Sendable {
                                 subtitles.setTimelineOrigin(seconds: Double(pts) * tickSeconds)
                             } else if pts >= nextBoundaryPTS {
                                 try emitSegment(endPTS: pts)
+                                // A segment just landed — the one moment the
+                                // lead cap can pause without leaving a partial
+                                // fragment behind. Parks only in planned mode
+                                // (sequential has no demand) and only once
+                                // production has run producerLeadSegments past
+                                // the last fetch; an anchor request or a fetch
+                                // wakes it, and the per-packet check right
+                                // above handles whichever it was.
+                                if plannedPlan != nil {
+                                    demand?.parkWhileAhead(
+                                        producing: segmentIndex,
+                                        isCancelled: { [cancelled] in cancelled.isSet }
+                                    )
+                                }
                                 segmentStartPTS = pts
                                 nextBoundaryPTS = plannedPlan != nil
                                     ? plannedBoundary(after: segmentIndex)
