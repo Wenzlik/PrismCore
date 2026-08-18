@@ -55,6 +55,13 @@ struct PlanSegmentProvider: SegmentProvider {
                 )
             )
         }
+        // Every media-segment fetch — hit or miss — is a playhead sighting:
+        // it is what the producer's lead cap paces itself against. Reported
+        // before the disk read so a parked producer wakes even when the serve
+        // itself is instant.
+        if let index = Self.segmentIndex(inPath: path) {
+            coordinator.noteFetch(of: index)
+        }
         let direct = await directory.data(forPath: path)
         if case .notFound = direct {
             return await handleMiss(path: path)

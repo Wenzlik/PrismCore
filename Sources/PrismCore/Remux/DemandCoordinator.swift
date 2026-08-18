@@ -36,6 +36,22 @@ final class DemandCoordinator: @unchecked Sendable {
     /// a real seek lands far outside it, AVPlayer's normal read-ahead inside.
     static let forwardWaitWindow = 2
 
+    /// The newest segment index the provider has served or been asked for —
+    /// the closest thing to a playhead the engine can see. `-1` until the
+    /// first media fetch, which is also what lets startup produce freely.
+    private var lastDemandedIndex = -1
+
+    /// How far past the last demanded segment the producer may run before it
+    /// parks. Ten segments ≈ 60 s of content: comfortably more than AVPlayer's
+    /// forward read-ahead, comfortably less than the retention budget — which
+    /// is the point. An uncapped producer sprints to EOF on a fast source, and
+    /// retention's "farthest from the producer" then evicts the segments
+    /// *nearest the playhead*: every ~20 s AVPlayer asks for a file that was
+    /// just deleted, re-anchors the producer back, and playback hitches for
+    /// the length of a demuxer seek. The cap keeps the producer trailing the
+    /// playhead, which is the assumption retention was written against.
+    static let producerLeadSegments = 10
+
     // MARK: - Producer side
 
     /// Publish the plan once the producer has built it. Until this, requests
@@ -73,6 +89,27 @@ final class DemandCoordinator: @unchecked Sendable {
         lock.wait(until: Date(timeIntervalSinceNow: Self.parkBackstopSeconds))
     }
 
+    /// Park the calling thread while the producer is more than
+    /// `producerLeadSegments` ahead of the last demanded segment. Same
+    /// contract as `waitForAnchorRequest`: **blocks a real thread**, producer's
+    /// own thread only. Returns as soon as demand catches up, an anchor
+    /// request lands (the copy loop's per-packet check will take it), or the
+    /// session is cancelled; the timed wait is only the missed-signal backstop.
+    ///
+    /// A `lastDemandedIndex` of `-1` (nothing fetched yet) never parks:
+    /// startup must produce the first segments before AVPlayer has anything
+    /// to ask for. A demand *behind* the producer — a backward seek being
+    /// replayed from disk — parks too: the files are already there, and the
+    /// right move is to wait for the playhead to catch up, not to produce on.
+    func parkWhileAhead(producing: Int, isCancelled: () -> Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        while requestedAnchor == nil, !isCancelled(), lastDemandedIndex >= 0,
+              producing > lastDemandedIndex + Self.producerLeadSegments {
+            lock.wait(until: Date(timeIntervalSinceNow: Self.parkBackstopSeconds))
+        }
+    }
+
     /// Wake every parked producer without offering it an anchor — what
     /// cancellation uses to get its thread back promptly.
     ///
@@ -99,6 +136,16 @@ final class DemandCoordinator: @unchecked Sendable {
     /// The plan, if published.
     var publishedPlan: SegmentPlan? {
         lock.withLock { plan }
+    }
+
+    /// A media-segment fetch arrived — hit or miss. The newest fetch is where
+    /// AVPlayer's read-ahead front is, so it moves `lastDemandedIndex` and
+    /// wakes a producer parked on its lead cap.
+    func noteFetch(of index: Int) {
+        lock.withLock {
+            lastDemandedIndex = index
+            lock.broadcast()
+        }
     }
 
     /// A request for planned segment `index` arrived and its file doesn't

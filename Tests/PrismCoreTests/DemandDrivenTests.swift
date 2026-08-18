@@ -462,3 +462,96 @@ struct ParkedProducerTests {
         await producer.join()
     }
 }
+
+/// The producer's lead cap: production pauses when it has run
+/// `producerLeadSegments` past the last fetched segment, so retention's
+/// "farthest from the producer" policy keeps meaning "farthest from the
+/// playhead". Without it a fast source lets the producer sprint to EOF and
+/// eviction deletes the segments AVPlayer is about to ask for.
+@Suite("Producer lead cap")
+struct ProducerLeadCapTests {
+
+    /// Long enough that a return can only have come from a signal — the
+    /// coordinator's own backstop is a full second.
+    private var signalWindow: DispatchTime { .now() + .milliseconds(500) }
+    /// Long enough to prove the park is holding, short enough not to drag the
+    /// suite: a wrongly-released park signals within microseconds.
+    private var stillParkedWindow: DispatchTime { .now() + .milliseconds(150) }
+
+    /// Parks a thread on the lead cap and hands back a semaphore that is
+    /// signalled when the park returns.
+    private func park(
+        on coordinator: DemandCoordinator,
+        producing: Int,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> DispatchSemaphore {
+        let returned = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            coordinator.parkWhileAhead(producing: producing, isCancelled: isCancelled)
+            returned.signal()
+        }
+        thread.start()
+        return returned
+    }
+
+    @Test("Before the first fetch the producer never parks — startup must produce")
+    func startupDoesNotPark() {
+        let coordinator = DemandCoordinator()
+        let returned = park(on: coordinator, producing: 100)
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("Within the lead window the producer sails through")
+    func withinWindowDoesNotPark() {
+        let coordinator = DemandCoordinator()
+        coordinator.noteFetch(of: 5)
+        let returned = park(
+            on: coordinator,
+            producing: 5 + DemandCoordinator.producerLeadSegments
+        )
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("Past the window the producer parks, and a catching-up fetch releases it")
+    func fetchReleasesThePark() {
+        let coordinator = DemandCoordinator()
+        coordinator.noteFetch(of: 0)
+        let producing = DemandCoordinator.producerLeadSegments + 5
+        let returned = park(on: coordinator, producing: producing)
+
+        // A fetch that does NOT close the gap keeps the park holding.
+        coordinator.noteFetch(of: 2)
+        #expect(returned.wait(timeout: stillParkedWindow) == .timedOut)
+
+        coordinator.noteFetch(of: 5)
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("An anchor request releases the lead-cap park for the per-packet check")
+    func anchorRequestReleasesThePark() {
+        let coordinator = DemandCoordinator()
+        coordinator.noteFetch(of: 0)
+        let returned = park(
+            on: coordinator,
+            producing: DemandCoordinator.producerLeadSegments + 5
+        )
+        coordinator.requestProduction(of: 40)
+        #expect(returned.wait(timeout: signalWindow) == .success)
+        #expect(coordinator.takeAnchorRequest() == 40)
+    }
+
+    @Test("Cancellation releases the lead-cap park")
+    func cancellationReleasesThePark() {
+        let coordinator = DemandCoordinator()
+        coordinator.noteFetch(of: 0)
+        let cancelled = LockedFlag()
+        let returned = park(
+            on: coordinator,
+            producing: DemandCoordinator.producerLeadSegments + 5,
+            isCancelled: { cancelled.isSet }
+        )
+        cancelled.set()
+        coordinator.wake()
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+}
