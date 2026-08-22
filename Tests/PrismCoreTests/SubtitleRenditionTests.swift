@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import PrismCore
 
 /// Phase 6 end to end: a subtitled MKV becomes WebVTT renditions served over
@@ -275,5 +276,86 @@ struct SubtitleRenditionTests {
             )
         )
         #expect(!master.contains("SUBTITLES"))
+    }
+}
+
+/// Two subtitle tracks that share a name are two renditions AVFoundation
+/// refuses to keep both of.
+///
+/// The shape is the ordinary one, not a corner case: a disc rip carries an
+/// `eng` full track and an `eng` forced track, neither of them titled, so both
+/// renditions fall back to the language tag for their `NAME`. HLS forbids that
+/// (RFC 8216 §4.3.4.1) and AVFoundation enforces it by keeping the first and
+/// dropping the rest — silently, which is why the served playlist looked
+/// correct while the forced track was missing from the picker.
+///
+/// The AVFoundation assertion is the point of this suite. A string test over
+/// the master would have passed before the fix: both `EXT-X-MEDIA` lines were
+/// present, `FORCED=YES` and all. Only asking AVFoundation what it actually
+/// parsed shows the loss.
+@Suite("Forced subtitle renditions", .serialized)
+struct ForcedSubtitleRenditionTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    @Test("Colliding names are disambiguated by ordinal, in stream order")
+    func namesAreMadeUnique() {
+        let renditions = [
+            MasterPlaylistBuilder.SubtitleRendition(name: "eng", uri: "subs0/index.m3u8"),
+            MasterPlaylistBuilder.SubtitleRendition(name: "eng", uri: "subs1/index.m3u8", isForced: true),
+            MasterPlaylistBuilder.SubtitleRendition(name: "ENG", uri: "subs2/index.m3u8"),
+            MasterPlaylistBuilder.SubtitleRendition(name: "Čeština", uri: "subs3/index.m3u8"),
+        ]
+        let unique = SubtitleRenditionSet.withUniqueNames(renditions)
+        #expect(unique.map(\.name) == ["eng", "eng 2", "ENG 3", "Čeština"])
+        // Everything else about a rendition survives the rename.
+        #expect(unique[1].isForced)
+        #expect(unique.map(\.uri) == renditions.map(\.uri))
+    }
+
+    @Test("A source with a full and a forced track declares two distinct renditions")
+    func forcedTrackGetsItsOwnName() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_forced_subs.mkv"))
+        let playlistURL = try await session.start()
+        defer { Task { await session.stop() } }
+
+        let renditions = await session.subtitleRenditions
+        try #require(renditions.count == 2)
+        #expect(Set(renditions.map(\.name)).count == 2, "two renditions, two names")
+        #expect(renditions.filter(\.isForced).count == 1)
+
+        let (data, _) = try await URLSession.shared.data(from: playlistURL)
+        let master = String(decoding: data, as: UTF8.self)
+        #expect(master.contains("FORCED=YES"))
+        for rendition in renditions {
+            #expect(master.contains("NAME=\"\(rendition.name)\""))
+        }
+    }
+
+    @Test("AVFoundation keeps both options, and knows which one is forced")
+    func avFoundationSeesBothOptions() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_forced_subs.mkv"))
+        let playlistURL = try await session.start()
+        defer { Task { await session.stop() } }
+
+        let asset = AVURLAsset(url: playlistURL)
+        let group = try #require(
+            try await asset.loadMediaSelectionGroup(for: .legible),
+            "no legible group — the master declared no SUBTITLES"
+        )
+        #expect(group.options.count == 2, "AVFoundation dropped a rendition: \(group.options.map(\.displayName))")
+
+        let forced = group.options.filter { $0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
+        #expect(forced.count == 1, "exactly one option should carry FORCED=YES")
+        // The host's menu is built by filtering the forced option out, which
+        // only works if it is distinguishable — the whole point of the fix.
+        let selectable = AVMediaSelectionGroup.mediaSelectionOptions(
+            from: group.options, withoutMediaCharacteristics: [.containsOnlyForcedSubtitles]
+        )
+        #expect(selectable.count == 1)
     }
 }

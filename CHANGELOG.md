@@ -6,6 +6,31 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.10.1] — 2026-08-22
+
+### Fixed
+
+- **A forced subtitle track no longer disappears from the picker.** Two
+  renditions in one group may not share a `NAME` (RFC 8216 §4.3.4.1), and
+  AVFoundation enforces that by keeping the first and **silently discarding**
+  the rest: no error, no log, the option simply is not in the legible
+  `AVMediaSelectionGroup`. A rendition's name falls back to the container's
+  title, then the language tag, and a forced track is usually untitled — so
+  the ordinary disc-rip shape (`eng` full plus `eng` forced) produced two
+  renditions both named `eng`, and the forced one lost. Reported from the
+  field as "only the full SRT shows up".
+
+  Nothing looked wrong from the playlist: both `EXT-X-MEDIA` lines were
+  emitted, `FORCED=YES` and all. Names are now made unique within the group,
+  in stream order, so the loss cannot recur — and the regression test asks
+  *AVFoundation* what it parsed rather than asserting over the text, because
+  a text assertion passes on the broken master.
+
+  The disambiguator is a bare ordinal (`eng`, `eng 2`) rather than something
+  descriptive: AVFoundation already appends "Forced" to the display name of a
+  `FORCED=YES` rendition, so naming one "English (Forced)" reads back in the
+  menu as "English (Forced) Forced".
+
 ## [1.10.0] — 2026-08-22
 
 ### Added
@@ -820,6 +845,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.10.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.1
 [1.10.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.0
 [1.9.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.9.0
 [1.8.4]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.4
