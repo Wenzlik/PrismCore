@@ -297,6 +297,38 @@ if that host vendors its own MPVKit fork: SPM derives a path dependency's identi
 from its *directory name*, so the fork's directory has to be called `MPVKit` for it
 to override the `mpvkit` identity PrismCore asks for.
 
+### Which FFmpeg answered
+
+`FFmpegBuild` reports the build that is actually loaded — a line per linked
+library with the header version beside it whenever the two disagree, FFmpeg's own
+version string, and the capability answers that change what this engine does with
+a source: the `eac3` encoder (without it the audio bridge cannot run), the AV1
+decoder and whether this device has hardware for it, dialogue boost, and the GPU
+deinterlacer:
+
+```swift
+print(FFmpegBuild.summary)
+// FFmpeg n8.1.2
+//   libavutil 60.26.102
+//   libavcodec 62.28.102
+//   …
+//   eac3 encoder: NO — audio bridge disabled
+//   av1 decoder: libdav1d (hardware: no)
+//   dialogue boost: no
+//   gpu deinterlacer: none — CPU route
+```
+
+Worth a line in a host's launch log and worth attaching to a bug report: half of
+what this engine decides is a question about the build rather than the media, so
+"audio track is missing" is often unreproducible until you know which FFmpeg was
+asked. A host that vendors its own fork should also assert `FFmpegBuild.isABIMatched`
+once — a **major** version apart from the headers PrismCore compiled against means
+the public structs this engine walks on every packet may be laid out differently,
+which surfaces as wrong pixels and wrong timestamps rather than as an error.
+PrismCore logs and reports that state but does not refuse to run on it.
+`FFmpegBuild.configuration` carries libavcodec's full `configure` line for the
+report.
+
 ## Stability and versioning
 
 PrismCore follows [Semantic Versioning](https://semver.org). Every `public`
