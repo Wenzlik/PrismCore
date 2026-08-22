@@ -6,6 +6,36 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [Unreleased]
+
+### Added
+
+- **`FFmpegBuild` — which FFmpeg answered, and whether it is the one we
+  compiled against.** Two questions that have both cost time, and neither of
+  which the engine could answer for a host until now.
+
+  The first is identity. Half of what this engine decides is a question about
+  the *build* rather than the media — whether `eac3` was compiled in decides
+  whether a TrueHD track bridges or evicts the source to the software path, and
+  stock MPVKit ships the E-AC-3 decoders only — so "the audio track is missing"
+  is unreproducible until you know which build was asked. `FFmpegBuild.summary`
+  is one paste-able block: FFmpeg's own version string, every linked library,
+  and the capability answers that change routing (`eac3` encoder, AV1 decoder,
+  AV1 hardware). Capabilities are asked of libavcodec rather than read out of
+  the configure line, because a `--enable-encoder=eac3` that failed to take is
+  precisely the case worth catching; `FFmpegBuild.configuration` carries the
+  configure line itself for the bug report.
+
+  The second is ABI. PrismCore compiles against MPVKit's headers, but a host
+  may override the package with its own fork of the same identity, so the
+  libraries that answer are not necessarily the ones the headers described.
+  A **major** apart is not cosmetic: libav* bumps major exactly when a public
+  struct's layout changes, and `AVStream`, `AVCodecParameters` and `AVFrame`
+  are read field by field on every packet here — a silent drift is wrong pixels
+  and wrong timestamps with no error to point at. `isABIMatched` compares each
+  library's runtime version against the headers this build saw; minor and micro
+  drift is expected and ignored. Loud, not fatal: the engine cannot know whether
+  the drift touches anything this source needs, so it reports and continues.
 ## [1.9.0] — 2026-08-22
 
 ### Added
