@@ -64,6 +64,10 @@ final class AudioBridge {
         case decoderUnavailable(String)
         /// The source's channel count is outside what the encoder can express.
         case channelLayoutUnsupported(Int32)
+        /// Dialogue boost was asked of a track it can't honestly apply to —
+        /// no centre channel to favour (stereo/mono), or a layout `pan` can't
+        /// express. The rendition is skipped; the base track is unaffected.
+        case dialogueBoostIneligible(String)
         case allocationFailed(String)
 
         var description: String {
@@ -74,6 +78,8 @@ final class AudioBridge {
                 return "FFmpeg build has no decoder for \(name)"
             case .channelLayoutUnsupported(let count):
                 return "no encoder channel layout fits \(count) source channels"
+            case .dialogueBoostIneligible(let why):
+                return "dialogue boost is not applicable: \(why)"
             case .allocationFailed(let what):
                 return "\(what) allocation failed"
             }
@@ -140,6 +146,14 @@ final class AudioBridge {
             && isEncoderAvailable
     }
 
+    /// Can this build decode `codecID` and re-encode it — the dialogue-boost
+    /// question, which deliberately ignores `bridgeableAudio`: a boost
+    /// rendition is derived from tracks that normally *stream-copy* (EAC3,
+    /// AC3, AAC, …), and those decoders every player build ships.
+    static func canDecodeForBoost(codecID: AVCodecID) -> Bool {
+        avcodec_find_decoder(codecID) != nil && isEncoderAvailable
+    }
+
     // MARK: - State
 
     private var decoderCtx: UnsafeMutablePointer<AVCodecContext>?
@@ -165,6 +179,10 @@ final class AudioBridge {
     private var swrInRate: Int32 = 0
     private var swrInLayout = AVChannelLayout()
 
+    /// Present only on a dialogue-boost rendition's bridge: decoded frames
+    /// detour through `abuffer → pan → abuffersink` before the resampler.
+    private var boostFilter: DialogueBoostFilter?
+
     private var clock: BridgeClock
     private var chunker: FrameChunker
 
@@ -189,10 +207,16 @@ final class AudioBridge {
     ///     header (`AVFMT_GLOBALHEADER`). EAC3 has no extradata, but the flag
     ///     is what tells an encoder not to repeat headers in-band, so it is
     ///     passed through rather than assumed.
+    ///   - dialogueBoost: when set, decoded frames pass a centre-favouring
+    ///     filter graph before re-encoding (see `DialogueBoostFilter`).
+    ///     Throws `dialogueBoostIneligible` for a source whose declared layout
+    ///     has no centre to favour, so the caller can skip the rendition
+    ///     instead of serving a duplicate of the base track.
     init(
         codecpar: UnsafePointer<AVCodecParameters>,
         timeBase: AVRational,
         globalHeader: Bool,
+        dialogueBoost: DialogueBoostLevel? = nil,
         targetCodec: AVCodecID = AudioBridge.defaultTargetCodec
     ) throws {
         self.sourceTimeBase = timeBase
@@ -241,6 +265,23 @@ final class AudioBridge {
             // resampler reconfigures its *input* side per frame anyway, so a
             // wrong guess costs a downmix, not a broken session.
             av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : 6)
+        }
+
+        if let dialogueBoost {
+            guard DialogueBoostFilter.isAvailable else {
+                throw Failure.dialogueBoostIneligible("this FFmpeg build has no pan filter")
+            }
+            // The declared layout is a claim (see the guess above), so this is
+            // a precheck, not the verdict: the filter re-derives eligibility
+            // from every decoded frame and passes through if the claim lied.
+            // Refusing here is what keeps a stereo track from paying for a
+            // rendition that could only duplicate it.
+            guard DialogueBoostFilter.layoutIsEligible(&sourceLayout) else {
+                throw Failure.dialogueBoostIneligible(
+                    "\(Self.describe(sourceLayout)) has no centre channel to favour"
+                )
+            }
+            boostFilter = DialogueBoostFilter(level: dialogueBoost, timeBase: timeBase)
         }
 
         var encoderLayout = try Self.negotiateLayout(for: encoder, source: sourceLayout)
@@ -305,6 +346,8 @@ final class AudioBridge {
     }
 
     func close() {
+        boostFilter?.close()
+        boostFilter = nil
         av_frame_free(&decodedFrame)
         av_frame_free(&encoderFrame)
         av_packet_free(&encodedPacket)
@@ -346,9 +389,10 @@ final class AudioBridge {
         guard let decoderCtx, let encoderCtx else { return "audio bridge (closed)" }
         let from = avcodec_get_name(decoderCtx.pointee.codec_id).map { String(cString: $0) } ?? "?"
         let to = avcodec_get_name(encoderCtx.pointee.codec_id).map { String(cString: $0) } ?? "?"
+        let boost = boostFilter.map { " + dialogue boost (\($0.level.rawValue))" } ?? ""
         return "\(from) \(Self.describe(decoderCtx.pointee.ch_layout))"
             + " → \(to) \(Self.describe(encoderCtx.pointee.ch_layout))"
-            + " @ \(encoderCtx.pointee.bit_rate / 1000) kbps"
+            + " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" + boost
     }
 
     /// Fill an output stream's `codecpar` from the encoder — the parameters the
@@ -397,6 +441,14 @@ final class AudioBridge {
         )
         try drainDecoder(emit: emit)
 
+        // Boost-graph tail before the resampler's: downstream stages drain in
+        // pipeline order or the last frames land behind earlier ones.
+        if let boostFilter {
+            try boostFilter.flush { filtered in
+                try self.absorb(filtered)
+            }
+        }
+
         // Resampler tail: whatever its internal delay line still holds.
         if swrCtx != nil {
             try convertIntoFIFO(frame: nil)
@@ -416,11 +468,26 @@ final class AudioBridge {
             try FFmpegError.check(result, "avcodec_receive_frame(audio)")
             defer { av_frame_unref(frame) }
 
-            try reconfigureResamplerIfNeeded(for: frame)
-            noteTimestamps(of: frame)
-            try convertIntoFIFO(frame: frame)
+            if let boostFilter {
+                // Frames come out of the graph in the same time base with the
+                // same sample count, so the clock and FIFO logic in `absorb`
+                // don't know the detour happened.
+                try boostFilter.push(frame) { filtered in
+                    try self.absorb(filtered)
+                }
+            } else {
+                try absorb(frame)
+            }
             try encodeFromFIFO(final: false, emit: emit)
         }
+    }
+
+    /// One decoded (or filtered) frame into the FIFO, resampler reconfigured
+    /// and the clock told first — the invariant order of the ingest side.
+    private func absorb(_ frame: UnsafeMutablePointer<AVFrame>) throws {
+        try reconfigureResamplerIfNeeded(for: frame)
+        noteTimestamps(of: frame)
+        try convertIntoFIFO(frame: frame)
     }
 
     // MARK: - Resampling

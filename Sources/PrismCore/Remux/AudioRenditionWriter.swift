@@ -84,21 +84,24 @@ final class AudioRenditionWriter {
 
         let index = Int32(track.streamIndex)
         var plan: FMP4SegmentWriter.StreamPlan
-        if route.mode == .bridge {
+        if route.mode == .streamCopy {
+            plan = .init(inputIndex: index, language: sourceLanguage)
+        } else {
             let inStream = input.pointee.streams[Int(index)]!
             let audioBridge = try AudioBridge(
                 codecpar: inStream.pointee.codecpar,
                 timeBase: inStream.pointee.time_base,
                 // mp4/mov is a global-header muxer: the encoder's extradata
                 // belongs in codecpar, not in-band.
-                globalHeader: true
+                globalHeader: true,
+                // Nil for a plain bridge; a boost rendition's bridge carries
+                // the centre-favouring filter between decode and re-encode.
+                dialogueBoost: route.mode.dialogueBoostLevel
             )
             bridge = audioBridge
             plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
                 try audioBridge.configure(outputStream: outStream)
             }
-        } else {
-            plan = .init(inputIndex: index, language: sourceLanguage)
         }
 
         _ = try writer.open(input: input, plan: [plan], restart: restart)
@@ -316,15 +319,39 @@ final class AudioRenditionWriter {
                 isObjectAudio: outputCarriesObjectAudio
             ),
             uri: playlistURI,
-            isDefault: isDefault
+            isDefault: isDefault,
+            // The characteristic is what lets a host FIND the boost options
+            // (`hasMediaCharacteristic(.enhancesSpeechIntelligibility)`); it
+            // also keeps AVFoundation from auto-selecting them for anyone who
+            // hasn't asked, AUTOSELECT=YES notwithstanding — accessibility
+            // renditions engage on the user's system preference.
+            characteristics: route.mode.dialogueBoostLevel != nil
+                ? [dialogueBoostCharacteristic]
+                : []
         )
+    }
+
+    /// This rendition's entry in the session's dialogue-boost report, or nil
+    /// for the base renditions.
+    var dialogueBoostInfo: DialogueBoostRendition? {
+        guard let level = route.mode.dialogueBoostLevel else { return nil }
+        return DialogueBoostRendition(level: level, name: renditionName)
     }
 
     /// `NAME` is what the user picks from, so the container's own title wins;
     /// failing that the language, spelled out in the viewer's locale ("Czech",
     /// not "ces"); failing that an ordinal, which at least distinguishes the
-    /// tracks from each other.
+    /// tracks from each other. A boost rendition appends its level's suffix so
+    /// the two stay tellable-apart in AVKit's own picker — and NAME must be
+    /// unique within the group anyway.
     private var renditionName: String {
+        if let level = route.mode.dialogueBoostLevel {
+            return "\(baseRenditionName) (\(level.renditionNameSuffix))"
+        }
+        return baseRenditionName
+    }
+
+    private var baseRenditionName: String {
         if let title = track.title, !title.isEmpty { return title }
         if let language = track.language, language != "und", !language.isEmpty {
             if let localized = Locale.current.localizedString(forLanguageCode: language) {
@@ -345,7 +372,7 @@ final class AudioRenditionWriter {
                 forCodecName: track.codecName,
                 profileName: track.profileName
             )
-        case .bridge:
+        case .bridge, .boost:
             return MasterPlaylistBuilder.audioCodecString(forCodecName: "eac3")
         }
     }
@@ -356,7 +383,7 @@ final class AudioRenditionWriter {
         switch route.mode {
         case .streamCopy:
             return track.channelCount > 0 ? track.channelCount : nil
-        case .bridge:
+        case .bridge, .boost:
             return bridge?.outputChannelCount
         }
     }
@@ -373,7 +400,7 @@ final class AudioRenditionWriter {
         switch route.mode {
         case .streamCopy:
             return track.isObjectAudio && track.codecName == "eac3"
-        case .bridge:
+        case .bridge, .boost:
             return false
         }
     }

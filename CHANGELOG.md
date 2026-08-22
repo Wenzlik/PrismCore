@@ -6,6 +6,39 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [1.9.0] — 2026-08-22
+
+### Added
+
+- **Dialogue Boost renditions** — `PrismCoreSession(url:…, dialogueBoost:
+  [.medium, .high])` derives extra audio renditions from the default track:
+  decoded, centre channel favoured (the bed attenuated −6 dB / −12 dB — never
+  the centre lifted, which would clip on the loud dialogue the feature exists
+  to rescue), re-encoded to EAC3 through the existing bridge chain with a
+  `pan` filter graph in the middle (`DialogueBoostFilter`). The base track
+  stays bit-for-bit untouched, Atmos included.
+
+  Why in the engine at all: Aether's tap-based Enhance Dialogue
+  (Aether #1985/#1986) is silent on the PrismCore route, and not fixably so —
+  AVFoundation ignores `AVAudioMix`, and with it every
+  `MTAudioProcessingTap`, on HLS items, which is exactly what this engine
+  serves. The only place the dialogue can be lifted is before the mux.
+
+  The renditions are declared with
+  `CHARACTERISTICS="public.accessibility.enhances-speech-intelligibility"`,
+  so a host finds them with
+  `option.hasMediaCharacteristic(.enhancesSpeechIntelligibility)` and flips
+  levels via `AVMediaSelection` — no name parsing;
+  `session.dialogueBoostRenditions` reports the levels and exact `NAME`s the
+  served master actually declares. Best-effort by design: levels are skipped
+  (never fail the session) when the build lacks the `eac3` encoder or the
+  `pan` filter (`PrismCoreSession.isDialogueBoostAvailable`), or when the
+  default track has no centre channel — plain stereo has no channel that *is*
+  the dialogue; separating speech there needs FFmpeg's `dialoguenhance`,
+  which no current MPVKit build compiles (verified by symbol, not configure
+  output). Derived from the default track only, one decode→filter→encode
+  chain per level, opt-in for exactly that cost.
+
 ## [1.8.4] — 2026-08-17
 
 ### Fixed
@@ -756,6 +789,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[1.9.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.9.0
 [1.8.4]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.4
 [1.8.3]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.3
 [1.8.2]: https://github.com/Wenzlik/PrismCore/releases/tag/1.8.2

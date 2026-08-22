@@ -63,6 +63,18 @@ final class HLSRemuxer: @unchecked Sendable {
         case streamCopy
         /// Decoded and re-encoded to EAC3 by `AudioBridge`.
         case bridge
+        /// Decoded, centre-favoured by `DialogueBoostFilter`, re-encoded to
+        /// EAC3 — an EXTRA rendition derived from a track that also ships as
+        /// its own copy/bridge rendition. This exists because the host-side
+        /// alternative doesn't: AVFoundation ignores `audioMix` (and so every
+        /// `MTAudioProcessingTap`) on an HLS item, which is what this engine
+        /// serves, so the only place dialogue can be lifted is before the mux.
+        case boost(DialogueBoostLevel)
+
+        var dialogueBoostLevel: DialogueBoostLevel? {
+            if case .boost(let level) = self { return level }
+            return nil
+        }
     }
 
     struct AudioRoute: Equatable {
@@ -133,6 +145,11 @@ final class HLSRemuxer: @unchecked Sendable {
     /// answer to AVPlayer refusing a master (-11868/-11848/-1002): a fresh
     /// session with the one best audio track muxed into the variant.
     private let forceMuxed: Bool
+    /// Dialogue-boost renditions to derive from the DEFAULT audio track, in
+    /// the order requested. Empty (the default) produces nothing extra. Only
+    /// the renditions shape can carry them — a boost lives in the master's
+    /// audio group, and the muxed shape has no master.
+    private let dialogueBoost: [DialogueBoostLevel]
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
@@ -245,6 +262,17 @@ final class HLSRemuxer: @unchecked Sendable {
         criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision }
     }
 
+    /// The dialogue-boost renditions the served master actually declares —
+    /// empty when none were requested, none could be built in this FFmpeg
+    /// build, or the shape ended up without a master. Written once from the
+    /// producer thread when the master lands, read from the session's actor.
+    private let dialogueBoostLock = NSLock()
+    private var storedDialogueBoostRenditions: [DialogueBoostRendition] = []
+
+    var dialogueBoostRenditions: [DialogueBoostRendition] {
+        dialogueBoostLock.withLock { storedDialogueBoostRenditions }
+    }
+
     private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
         let stats = DolbyVisionConversionStats(
             convertedRPUs: converter.convertedRPUs,
@@ -264,6 +292,7 @@ final class HLSRemuxer: @unchecked Sendable {
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
         forceMuxed: Bool = false,
+        dialogueBoost: [DialogueBoostLevel] = [],
         probed: ProbedSource? = nil,
         keyframeCacheDirectory: URL? = nil,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
@@ -281,6 +310,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.demand = demand
         self.segmentCacheBytes = segmentCacheBytes
         self.forceMuxed = forceMuxed
+        self.dialogueBoost = dialogueBoost
     }
 
     func cancel() {
@@ -549,6 +579,38 @@ final class HLSRemuxer: @unchecked Sendable {
                     rendition.close()
                 }
             }
+            // Dialogue-boost renditions, derived from the DEFAULT track only
+            // (routes[0] — the one `chooseAudio` picked): the feature is "the
+            // dialogue is hard to hear on the track I'm listening to", and one
+            // extra decode→filter→encode chain per level is already real CPU;
+            // one per level per TRACK would be a five-language MKV paying for
+            // ten encoders nobody selected. Appended after the base loop so a
+            // boost never displaces a language, and skipped one-by-one on
+            // failure exactly like the base renditions.
+            let defaultCodecID = candidates
+                .first { $0.index == renditions.first?.route.index }?.codecID
+            for route in Self.dialogueBoostRoutes(
+                requested: dialogueBoost,
+                base: renditions.first?.route,
+                trackChannelCount: renditions.first.map { $0.track.channelCount } ?? 0,
+                boostIsBuildable: defaultCodecID.map {
+                    AudioBridge.canDecodeForBoost(codecID: $0) && DialogueBoostFilter.isAvailable
+                } ?? false
+            ) {
+                guard let track = byIndex[Int(route.index)] else { continue }
+                let rendition = AudioRenditionWriter(
+                    route: route,
+                    track: track,
+                    ordinal: renditions.count,
+                    parent: outputDirectory
+                )
+                do {
+                    try rendition.open(input: input)
+                    renditions.append(rendition)
+                } catch {
+                    rendition.close()
+                }
+            }
             // The master is static — URIs, codecs and languages are all known
             // now — so it lands before the first segment. `PrismCoreSession`
             // reads its presence to decide which URL it hands out.
@@ -572,6 +634,11 @@ final class HLSRemuxer: @unchecked Sendable {
                 // it before the muxed shape (see the session's factory).
                 let claimsDV = MasterPlaylistBuilder.declaresDolbyVision(variant)
                 criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision = claimsDV }
+                // Report only what the master actually declares — a requested
+                // level that couldn't be built must not be promised to the
+                // host, whose UI builds rows from this list.
+                let boostInfos = renditions.compactMap(\.dialogueBoostInfo)
+                dialogueBoostLock.withLock { storedDialogueBoostRenditions = boostInfos }
             }
 
         case .muxed(let audio):
@@ -601,8 +668,11 @@ final class HLSRemuxer: @unchecked Sendable {
             guard case .muxed(let audio) = shape, audio?.mode == .bridge else { return nil }
             return audio?.index
         }()
-        let renditionByInputIndex = Dictionary(
-            uniqueKeysWithValues: renditions.map { (Int($0.route.index), $0) }
+        // Grouped, not unique-keyed: a dialogue-boost rendition shares its
+        // input stream with the base rendition it derives from, so one source
+        // packet can feed several writers.
+        let renditionsByInputIndex = Dictionary(
+            grouping: renditions, by: { Int($0.route.index) }
         )
 
         var writer = FMP4SegmentWriter()
@@ -965,8 +1035,22 @@ final class HLSRemuxer: @unchecked Sendable {
                     continue
                 }
 
-                if let rendition = renditionByInputIndex[streamIndex] {
-                    try rendition.write(packet, sourceTimeBase: sourceTimeBase)
+                if let sharers = renditionsByInputIndex[streamIndex] {
+                    if sharers.count == 1 {
+                        try sharers[0].write(packet, sourceTimeBase: sourceTimeBase)
+                    } else {
+                        // Each writer gets its own reference: the stream-copy
+                        // path rescales timestamps IN the packet, so a shared
+                        // one would reach the second writer already converted
+                        // to the first one's time base. A clone is a refcount
+                        // bump, not a payload copy.
+                        for rendition in sharers {
+                            var clone: UnsafeMutablePointer<AVPacket>? = av_packet_clone(packet)
+                            guard let cloned = clone else { continue }
+                            defer { av_packet_free(&clone) }
+                            try rendition.write(cloned, sourceTimeBase: sourceTimeBase)
+                        }
+                    }
                     continue
                 }
 
@@ -1159,6 +1243,37 @@ final class HLSRemuxer: @unchecked Sendable {
         ordered.remove(at: position)
         ordered.insert(preferred, at: 0)
         return ordered
+    }
+
+    /// Which extra dialogue-boost renditions to derive, given what the
+    /// session asked for and what this build and source can deliver.
+    ///
+    /// Pure on purpose (same rule as `routeAll`): the decision is what must
+    /// not drift, and it has to be testable without a demuxer or an encoder.
+    ///
+    /// - `base` is the DEFAULT rendition's route — boosts derive from the
+    ///   track people are actually listening to, and only from it (cost).
+    /// - `trackChannelCount >= 3` is the honest floor: a boost lifts a centre
+    ///   channel, and stereo has none to lift. (Stereo needs FFmpeg's
+    ///   `dialoguenhance`, which no current build ships — see
+    ///   `DialogueBoostFilter`.) The layout-level check happens again at
+    ///   bridge setup, where the real `AVChannelLayout` exists.
+    /// - `boostIsBuildable` folds in the runtime reads: a decoder for the
+    ///   track's codec, the EAC3 encoder, the `pan` filter.
+    /// - Duplicate requested levels collapse to the first occurrence; a
+    ///   rendition per repeated level would collide on NAME and pay twice.
+    static func dialogueBoostRoutes(
+        requested: [DialogueBoostLevel],
+        base: AudioRoute?,
+        trackChannelCount: Int,
+        boostIsBuildable: Bool
+    ) -> [AudioRoute] {
+        guard let base, boostIsBuildable, trackChannelCount >= 3 else { return [] }
+        var seen = Set<DialogueBoostLevel>()
+        return requested.compactMap { level in
+            guard seen.insert(level).inserted else { return nil }
+            return AudioRoute(index: base.index, mode: .boost(level))
+        }
     }
 
     /// Decide which single audio stream to carry, and how — the muxed shape's

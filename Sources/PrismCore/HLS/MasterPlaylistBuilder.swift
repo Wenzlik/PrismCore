@@ -61,6 +61,13 @@ public enum MasterPlaylistBuilder {
         /// `DEFAULT=YES`. Exactly one rendition of a group may claim it, and
         /// the caller decides which — the builder prints what it is told.
         public var isDefault: Bool
+        /// UTI media characteristics (`CHARACTERISTICS`), e.g.
+        /// `public.accessibility.enhances-speech-intelligibility` on a
+        /// dialogue-boost rendition. Empty prints nothing. This is how a host
+        /// finds such renditions programmatically —
+        /// `AVMediaSelectionOption.hasMediaCharacteristic(_:)` — instead of
+        /// matching display names.
+        public var characteristics: [String]
 
         public init(
             groupID: String = "aud",
@@ -69,7 +76,8 @@ public enum MasterPlaylistBuilder {
             codecString: String? = nil,
             channels: String? = nil,
             uri: String? = nil,
-            isDefault: Bool = true
+            isDefault: Bool = true,
+            characteristics: [String] = []
         ) {
             self.groupID = groupID
             self.name = name
@@ -78,6 +86,7 @@ public enum MasterPlaylistBuilder {
             self.channels = channels
             self.uri = uri
             self.isDefault = isDefault
+            self.characteristics = characteristics
         }
     }
 
@@ -234,6 +243,9 @@ public enum MasterPlaylistBuilder {
         // locking playback to whichever track the container listed first.
         // NO would make the alternates dead weight in the selection group.
         attributes.append("AUTOSELECT=YES")
+        if !audio.characteristics.isEmpty {
+            attributes.append("CHARACTERISTICS=\(quoted(audio.characteristics.joined(separator: ",")))")
+        }
         if let channels = audio.channels, !channels.isEmpty {
             attributes.append("CHANNELS=\(quoted(channels))")
         }
