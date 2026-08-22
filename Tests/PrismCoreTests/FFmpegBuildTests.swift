@@ -76,6 +76,11 @@ struct FFmpegBuildTests {
         #expect(capabilities.hasEAC3Encoder == (avcodec_find_encoder(AV_CODEC_ID_EAC3) != nil))
         #expect((capabilities.av1Decoder != nil) == (avcodec_find_decoder(AV_CODEC_ID_AV1) != nil))
         #expect(capabilities.isAV1HardwareSupported == HardwareDecodeSupport.isAV1Supported)
+        #expect(capabilities.hasDialogueBoost == PrismCoreSession.isDialogueBoostAvailable)
+        #expect(capabilities.gpuDeinterlacer == SoftwareVideoDecoder.gpuDeinterlaceName)
+        // Dialogue boost needs the encoder the bridge needs, and one filter
+        // more — it can never be the wider answer of the two.
+        #expect(!(capabilities.hasDialogueBoost && !capabilities.hasEAC3Encoder))
     }
 
     /// The summary is what a host pastes into a bug report, so its content is
@@ -91,6 +96,8 @@ struct FFmpegBuildTests {
         }
         #expect(summary.contains("eac3 encoder:"))
         #expect(summary.contains("av1 decoder:"))
+        #expect(summary.contains("dialogue boost:"))
+        #expect(summary.contains("gpu deinterlacer:"))
         // No warning when nothing drifted — the line has to mean something.
         #expect(summary.contains("ABI mismatch") == !FFmpegBuild.isABIMatched)
     }

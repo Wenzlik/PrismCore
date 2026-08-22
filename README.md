@@ -301,9 +301,10 @@ to override the `mpvkit` identity PrismCore asks for.
 
 `FFmpegBuild` reports the build that is actually loaded — a line per linked
 library with the header version beside it whenever the two disagree, FFmpeg's own
-version string, and the two capability answers that change routing (the `eac3`
-encoder, without which the audio bridge cannot run, and the AV1 decoder plus
-whether this device has hardware for it):
+version string, and the capability answers that change what this engine does with
+a source: the `eac3` encoder (without it the audio bridge cannot run), the AV1
+decoder and whether this device has hardware for it, dialogue boost, and the GPU
+deinterlacer:
 
 ```swift
 print(FFmpegBuild.summary)
@@ -313,6 +314,8 @@ print(FFmpegBuild.summary)
 //   …
 //   eac3 encoder: NO — audio bridge disabled
 //   av1 decoder: libdav1d (hardware: no)
+//   dialogue boost: no
+//   gpu deinterlacer: none — CPU route
 ```
 
 Worth a line in a host's launch log and worth attaching to a bug report: half of

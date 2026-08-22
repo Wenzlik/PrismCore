@@ -198,6 +198,18 @@ public enum FFmpegBuild {
         /// that story, and the reason the same source routes differently on an
         /// M2 and an M4.
         public let isAV1HardwareSupported: Bool
+        /// Whether dialogue-boost renditions can be produced: the `eac3`
+        /// encoder *and* libavfilter's `pan`. A separate answer from
+        /// `hasEAC3Encoder` because the filter can be missing on its own.
+        public let hasDialogueBoost: Bool
+        /// The GPU deinterlacer's filter name, or `nil` in a build without it
+        /// — `yadif_videotoolbox` needs Metal, which is a separate Xcode
+        /// component and easy to build without. Its absence is not a failure
+        /// (deinterlacing falls back to the CPU route) but it is the
+        /// difference between zero-copy and a full CPU decode plus filter, so
+        /// a "playback is slow on interlaced broadcast content" report wants
+        /// this line.
+        public let gpuDeinterlacer: String?
     }
 
     public static var capabilities: Capabilities {
@@ -205,7 +217,9 @@ public enum FFmpegBuild {
             hasEAC3Encoder: AudioBridge.isEncoderAvailable,
             av1Decoder: avcodec_find_decoder(AV_CODEC_ID_AV1)
                 .map { String(cString: $0.pointee.name) },
-            isAV1HardwareSupported: HardwareDecodeSupport.isAV1Supported
+            isAV1HardwareSupported: HardwareDecodeSupport.isAV1Supported,
+            hasDialogueBoost: PrismCoreSession.isDialogueBoostAvailable,
+            gpuDeinterlacer: SoftwareVideoDecoder.gpuDeinterlaceName
         )
     }
 
@@ -221,6 +235,8 @@ public enum FFmpegBuild {
             "  av1 decoder: \(capabilities.av1Decoder ?? "none")"
                 + " (hardware: \(capabilities.isAV1HardwareSupported ? "yes" : "no"))"
         )
+        lines.append("  dialogue boost: \(capabilities.hasDialogueBoost ? "yes" : "no")")
+        lines.append("  gpu deinterlacer: \(capabilities.gpuDeinterlacer ?? "none — CPU route")")
         if !isABIMatched {
             lines.append(
                 "  ⚠︎ ABI mismatch: "

@@ -20,10 +20,11 @@ source-compatible.)
   stock MPVKit ships the E-AC-3 decoders only — so "the audio track is missing"
   is unreproducible until you know which build was asked. `FFmpegBuild.summary`
   is one paste-able block: FFmpeg's own version string, every linked library,
-  and the capability answers that change routing (`eac3` encoder, AV1 decoder,
-  AV1 hardware). Capabilities are asked of libavcodec rather than read out of
-  the configure line, because a `--enable-encoder=eac3` that failed to take is
-  precisely the case worth catching; `FFmpegBuild.configuration` carries the
+  and the capability answers that change what the engine does with a source
+  (`eac3` encoder, AV1 decoder and this device's AV1 hardware, dialogue boost,
+  the GPU deinterlacer). Capabilities are asked of libav* rather than read out
+  of the configure line, because a `--enable-encoder=eac3` that failed to take
+  is precisely the case worth catching; `FFmpegBuild.configuration` carries the
   configure line itself for the bug report.
 
   The second is ABI. PrismCore compiles against MPVKit's headers, but a host
