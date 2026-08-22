@@ -319,9 +319,48 @@ final class SubtitleRenditionSet: @unchecked Sendable {
 
         lock.withLock {
             tracks = built
-            storedRenditions = descriptions
+            storedRenditions = Self.withUniqueNames(descriptions)
         }
         return Set(built.compactMap(\.inputIndex))
+    }
+
+    /// Force every rendition's `NAME` to be unique within the group.
+    ///
+    /// HLS forbids two renditions in one group sharing a `NAME`
+    /// (RFC 8216 §4.3.4.1), and AVFoundation enforces it the expensive way: it
+    /// keeps the first and **silently discards** the rest. No error, no log —
+    /// the option simply is not in the legible `AVMediaSelectionGroup`, and a
+    /// host that builds its menu from that group shows one track where the
+    /// source had two.
+    ///
+    /// Which is not an exotic shape. The name falls back to the container's
+    /// title, then the language tag, and a forced track is usually untitled —
+    /// so an MKV with `eng` full plus `eng` forced (the ordinary way a disc rip
+    /// carries foreign-dialogue subtitles) produced two renditions both named
+    /// `eng`, and the forced one lost. It was invisible from the playlist text,
+    /// which listed both lines correctly, `FORCED=YES` and all.
+    ///
+    /// The disambiguator is a bare ordinal rather than something descriptive
+    /// like "Forced": AVFoundation already appends "Forced" to the *display*
+    /// name of a `FORCED=YES` rendition, so naming one "English (Forced)"
+    /// reads back as "English (Forced) Forced" in the menu.
+    static func withUniqueNames(
+        _ descriptions: [MasterPlaylistBuilder.SubtitleRendition]
+    ) -> [MasterPlaylistBuilder.SubtitleRendition] {
+        // Case-insensitive: "English" and "english" are two legal NAMEs by the
+        // letter of the spec and one indistinguishable row in any menu.
+        var used: Set<String> = []
+        return descriptions.map { description in
+            var name = description.name
+            var ordinal = 2
+            while !used.insert(name.lowercased()).inserted {
+                name = "\(description.name) \(ordinal)"
+                ordinal += 1
+            }
+            var unique = description
+            unique.name = name
+            return unique
+        }
     }
 
     // MARK: - Lazy arming
