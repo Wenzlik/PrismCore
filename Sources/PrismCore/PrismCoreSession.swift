@@ -64,6 +64,7 @@ public actor PrismCoreSession {
         var segmentCacheBytes: Int?
         var forceMuxedShape: Bool
         var keyframeIndexCacheDirectory: URL?
+        var dialogueBoost: [DialogueBoostLevel]
     }
 
     private let configuration: Configuration
@@ -119,6 +120,29 @@ public actor PrismCoreSession {
     /// "Dolby Atmos" needs this answer instead of that one.
     public var objectAudio: [ObjectAudioFinding] {
         remuxer.objectAudioFindings
+    }
+
+    /// Whether this build can produce dialogue-boost renditions at all: the
+    /// EAC3 encoder (absent from stock MPVKit — the same gate as the audio
+    /// bridge) and libavfilter's `pan`. Read this before offering the control
+    /// in UI; a per-source answer (does the default track have a centre
+    /// channel, did the renditions land) is `dialogueBoostRenditions` after
+    /// `start()`.
+    public static var isDialogueBoostAvailable: Bool {
+        AudioBridge.isEncoderAvailable && DialogueBoostFilter.isAvailable
+    }
+
+    /// The dialogue-boost renditions the served master actually declares —
+    /// level plus the exact `NAME`, which is the matching
+    /// `AVMediaSelectionOption.displayName`. Populated once the master is
+    /// written (any time after `start()` returns); empty when none were
+    /// requested, the build can't produce them, the default track has no
+    /// centre channel, or the session fell back to the muxed shape. The
+    /// robust way to *find* the options is the
+    /// `.enhancesSpeechIntelligibility` media characteristic; this list is
+    /// for building the host's own level picker.
+    public var dialogueBoostRenditions: [DialogueBoostRendition] {
+        remuxer.dialogueBoostRenditions
     }
 
     /// The source's chapter marks (Matroska `Chapters`, MP4 chapter tracks),
@@ -184,6 +208,9 @@ public actor PrismCoreSession {
     ///     harvests every keyframe it reads anyway; the next play of the same
     ///     source plans on that map — full demand-driven seeking, as if the
     ///     file had an index. `nil` (the default) turns persistence off.
+    ///   - dialogueBoost: extra "Dialogue Boost" audio renditions to derive
+    ///     from the default track, one per level. See the `dialogueBoost`
+    ///     doc on the primary initializer.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -191,7 +218,8 @@ public actor PrismCoreSession {
         displayIsDolbyVisionCapable: Bool = false,
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
-        keyframeIndexCacheDirectory: URL? = nil
+        keyframeIndexCacheDirectory: URL? = nil,
+        dialogueBoost: [DialogueBoostLevel] = []
     ) throws {
         try self.init(
             url: url,
@@ -202,7 +230,8 @@ public actor PrismCoreSession {
             ),
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
-            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            dialogueBoost: dialogueBoost
         )
     }
 
@@ -213,6 +242,23 @@ public actor PrismCoreSession {
     /// 4 set out to replace the caller-supplied guess with. The booleans stay for
     /// callers that genuinely know better than the read — a host mirroring to an
     /// external panel, or a test pinning a shape.
+    ///
+    /// - Parameter dialogueBoost: extra **Dialogue Boost** renditions to derive
+    ///   from the default audio track — the engine-side answer to a feature
+    ///   AVFoundation cannot host: `audioMix` (and every audio tap) is ignored
+    ///   on HLS items, which is what this engine serves. Each level becomes an
+    ///   alternate rendition (decoded, centre-favoured, re-encoded to EAC3)
+    ///   in the master's audio group, marked with the
+    ///   `public.accessibility.enhances-speech-intelligibility`
+    ///   characteristic; the base track stays bit-for-bit untouched (Atmos
+    ///   included), and the host flips levels via `AVMediaSelection` like any
+    ///   other track. Opt-in because each level costs a full decode → filter →
+    ///   encode chain for the length of the session. Best-effort by design:
+    ///   levels that can't be built (no centre channel, or a build without
+    ///   the EAC3 encoder / `pan` filter — check `isDialogueBoostAvailable`)
+    ///   are skipped, and `dialogueBoostRenditions` reports what actually
+    ///   made it into the served master. Renditions live only in a master, so
+    ///   the muxed fallback shape drops them.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -220,7 +266,8 @@ public actor PrismCoreSession {
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
         probed: ProbedSource? = nil,
-        keyframeIndexCacheDirectory: URL? = nil
+        keyframeIndexCacheDirectory: URL? = nil,
+        dialogueBoost: [DialogueBoostLevel] = []
     ) throws {
         self.configuration = Configuration(
             url: url,
@@ -228,7 +275,8 @@ public actor PrismCoreSession {
             display: display,
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
-            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            dialogueBoost: dialogueBoost
         )
 
         let directory = FileManager.default.temporaryDirectory
@@ -253,6 +301,7 @@ public actor PrismCoreSession {
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             forceMuxed: forceMuxedShape,
+            dialogueBoost: dialogueBoost,
             probed: probed,
             keyframeCacheDirectory: keyframeIndexCacheDirectory
         )
@@ -279,7 +328,8 @@ public actor PrismCoreSession {
         httpHeaders: [String: String] = [:],
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
-        keyframeIndexCacheDirectory: URL? = nil
+        keyframeIndexCacheDirectory: URL? = nil,
+        dialogueBoost: [DialogueBoostLevel] = []
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -287,7 +337,8 @@ public actor PrismCoreSession {
             display: .current(),
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
-            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory
+            keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            dialogueBoost: dialogueBoost
         )
     }
 
@@ -328,7 +379,10 @@ public actor PrismCoreSession {
             display: configuration.display,
             segmentCacheBytes: configuration.segmentCacheBytes,
             forceMuxedShape: true,
-            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory
+            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory,
+            // Carried for fidelity, though the muxed shape can't serve it:
+            // boost renditions live in a master, and this shape has none.
+            dialogueBoost: configuration.dialogueBoost
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback
@@ -370,7 +424,8 @@ public actor PrismCoreSession {
             ),
             segmentCacheBytes: configuration.segmentCacheBytes,
             forceMuxedShape: false,
-            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory
+            keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory,
+            dialogueBoost: configuration.dialogueBoost
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback
