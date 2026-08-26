@@ -252,14 +252,15 @@ struct LazyDialogueBoostTests {
 
         // (1) Let production run the whole 20 s file (the lead cap never
         // parks before the first fetch): the default rendition lands every
-        // segment, the boost directories stay EMPTY — no init, no segment —
-        // which is only possible if no bridge was ever fed.
+        // segment, the boost directories hold their planned playlist and
+        // NOTHING else — no init, no segment — which is only possible if no
+        // bridge was ever fed.
         let audio0 = work.appendingPathComponent("audio0")
         await waitUntil { self.files(in: audio0).contains("seg00003.m4s") }
         #expect(files(in: audio0).contains("init.mp4"))
         #expect(files(in: audio0).contains("seg00000.m4s"))
-        #expect(files(in: work.appendingPathComponent("audio1")).isEmpty)
-        #expect(files(in: work.appendingPathComponent("audio2")).isEmpty)
+        #expect(files(in: work.appendingPathComponent("audio1")) == ["index.m3u8"])
+        #expect(files(in: work.appendingPathComponent("audio2")) == ["index.m3u8"])
 
         // (2) The first fetch under audio1/ arms it: the request re-anchors
         // production at the demanded segment and the segment is served
@@ -275,7 +276,7 @@ struct LazyDialogueBoostTests {
         #expect((initResponse as? HTTPURLResponse)?.statusCode == 200)
         #expect(boostInit.range(of: Data("dec3".utf8)) != nil, "boost init must describe EAC3")
         // The other level was not asked for and stays dormant.
-        #expect(files(in: work.appendingPathComponent("audio2")).isEmpty)
+        #expect(files(in: work.appendingPathComponent("audio2")) == ["index.m3u8"])
 
         // (3) The stream-copied default rendition is what it was: its
         // segment of the same index still serves, and its init is AC3's.

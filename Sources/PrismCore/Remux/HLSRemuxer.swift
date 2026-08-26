@@ -1025,6 +1025,13 @@ final class HLSRemuxer: @unchecked Sendable {
                    request.index != segmentIndex || request.forced,
                    request.index >= 0, request.index < (plannedPlan?.entries.count ?? 0) {
                     try reanchor(to: request.index)
+                    // The packet in hand was read at the OLD position. Were it
+                    // a keyframe past the anchor (a backward seek from further
+                    // on), the discard check below would take it for the
+                    // anchor keyframe and the segment would open on a picture
+                    // from the wrong place, followed by lower timestamps from
+                    // the seek target. The next read comes from the anchor.
+                    continue
                 }
 
                 // Between a seek and the anchor keyframe, everything is discard:

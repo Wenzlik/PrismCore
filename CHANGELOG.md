@@ -109,6 +109,14 @@ source-compatible.)
   init is minted by that cut. Playlist fetches never arm: AVPlayer prefetches
   rendition playlists it never plays.
 
+  Found by review while adding the forced re-anchor, and fixed for every
+  re-anchor: the packet already in hand when the copy loop re-anchors was
+  read at the OLD position and was still processed afterwards. A keyframe
+  past the anchor (a backward seek from further on) satisfied the
+  "anchor keyframe arrived" check and opened the segment on a picture from
+  the wrong place, followed by lower timestamps from the seek target. The
+  loop now discards it and reads on from the anchor.
+
   Two consequences worth knowing. The readiness gate no longer waits for a
   lazy rendition's init (`readyPlaylistName(in:lazyRenditions:)`) — it is
   not coming until someone selects the rendition, and AVPlayer fetches an
