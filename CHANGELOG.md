@@ -180,7 +180,11 @@ source-compatible.)
   a contiguous prefix — planned exactly on keyframes up to the covered end,
   then continued on the 6 s uniform stride to the container's end. Tail
   boundaries are time targets the producer cuts at the next keyframe
-  at-or-after, so a seek INTO the un-watched tail lands up to one GOP late;
+  at-or-after, with a stride no shorter than the largest gap the prefix
+  showed (review finding: a 6 s stride over 10 s GOPs would resolve two
+  targets to one keyframe and drift the timeline cumulatively), so a seek
+  INTO the un-watched tail lands up to one GOP late and the error never
+  accumulates;
   in exchange the watched prefix (where the resume point is) gets a
   seekable VOD on a source that had none. A session planned on a partial
   map keeps harvesting to extend the prefix — only while its run started

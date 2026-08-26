@@ -127,6 +127,12 @@ struct KeyframeIndexCache: Sendable {
     /// replace it either: a short second play must not shrink what a longer
     /// first play learned.
     func store(_ entry: Entry) {
+        // The compare-and-write is one critical section: two sessions of the
+        // same source ending together could both pass the check below and
+        // the shorter one land last (review finding). Process-wide, since
+        // every session's cache value points at the same directory.
+        Self.storeLock.lock()
+        defer { Self.storeLock.unlock() }
         if !entry.complete, let existing = lookup(identity: entry.identity) {
             if existing.complete { return }
             if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return }
@@ -138,6 +144,8 @@ struct KeyframeIndexCache: Sendable {
         try? data.write(to: fileURL(identity: entry.identity), options: .atomic)
         prune()
     }
+
+    private static let storeLock = NSLock()
 
     private func prune() {
         guard let files = try? FileManager.default.contentsOfDirectory(

@@ -317,11 +317,25 @@ struct SegmentPlan: Equatable {
         // takes over where the trusted keyframes end.
         let endPTS = Int64(durationSeconds / tickSeconds)
         if coveredThroughPTS != nil {
+            // The tail stride is at least the largest keyframe gap the prefix
+            // showed. Boundaries here are time targets the producer cuts at
+            // the next keyframe at-or-after, and with a stride SHORTER than
+            // the GOP two targets resolve to the same keyframe: every entry
+            // then swallows a whole GOP while the playlist promises 6 s, and
+            // the timeline drifts cumulatively (10 s GOPs advertised as 6 s
+            // entries — review finding). A stride no shorter than the gap
+            // gives every target its own GOP, so the error stays one GOP per
+            // entry and never accumulates.
+            var largestGap: Int64 = 0
+            for (earlier, later) in zip(sorted, sorted.dropFirst()) {
+                largestGap = max(largestGap, later - earlier)
+            }
+            let tailStep = max(step, (Double(largestGap) * tickSeconds).rounded(.up) / tickSeconds)
             var start = Double(startPTS)
             while Double(endPTS) - start > 0.01 / tickSeconds {
-                let length = min(step, Double(endPTS) - start)
+                let length = min(tailStep, Double(endPTS) - start)
                 entries.append(Entry(startPTS: Int64(start), duration: length * tickSeconds))
-                start += step
+                start += tailStep
             }
         } else {
             let tail = Double(max(endPTS - startPTS, 0)) * tickSeconds

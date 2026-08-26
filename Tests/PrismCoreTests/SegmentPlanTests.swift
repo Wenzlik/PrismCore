@@ -43,6 +43,15 @@ struct SegmentPlanTests {
         ))
         #expect(complete.map(\.startPTS) == [0, 6_000, 12_000])
         #expect(complete.last?.duration == 48)
+        // A prefix with 10 s GOPs strides the tail at 10 s, never 6: two
+        // 6 s targets would otherwise resolve to the same keyframe and the
+        // playlist timeline would drift cumulatively.
+        let longGOP = try #require(SegmentPlan.keyframePlan(
+            keyframes: [0, 10_000, 20_000, 30_000], durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
+            coveredThroughPTS: 30_000
+        ))
+        #expect(longGOP.map(\.startPTS) == [0, 10_000, 20_000, 30_000, 40_000, 50_000])
+        #expect(longGOP.map(\.duration) == Array(repeating: 10, count: 6))
         // A prefix too short for one target fails the coverage witness.
         #expect(SegmentPlan.keyframePlan(
             keyframes: [0, 2_000, 4_000], durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
