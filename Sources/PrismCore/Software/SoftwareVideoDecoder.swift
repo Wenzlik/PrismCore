@@ -347,6 +347,43 @@ final class SoftwareVideoDecoder {
         }
     }
 
+    /// EOF, one frame at a time: signal end-of-stream on the first call, then
+    /// hand out at most one buffered frame per call so the caller can stop at
+    /// its memory cap between them. Returns false once the decoder (and the
+    /// deinterlacer's tail) is dry. `decode(nil)` drains everything in one
+    /// go, which is the burst this exists to avoid.
+    func receiveOneAtEOF(emit: Emit) throws -> Bool {
+        guard let context = codecContext, let frame else { return false }
+        if !eofSignalled {
+            eofSignalled = true
+            let sendResult = avcodec_send_packet(context, nil)
+            if sendResult < 0, sendResult != swift_AVERROR_EOF() {
+                throw FFmpegError(code: sendResult, operation: "avcodec_send_packet(video, EOF)")
+            }
+        }
+        let result = avcodec_receive_frame(context, frame)
+        if result == swift_AVERROR_EOF() {
+            if wantsDeinterlace { try drainFilter(emit: emit) }
+            return false
+        }
+        if result == swift_AVERROR(EAGAIN) { return true }
+        if result < 0 {
+            if try recoverFromHardwareFailure() { return false }
+            throw FFmpegError(code: result, operation: "avcodec_receive_frame(video, EOF)")
+        }
+        defer { av_frame_unref(frame) }
+        if wantsDeinterlace {
+            try filterAndEmit(frame, emit: emit)
+        } else {
+            try emit(try makeSampleBuffer(from: frame))
+        }
+        return true
+    }
+
+    /// Whether `receiveOneAtEOF` has told the decoder the stream is over.
+    /// Cleared by a flush, which is how a seek after EOF starts decoding again.
+    private var eofSignalled = false
+
     /// Drop everything buffered — a seek. Cheap and mandatory: without it the
     /// first frames after a seek are the pre-seek ones. The filter graph goes
     /// with it: `bwdif` holds a frame of context, and pre-seek fields woven
@@ -355,6 +392,7 @@ final class SoftwareVideoDecoder {
     func flushBuffers() {
         guard let context = codecContext else { return }
         avcodec_flush_buffers(context)
+        eofSignalled = false
         teardownFilterGraph()
     }
 

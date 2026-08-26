@@ -257,14 +257,21 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// The synchronizer boundary that turns "last buffer enqueued" into
     /// "last buffer played" — `.ended` fires from it, not from the enqueue.
     private var endObserver: Any?
-    /// End (PTS + duration) of the newest audio buffer handed to the sink.
-    /// With video's counterpart it is where the presentation actually ends.
+    /// End (PTS + duration) of the newest audio buffer handed to the sink,
+    /// and of the newest video frame — the later of the two is where the
+    /// presentation actually ends.
     private var lastEnqueuedAudioEnd: CMTime = .invalid
+    private var lastEnqueuedVideoEnd: CMTime = .invalid
     /// Renderer-failure recoveries in the current window, so a renderer that
     /// fails on every re-prime ends the session instead of looping forever.
     private var rendererRecoveries: [ContinuousClock.Instant] = []
 
     private var reachedEOF = false
+    /// EOF reached but the frame-threaded video decoder still holds frames.
+    /// They come out one per pump iteration, under the byte cap, instead of
+    /// all at once — a full drain of a 4K tail into a blocked sink is exactly
+    /// the allocation burst the cap exists to prevent.
+    private var videoTailPending = false
     private var stopped = false
     /// The furthest packet end (PTS + duration, seconds) the demuxer has seen
     /// — the duration-of-record for a container that never states one (#58).
@@ -482,11 +489,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             videoSink.flush(removingDisplayedImage: false)
             audioSink.flush()
             reachedEOF = false
+            videoTailPending = false
             clockAnchored = false
             cancelEndObserver()
             // The renderer's queue is gone with the flush, and any in-flight
             // track-switch discard is moot — the seek moved the target.
             lastEnqueuedVideoPTS = .invalid
+            lastEnqueuedVideoEnd = .invalid
             lastEnqueuedAudioEnd = .invalid
             beginDiscarding(upTo: time)
 
@@ -520,13 +529,32 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// `av_seek_frame` because the latter trips assertions in matroskadec with
     /// nested elements (AGENTS.md). Returns false when the source refused (no
     /// index — raw MPEG-2 TS), in which case the position is unchanged.
+    ///
+    /// Bounded by the read guard: a Matroska without Cues turns a timestamp
+    /// seek into a linear scan of the whole container (66 s on one 5.4 GB
+    /// file, AGENTS.md), and over a starving server that scan never ends. On
+    /// expiry the seek fails like a refused one, and the latched
+    /// `AVERROR_EXIT` is cleared so the context can read again.
     private func seekDemuxer(_ input: UnsafeMutablePointer<AVFormatContext>, to time: CMTime) -> Bool {
         let target = max(0, Int64(CMTimeGetSeconds(time) * Double(AV_TIME_BASE)))
+        let readGuard = stateLock.withLock { interruptGuard }
+        readGuard?.arm(budget: Self.seekBudget)
         let result = avformat_seek_file(input, -1, Int64.min, target, target, AVSEEK_FLAG_BACKWARD)
+        // `stop()` arms the guard with a zero budget to break a blocked read;
+        // disarming here would re-open that window, so only a seek that was
+        // not stopped disarms.
+        if !stopped { readGuard?.disarm() }
+        if let pb = input.pointee.pb, pb.pointee.error < 0 {
+            pb.pointee.error = 0
+        }
         guard result >= 0 else { return false }
         avformat_flush(input)
         return true
     }
+
+    /// Generous like the probe's: a healthy index seek is milliseconds, so
+    /// the budget only ever cuts off a scan that was not going to finish.
+    static let seekBudget: Duration = SourceOpenTuning.probeBudget
 
     /// Arm the decode-and-discard window after a seek: the keyframe libavformat
     /// landed on is *before* the target, and everything between is decoded
@@ -549,7 +577,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// before it can return. Bounded by EOF and by the pending caps, the same
     /// way `pump` is.
     private func pumpUntilAnchored(bailingIfSuperseded generation: UInt64? = nil) throws {
-        while !stopped, !reachedEOF {
+        while !stopped, !reachedEOF || videoTailPending {
             if let generation, !isCurrentSeek(generation) { return }
             if clockAnchored {
                 drainPending()
@@ -559,7 +587,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 || pendingVideo.count >= pacing.videoDepth * pacing.hardCapMultiplier
             let audioCapped = pendingAudio.count >= pacing.audioDepth * pacing.hardCapMultiplier
             if videoCapped || audioCapped { return }
-            try readAndDecodeOnePacket()
+            if reachedEOF, let videoDecoder {
+                videoTailPending = try videoDecoder.receiveOneAtEOF(emit: acceptVideo)
+            } else {
+                try readAndDecodeOnePacket()
+            }
         }
         drainPending()
     }
@@ -654,6 +686,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 // (paused) — drop it here rather than trusting the renderer.
                 discardAudioBefore = now
                 reachedEOF = false
+                videoTailPending = false
             }
 
             if !hadAudio {
@@ -756,17 +789,36 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         input = context
         adoptedSource = probed
         stateLock.withLock { interruptGuard = probed.interruptGuard }
-        // `avformat_seek_file` rather than `av_seek_frame`: the latter trips
-        // assertions in matroskadec with nested elements (AGENTS.md).
-        _ = avformat_seek_file(context, -1, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
-        avformat_flush(context)
         // An expired probe budget latched AVERROR_EXIT in the AVIOContext and
         // the first read here would return it verbatim; the probe clears it,
         // but a context that travelled through other hands may not have been.
         if let pb = context.pointee.pb, pb.pointee.error < 0 {
             pb.pointee.error = 0
         }
+        guard seekDemuxer(context, to: .zero) else {
+            // A source that cannot rewind (a range-less HTTP server, a pipe)
+            // would start wherever the probe's interlace verification left
+            // it — the first frames of the film silently clipped. A fresh
+            // open costs the round trip this path was meant to save, and is
+            // the only way to start at the head there.
+            teardownInput()
+            try openInput(url: probed.url, httpHeaders: probed.httpHeaders)
+            return
+        }
         try describeInput(using: probed.info)
+    }
+
+    /// Close the demux context (and release what travels with it) without
+    /// touching decoders or sinks — the adopt-then-reopen fallback.
+    private func teardownInput() {
+        if input != nil {
+            let readGuard = stateLock.withLock { interruptGuard }
+            withExtendedLifetime(readGuard) {
+                avformat_close_input(&input)
+            }
+        }
+        adoptedSource = nil
+        stateLock.withLock { interruptGuard = nil }
     }
 
     /// Publish duration and the per-stream description off the open context,
@@ -884,18 +936,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             while !stopped {
                 drainPending()
 
-                if reachedEOF {
-                    if pendingVideo.isEmpty, pendingAudio.isEmpty {
-                        scheduleEndedIfNeeded()
-                    }
-                    return
-                }
-
                 let videoDepth = underMemoryPressure ? min(2, pacing.videoDepth) : pacing.videoDepth
                 let audioDepth = underMemoryPressure ? min(8, pacing.audioDepth) : pacing.audioDepth
                 let videoWantsMore = videoDecoder != nil && pendingVideo.count < videoDepth
                 let audioWantsMore = audioDecoder != nil && pendingAudio.count < audioDepth
-                guard videoWantsMore || audioWantsMore else { return }
+                guard videoWantsMore || audioWantsMore || reachedEOF else { return }
 
                 // The bound on "read for whoever is still hungry": one stream's
                 // queue may run ahead of its depth while we chase the other, but
@@ -907,6 +952,17 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 let videoCapped = pendingVideoBytes >= videoByteCap
                     || pendingVideo.count >= videoDepth * pacing.hardCapMultiplier
                 let audioCapped = pendingAudio.count >= audioDepth * pacing.hardCapMultiplier
+
+                if reachedEOF {
+                    if videoTailPending, !videoCapped, let videoDecoder {
+                        videoTailPending = try videoDecoder.receiveOneAtEOF(emit: acceptVideo)
+                        continue
+                    }
+                    if !videoTailPending, pendingVideo.isEmpty, pendingAudio.isEmpty {
+                        scheduleEndedIfNeeded()
+                    }
+                    return
+                }
                 if videoCapped || audioCapped { return }
 
                 try readAndDecodeOnePacket()
@@ -926,6 +982,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             let pts = CMSampleBufferGetPresentationTimeStamp(next)
             if pts.isValid, !lastEnqueuedVideoPTS.isValid || pts > lastEnqueuedVideoPTS {
                 lastEnqueuedVideoPTS = pts
+            }
+            let end = Self.presentationEnd(of: next)
+            if end.isValid, !lastEnqueuedVideoEnd.isValid || end > lastEnqueuedVideoEnd {
+                lastEnqueuedVideoEnd = end
             }
         }
         while let next = pendingAudio.first, audioSink.isReadyForMoreSamples {
@@ -985,13 +1045,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// presentation end, and only that callback flips the state.
     private func scheduleEndedIfNeeded() {
         guard state != .ended, endObserver == nil else { return }
-        var end: CMTime = .invalid
-        if lastEnqueuedVideoPTS.isValid {
-            // The last frame's own duration isn't kept; a frame's worth past
-            // its PTS is the nominal end, and the audio end below usually
-            // outruns it anyway.
-            end = lastEnqueuedVideoPTS
-        }
+        var end: CMTime = lastEnqueuedVideoEnd
         if lastEnqueuedAudioEnd.isValid, !end.isValid || lastEnqueuedAudioEnd > end {
             end = lastEnqueuedAudioEnd
         }
@@ -1086,8 +1140,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 stateLock.withLock { storedDurationSeconds = maxSeenPacketEndSeconds }
             }
             // Drain the decoders: a frame-threaded decoder holds several frames
-            // at EOF, and they are real picture.
-            try videoDecoder?.decode(nil, emit: acceptVideo)
+            // at EOF, and they are real picture. Audio's tail is a few small
+            // buffers; video's is pulled a frame at a time by `pump`, under
+            // the byte cap.
+            videoTailPending = videoDecoder != nil
             try audioDecoder?.decode(nil, emit: acceptAudio)
             return
         }
