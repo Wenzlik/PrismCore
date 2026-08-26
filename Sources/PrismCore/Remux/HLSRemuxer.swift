@@ -836,42 +836,56 @@ final class HLSRemuxer: @unchecked Sendable {
             return plannedPlan.entries[index + 1].startPTS
         }
 
-        // Retention exists only where eviction is survivable: planned mode,
-        // where a deleted segment is reproduced on demand.
-        var retention: SegmentRetention? = (plannedPlan != nil)
+        // Retention: planned mode, where a deleted segment is reproduced on
+        // demand — and, since 1.11, the sequential shape too, with the lead
+        // cap keeping the producer near the playhead so eviction only ever
+        // reaches far behind it. There a deleted EVENT segment is NOT
+        // reproducible (no plan to re-anchor on): a backward seek to one is a
+        // 404 AVPlayer treats as a failed segment. Accepted, and documented,
+        // against the alternative — a sequential remux of a 50 GB film wrote
+        // all 50 GB to the device before this. Never ahead of the playhead.
+        var retention: SegmentRetention? = (plannedPlan != nil || demand != nil)
             ? segmentCacheBytes.map { SegmentRetention(budgetBytes: $0) }
             : nil
+        demand?.nominalSegmentSeconds = Double(segmentSeconds)
+
+        // Unlinks run off the producer thread: a `removeItem` per victim per
+        // rendition sat in the cut path, between a landed segment and the
+        // next packet. Serial, so two evictions never race each other; a
+        // re-production of an evicted index needs a miss first, which needs
+        // the unlink done — the window in which a fresh file could be hit by
+        // a stale unlink is the queue's own latency (milliseconds) against a
+        // demuxer seek, and the fetch that finds the stale file still serves
+        // the same bytes.
+        let unlinkQueue = DispatchQueue(label: "cz.zmrhal.prismcore.unlink", qos: .utility)
 
         /// Record a landed segment's disk cost (variant + every rendition
-        /// file of the same index) and delete whatever the policy evicts.
-        func recordAndEvict(index: Int, videoBytes: Int) {
+        /// file of the same index, as their cuts reported it — no `stat`)
+        /// and delete whatever the policy evicts.
+        func recordAndEvict(index: Int, videoBytes: Int, renditionBytes: Int) {
             guard retention != nil else { return }
-            let name = String(format: "seg%05d.m4s", index)
-            var bytes = videoBytes
-            for rendition in renditions {
-                let path = outputDirectory
-                    .appendingPathComponent(rendition.directoryName)
-                    .appendingPathComponent(name).path
-                bytes += ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.intValue ?? 0
-            }
             // Indexes with an outstanding demand serve are off limits — the
-            // fetch that re-anchored production here is still polling for its
+            // fetch that re-anchored production here is still waiting for its
             // file, and production has usually run several segments past it
-            // by the time this records (issue #43).
-            let protected = demand?.demandProtectedIndexes ?? []
-            for victim in retention!.record(
-                index: index, bytes: bytes, producing: index, protected: protected
-            ) {
-                let victimName = String(format: "seg%05d.m4s", victim)
-                try? FileManager.default.removeItem(
-                    at: outputDirectory.appendingPathComponent(victimName)
-                )
-                for rendition in renditions {
-                    try? FileManager.default.removeItem(
-                        at: outputDirectory
-                            .appendingPathComponent(rendition.directoryName)
-                            .appendingPathComponent(victimName)
-                    )
+            // by the time this records (issue #43). In the sequential shape
+            // everything from the playhead on is off limits too.
+            var protected = demand?.demandProtectedIndexes ?? []
+            if plannedPlan == nil, let playhead = demand?.playheadIndex, playhead <= index {
+                for ahead in playhead...index { protected.insert(ahead) }
+            }
+            let victims = retention!.record(
+                index: index, bytes: videoBytes + renditionBytes, producing: index, protected: protected
+            )
+            guard !victims.isEmpty else { return }
+            let directories = [outputDirectory] + renditions.map {
+                outputDirectory.appendingPathComponent($0.directoryName)
+            }
+            unlinkQueue.async {
+                for victim in victims {
+                    let victimName = String(format: "seg%05d.m4s", victim)
+                    for directory in directories {
+                        try? FileManager.default.removeItem(at: directory.appendingPathComponent(victimName))
+                    }
                 }
             }
         }
@@ -982,11 +996,12 @@ final class HLSRemuxer: @unchecked Sendable {
             // just used — HLS expects comparable segmentation across renditions,
             // and a rendition that drifted into its own cadence would make
             // AVPlayer's switch between them a resync.
+            var renditionBytes = 0
             for rendition in renditions {
-                try rendition.cut(durationSeconds: duration)
+                renditionBytes += try rendition.cut(durationSeconds: duration)
             }
             demand?.setProducing(index: segmentIndex)
-            recordAndEvict(index: segmentIndex - 1, videoBytes: media.count)
+            recordAndEvict(index: segmentIndex - 1, videoBytes: media.count, renditionBytes: renditionBytes)
             // Refreshed per segment rather than once at EOF: a host that wants to
             // log "Dolby Vision engaged" can read it as soon as playback starts,
             // and a session that is cancelled halfway still leaves a real count.
@@ -1130,12 +1145,16 @@ final class HLSRemuxer: @unchecked Sendable {
                                 // the last fetch; an anchor request or a fetch
                                 // wakes it, and the per-packet check right
                                 // above handles whichever it was.
-                                if plannedPlan != nil {
-                                    demand?.parkWhileAhead(
-                                        producing: segmentIndex,
-                                        isCancelled: { [cancelled] in cancelled.isSet }
-                                    )
-                                }
+                                // The sequential shape parks on the same cap
+                                // (its provider reports hits too): the cost
+                                // is that a sequential harvest completes only
+                                // when the viewer reaches the end, the gain
+                                // is not demuxing and writing the whole film
+                                // while they are on minute two.
+                                demand?.parkWhileAhead(
+                                    producing: segmentIndex,
+                                    isCancelled: { [cancelled] in cancelled.isSet }
+                                )
                                 segmentStartPTS = pts
                                 nextBoundaryPTS = plannedPlan != nil
                                     ? plannedBoundary(after: segmentIndex)
@@ -1150,21 +1169,21 @@ final class HLSRemuxer: @unchecked Sendable {
                     // source — the cost there is one NAL walk, no copy.
                     if let dolbyVisionConverter, let data = packet.pointee.data,
                        packet.pointee.size > 0 {
-                        let original = [UInt8](
-                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
-                        )
-                        if let converted = dolbyVisionConverter.convert(packet: original) {
-                            try Self.replacePayload(of: packet, with: converted)
+                        // The walk runs on the packet's own buffer, and a changed
+                        // packet is written ONCE into a fresh av_malloc'd buffer
+                        // that replaces the packet's — no `[UInt8]` copy in, no
+                        // grow + memcpy out.
+                        try Self.rewritePayload(of: packet) { source, allocate in
+                            dolbyVisionConverter.convert(packet: source, into: allocate)
                         }
                     }
                     if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
+                       packet.pointee.flags & AV_PKT_FLAG_KEY != 0,
                        let lengthSize = videoTrack.nalUnitLengthSize,
                        let data = packet.pointee.data, packet.pointee.size > 0 {
-                        // Keyframes carry the sets; a non-keyframe simply yields
-                        // nothing and the next packet gets a turn.
-                        let bytes = [UInt8](
-                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
-                        )
+                        // Keyframes carry the sets — gated on the flag, so a
+                        // non-keyframe costs nothing, not even the walk.
+                        let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
                         for unit in HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) ?? []
                         where HVCCNormalizer.keptNALTypes.contains(unit.type) && unit.layerID == 0 {
                             let value = Array(unit.bytes)
@@ -1221,9 +1240,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     // answer rather than a question nobody closed.
                     muxedAtmosPacketsRead += 1
                     muxedAtmosComplexityIndex = EAC3Syncframe.atmosComplexityIndex(
-                        in: [UInt8](
-                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
-                        )
+                        in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
                     )
                     if muxedAtmosComplexityIndex != nil
                         || muxedAtmosPacketsRead >= Self.atmosSniffPacketBudget {
@@ -1271,7 +1288,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
-                recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count)
+                recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count, renditionBytes: 0)
                 if let start = segmentStartPTS {
                     try subtitles.flushSegment(
                         start: Double(start) * tickSeconds,
@@ -1678,31 +1695,39 @@ final class HLSRemuxer: @unchecked Sendable {
         }
     }
 
-    /// Swap a demuxed packet's payload for rewritten bytes, in place.
-    ///
-    /// `av_packet_make_writable` first: the packet the demuxer handed us may
-    /// share its buffer, and growing or writing through a shared buffer would
-    /// corrupt whatever else holds a reference.
-    private static func replacePayload(
+    /// Rewrite a demuxed packet's payload through `rewrite`, which walks the
+    /// current buffer and, only if it changes something, asks for an output
+    /// buffer of the exact size and fills it. That buffer is `av_malloc`ed
+    /// here (with `AV_INPUT_BUFFER_PADDING_SIZE` zeroed bytes, as libavcodec's
+    /// readers over-read by design) and swapped into the packet as its new
+    /// `AVBufferRef` — the demuxer's buffer, possibly shared, is released
+    /// rather than made writable and grown. One write of the new bytes, no
+    /// copy of the old ones.
+    private static func rewritePayload(
         of packet: UnsafeMutablePointer<AVPacket>,
-        with bytes: [UInt8]
+        rewrite: (UnsafeBufferPointer<UInt8>, (Int) -> UnsafeMutablePointer<UInt8>?) -> Bool
     ) throws {
-        try FFmpegError.check(av_packet_make_writable(packet), "av_packet_make_writable")
-        let current = Int(packet.pointee.size)
-        if bytes.count > current {
-            try FFmpegError.check(
-                av_grow_packet(packet, Int32(bytes.count - current)), "av_grow_packet"
-            )
-        } else if bytes.count < current {
-            av_shrink_packet(packet, Int32(bytes.count))
+        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return }
+        let source = UnsafeBufferPointer(start: UnsafePointer(data), count: Int(packet.pointee.size))
+        var replacement: UnsafeMutablePointer<AVBufferRef>?
+        var replacementSize = 0
+        let changed = rewrite(source) { size in
+            let padding = Int(AV_INPUT_BUFFER_PADDING_SIZE)
+            guard let buffer = av_buffer_alloc(Int(size + padding)) else { return nil }
+            _ = memset(buffer.pointee.data.advanced(by: size), 0, padding)
+            replacement = buffer
+            replacementSize = size
+            return buffer.pointee.data
         }
-        // After grow the buffer may have moved, so read `data` only now.
-        guard let destination = packet.pointee.data else {
-            throw FFmpegError(code: -1, operation: "packet has no data after resize")
+        guard changed, let replacement else {
+            if let stale = replacement { var buffer: UnsafeMutablePointer<AVBufferRef>? = stale; av_buffer_unref(&buffer) }
+            return
         }
-        bytes.withUnsafeBytes { source in
-            _ = memcpy(destination, source.baseAddress!, bytes.count)
-        }
+        // Side data and timestamps stay; only the payload's backing moves.
+        av_buffer_unref(&packet.pointee.buf)
+        packet.pointee.buf = replacement
+        packet.pointee.data = replacement.pointee.data
+        packet.pointee.size = Int32(replacementSize)
     }
 
     /// A converter for this source, or `nil` when there is nothing to convert.

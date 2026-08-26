@@ -368,6 +368,30 @@ final class AudioBridge {
         if encoderCtx != nil { avcodec_free_context(&encoderCtx) }
     }
 
+    /// Re-anchor without rebuilding: the decoder, encoder, resampler and
+    /// filter graph all survive a demand-driven seek, only their BUFFERED
+    /// state is stale — decoder frames from before the jump, PCM in the
+    /// FIFO, the resampler's delay line, and the clock's notion of where the
+    /// next frame should land. Opening a fresh bridge per seek (decoder open,
+    /// encoder open, FIFO, frame allocations — per rendition, per seek) was
+    /// most of what a scrub cost on a bridged track; this is the cheap
+    /// equivalent. The muxer is still rebuilt by the caller (frag_discont
+    /// needs a new one for the tfdt), and the encoder is NOT flushed: every
+    /// `send_frame` is drained on the spot, so it holds nothing.
+    func reset() {
+        if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
+        if let fifo { av_audio_fifo_reset(fifo) }
+        // The resampler's delay line belongs to the old position; dropping
+        // the context makes `reconfigureResamplerIfNeeded` build a fresh one
+        // on the next frame, exactly as for a format change.
+        if swrCtx != nil { swr_free(&swrCtx) }
+        swrInFormat = AV_SAMPLE_FMT_NONE
+        swrInRate = 0
+        boostFilter?.reset()
+        chunker.reset()
+        clock.reset()
+    }
+
     // MARK: - Output stream description
 
     /// Time base of the packets `feed`/`flush` emit (1/sample_rate).
@@ -826,6 +850,9 @@ struct FrameChunker {
         pending += max(0, samples)
     }
 
+    /// Forget the samples believed buffered — paired with a FIFO reset.
+    mutating func reset() { pending = 0 }
+
     /// One full frame, or nil while the FIFO is short. Mid-stream this is the
     /// only accessor used — a partial frame stays buffered for the next packet.
     mutating func nextFullChunk() -> Chunk? {
@@ -909,6 +936,14 @@ struct BridgeClock {
             nextPTS = framePTS - Int64(fifoDepth)
             anchored = true
         }
+    }
+
+    /// Forget the anchor: the next frame's own timestamp re-anchors the
+    /// counter, exactly as the first frame did — what a re-anchored producer
+    /// needs, since the next frame comes from wherever the seek landed.
+    mutating func reset() {
+        anchored = false
+        expectedInputPTS = nil
     }
 
     /// Take the PTS for a frame carrying `samples` of real audio.

@@ -134,7 +134,12 @@ final class AudioRenditionWriter {
     /// rendition's declared codec and channel count come from the encoder that
     /// only exists after this call.
     func open(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool = false) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Once: a re-anchor goes through `reanchor`, which keeps the directory
+        // (and the bridge) and only rebuilds the muxer.
+        if !directoryCreated {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            directoryCreated = true
+        }
 
         let index = Int32(track.streamIndex)
         if isLazy, !isArmed {
@@ -159,12 +164,9 @@ final class AudioRenditionWriter {
             return
         }
 
-        var plan: FMP4SegmentWriter.StreamPlan
-        if route.mode == .streamCopy {
-            plan = .init(inputIndex: index, language: sourceLanguage)
-        } else {
+        if route.mode != .streamCopy, bridge == nil {
             let inStream = input.pointee.streams[Int(index)]!
-            let audioBridge = try AudioBridge(
+            bridge = try AudioBridge(
                 codecpar: inStream.pointee.codecpar,
                 timeBase: inStream.pointee.time_base,
                 // mp4/mov is a global-header muxer: the encoder's extradata
@@ -174,12 +176,24 @@ final class AudioRenditionWriter {
                 // the centre-favouring filter between decode and re-encode.
                 dialogueBoost: route.mode.dialogueBoostLevel
             )
-            bridge = audioBridge
-            plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
-                try audioBridge.configure(outputStream: outStream)
-            }
         }
+        try openMuxer(input: input, restart: restart)
+    }
 
+    private var directoryCreated = false
+
+    /// The muxer alone, described from the bridge when there is one — the
+    /// part of `open` a re-anchor repeats.
+    private func openMuxer(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool) throws {
+        let index = Int32(track.streamIndex)
+        let plan: FMP4SegmentWriter.StreamPlan
+        if let bridge {
+            plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
+                try bridge.configure(outputStream: outStream)
+            }
+        } else {
+            plan = .init(inputIndex: index, language: sourceLanguage)
+        }
         _ = try writer.open(input: input, plan: [plan], restart: restart)
         outputIndex = writer.streamMap[track.streamIndex] ?? 0
         isProducing = true
@@ -204,13 +218,20 @@ final class AudioRenditionWriter {
     /// `segmentIndex`. The old muxer's partial fragment is abandoned — that
     /// segment gets reproduced if anything ever asks for it.
     func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
-        close()
         writer = FMP4SegmentWriter()
-        // A lazy rendition that nobody armed stays dormant through the
-        // re-anchor (`open` returns before the muxer); an armed one opens
-        // here, at a plan boundary, which is what makes its first segment a
-        // complete one.
-        try open(input: input, restart: true)
+        if isProducing {
+            // The bridge stays: its buffered state is reset, its contexts
+            // live on (`AudioBridge.reset`). Only the muxer is new — tfdt
+            // continuity under frag_discont needs a fresh one.
+            bridge?.reset()
+            try openMuxer(input: input, restart: true)
+        } else {
+            // A lazy rendition that nobody armed stays dormant through the
+            // re-anchor (`open` returns before the muxer); an armed one opens
+            // here, at a plan boundary, which is what makes its first segment
+            // a complete one.
+            try open(input: input, restart: true)
+        }
         self.segmentIndex = segmentIndex
         pendingDuration = 0
     }
@@ -275,8 +296,9 @@ final class AudioRenditionWriter {
               let data = packet.pointee.data, packet.pointee.size > 0
         else { return }
         atmosSniffPacketsRead += 1
-        let bytes = [UInt8](UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)))
-        if let index = EAC3Syncframe.atmosComplexityIndex(in: bytes) {
+        if let index = EAC3Syncframe.atmosComplexityIndex(
+            in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+        ) {
             atmosComplexityIndex = index
             settleAtmos()
             return
@@ -325,7 +347,11 @@ final class AudioRenditionWriter {
     /// renditions for AVPlayer to switch between them without drifting. The
     /// real sample times ride in the segments' own `tfdt`, which is what
     /// playback follows.
-    func cut(durationSeconds: Double) throws {
+    /// Returns the media bytes written for this boundary (0 for an empty or
+    /// dormant one) — what retention accounts, without a `stat` per rendition
+    /// per cut.
+    @discardableResult
+    func cut(durationSeconds: Double) throws -> Int {
         guard isProducing else {
             // Dormant: the boundary still passes. The planned slot keeps its
             // index (the playlist maps it to this time) but is NOT declared
@@ -338,7 +364,7 @@ final class AudioRenditionWriter {
             } else {
                 pendingDuration += durationSeconds
             }
-            return
+            return 0
         }
         let (initSegment, media) = try writer.cutSegment()
         // The first cut mints the init segment; write it BEFORE the playlist
@@ -356,13 +382,13 @@ final class AudioRenditionWriter {
                 // segment 0 and shift every later segment against the video.
                 onPlannedSegment?(segmentIndex, false)
                 segmentIndex += 1
-                return
+                return 0
             }
             // Sequential: nothing to carry for this boundary. Skipping the
             // entry keeps the EVENT playlist free of zero-byte segments; the
             // time it covered joins the next one.
             pendingDuration += durationSeconds
-            return
+            return 0
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
@@ -376,6 +402,7 @@ final class AudioRenditionWriter {
         }
         pendingDuration = 0
         segmentIndex += 1
+        return media.count
     }
 
     /// Final cut: whatever is buffered plus the trailer's tail bytes.

@@ -152,6 +152,21 @@ final class DialogueBoostFilter {
         inRate = 0
     }
 
+    /// Drop whatever the graph buffers without tearing the filter down: the
+    /// next frame rebuilds the graph (the `graph == nil` path of
+    /// `reconfigureIfNeeded`), so a seek's stale frames never reach the
+    /// encoder and the eligibility verdict is re-derived from real input.
+    func reset() {
+        if graph != nil {
+            avfilter_graph_free(&graph)
+        }
+        source = nil
+        sink = nil
+        passthrough = false
+        inFormat = AV_SAMPLE_FMT_NONE
+        inRate = 0
+    }
+
     /// Run one decoded frame through the graph. Consumes the frame's
     /// references on the filtered path (like `av_buffersrc_add_frame`); on the
     /// passthrough path the frame is handed to `emit` untouched.

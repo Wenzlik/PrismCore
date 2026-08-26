@@ -36,6 +36,12 @@ enum EAC3Syncframe {
     /// - Parameter bytes: one demuxed E-AC-3 packet. The syncframe is expected at
     ///   the start, which is what libavformat delivers for a stream-copied track.
     static func atmosComplexityIndex(in bytes: [UInt8]) -> Int? {
+        bytes.withUnsafeBufferPointer { atmosComplexityIndex(in: $0) }
+    }
+
+    /// The pointer shape — the sniff runs on the packet's own buffer, so the
+    /// first two dozen frames of every E-AC-3 track cost a walk, not a copy.
+    static func atmosComplexityIndex(in bytes: UnsafeBufferPointer<UInt8>) -> Int? {
         // A packet is not one frame. Blu-ray-style Dolby Digital Plus carries an
         // AC-3 core frame first (bsid 6, and its bytes 2–3 are a CRC that reads
         // as nonsense `strmtyp`/`substreamid` if you assume E-AC-3), with the
@@ -67,7 +73,7 @@ enum EAC3Syncframe {
     private static let scanLimit = 65_536
 
     /// The walk, assuming a syncframe starts exactly at `offset`.
-    private static func atmosComplexityIndex(inFrameAt offset: Int, of bytes: [UInt8]) -> Int? {
+    private static func atmosComplexityIndex(inFrameAt offset: Int, of bytes: UnsafeBufferPointer<UInt8>) -> Int? {
         var reader = BitReader(bytes, startingAtByte: offset)
 
         guard reader.read(16) == 0x0B77 else { return nil }   // syncword
@@ -186,10 +192,10 @@ enum EAC3Syncframe {
     /// walk — a walk that guessed would produce a wrong complexity index, which
     /// is worse than no declaration.
     private struct BitReader {
-        private let bytes: [UInt8]
+        private let bytes: UnsafeBufferPointer<UInt8>
         private var bitPosition = 0
 
-        init(_ bytes: [UInt8], startingAtByte offset: Int = 0) {
+        init(_ bytes: UnsafeBufferPointer<UInt8>, startingAtByte offset: Int = 0) {
             self.bytes = bytes
             bitPosition = offset * 8
         }

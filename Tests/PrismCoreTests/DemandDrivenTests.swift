@@ -57,6 +57,9 @@ struct DemandDrivenTests {
         #expect(coordinator.takeAnchorRequest() == nil)   // consumed
 
         // Backwards is always a re-anchor.
+        // The re-anchor to 5 landed its first segment (production moved on),
+        // so the next request is not debounced as part of a scrub burst.
+        coordinator.setProducing(index: 6)
         coordinator.requestProduction(of: 0)
         #expect(coordinator.takeAnchorRequest() == 0)
     }
@@ -494,6 +497,10 @@ struct ProducerLeadCapTests {
         return returned
     }
 
+    /// The lead cap in segments, at the nominal 6 s stride a plan-less
+    /// coordinator paces on (the cap itself is expressed in seconds).
+    private var leadSegments: Int { Int(DemandCoordinator.producerLeadSeconds / 6) }
+
     @Test("Before the first fetch the producer never parks — startup must produce")
     func startupDoesNotPark() {
         let coordinator = DemandCoordinator()
@@ -507,7 +514,7 @@ struct ProducerLeadCapTests {
         coordinator.noteFetch(of: 5)
         let returned = park(
             on: coordinator,
-            producing: 5 + DemandCoordinator.producerLeadSegments
+            producing: 5 + leadSegments
         )
         #expect(returned.wait(timeout: signalWindow) == .success)
     }
@@ -516,7 +523,7 @@ struct ProducerLeadCapTests {
     func fetchReleasesThePark() {
         let coordinator = DemandCoordinator()
         coordinator.noteFetch(of: 0)
-        let producing = DemandCoordinator.producerLeadSegments + 5
+        let producing = leadSegments + 5
         let returned = park(on: coordinator, producing: producing)
 
         // A fetch that does NOT close the gap keeps the park holding.
@@ -533,7 +540,7 @@ struct ProducerLeadCapTests {
         coordinator.noteFetch(of: 0)
         let returned = park(
             on: coordinator,
-            producing: DemandCoordinator.producerLeadSegments + 5
+            producing: leadSegments + 5
         )
         coordinator.requestProduction(of: 40)
         #expect(returned.wait(timeout: signalWindow) == .success)
@@ -547,7 +554,7 @@ struct ProducerLeadCapTests {
         let cancelled = LockedFlag()
         let returned = park(
             on: coordinator,
-            producing: DemandCoordinator.producerLeadSegments + 5,
+            producing: leadSegments + 5,
             isCancelled: { cancelled.isSet }
         )
         cancelled.set()

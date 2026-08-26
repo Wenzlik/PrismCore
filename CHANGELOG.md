@@ -225,6 +225,108 @@ source-compatible.)
   seek); `openDetached` matches `open`'s verdict and throws for a missing
   file.
 
+### Changed — seek & steady state (#65 package F)
+
+- **A re-anchor keeps the audio bridge.** Every demand-driven seek tore down
+  each bridged rendition's `AudioBridge` — decoder, encoder, resampler,
+  filter graph, FIFO, frame allocations — and opened a new one, per
+  rendition, per seek. `AudioBridge.reset()` now flushes the decoder,
+  resets the FIFO and chunker, drops the resampler's delay line and the
+  boost graph (both rebuild on the next frame, as for a format change) and
+  re-anchors the clock; the contexts live on. The muxer is still rebuilt
+  (`frag_discont` needs a fresh one for the tfdt), the directory is created
+  once. The encoder is not flushed: every `send_frame` is drained on the
+  spot, so it holds nothing.
+
+- **Scrub bursts coalesce.** While a re-anchor is in flight (its first
+  segment not yet landed), an anchor request younger than 150 ms
+  (`DemandCoordinator.anchorDebounce`) is held rather than acted on — the
+  newest still wins, it is what the burst settles on; a scrub bar used to
+  tear the muxers down once per fetch it emitted. A forced request (a lazy
+  rendition joining) is never held, and a parked producer re-checks when
+  the debounce comes due, not after its 1 s backstop.
+
+- **A discontinuous request re-anchors even inside the forward-wait
+  window.** AVPlayer's read-ahead asks for N after N-1 (the variant and each
+  rendition of one index arrive together, so ±1 of the previous fetch is
+  continuous); a request that jumps further is a seek however close it
+  lands, and waiting for serial production to reach it cost up to two
+  segments of silence.
+
+- **Producer lead is 30 s of content, not ten segments**
+  (`producerLeadSeconds`, from the plan's start times; the nominal stride
+  where there is no plan). Segments vary — a 2 s head, keyframe-stretched
+  entries — and the buffer AVPlayer cares about is time. **The sequential
+  shape now parks on the same cap and keeps a retention budget too**: a
+  fast source demuxed and wrote the whole film to the device while the
+  viewer was on minute two. Eviction there never reaches the playhead or
+  anything ahead of it; behind it, an evicted EVENT segment is NOT
+  reproducible (no plan to re-anchor on), so a backward seek to one is a
+  404 AVPlayer treats as a failed segment — accepted against a 50 GB work
+  directory, and documented in `HLSRemuxer`. The cost of the cap: a
+  sequential keyframe harvest completes only when the viewer reaches the
+  end (the partial harvest from package C covers the rest).
+
+- **Retention accounts what the cuts report, not what `stat` says.**
+  `AudioRenditionWriter.cut` returns the bytes it wrote; a
+  `attributesOfItem` per rendition per cut is gone from the cut path, and
+  the unlinks moved to a serial utility-QoS queue (the window in which a
+  stale unlink could hit a re-produced file is the queue's latency against
+  a demuxer seek — a fetch that finds the stale file serves the same bytes).
+
+- **Serve path.** Header and body go out as two `send`s (NWConnection
+  serialises them; the multi-megabyte append of the body into the header
+  `Data` is gone). Providers read with `.mappedIfSafe` — the pages come in
+  as the send touches them, and a mapping outlives eviction's unlink.
+  `FMP4SegmentWriter`'s sink reserves the previous segment's size at each
+  cut. `Cache-Control: max-age=86400, immutable` on init, media and WebVTT
+  segments (all immutable for the life of their URL — the init is
+  first-write-wins, a re-produced segment is the same bytes); playlists
+  stay `no-store`. Partial-segment streaming is NOT attempted: it needs the
+  `.part` contract (LL-HLS) and is a follow-up.
+
+- **Hot loop.** `HEVCNALUnits.units(in:)`/`rewrite` walk an
+  `UnsafeBufferPointer<UInt8>` — the packet's own buffer — with `[UInt8]`
+  overloads kept for tests and the fuzzer; a changed P7 packet is written
+  ONCE into an `av_buffer_alloc`ed buffer (padded) that replaces the
+  packet's `AVBufferRef` (`rewritePayload`), instead of copy-in +
+  `make_writable` + grow + memcpy. The parameter-set harvest is gated on
+  `AV_PKT_FLAG_KEY` (a non-keyframe cost the walk to find nothing).
+  `EAC3Syncframe.atmosComplexityIndex` reads a pointer. Output bytes are
+  unchanged: the pointer and array shapes are asserted byte-identical, and
+  the real-media P7→8.1 verification (`RealMediaVerificationTests`,
+  `PRISMCORE_MEDIA`) is the standing check.
+
+- **EVENT playlist text is append-only**: the entries block is appended
+  per segment and only the header (a running TARGETDURATION maximum) is
+  recomputed per write; the file is still rewritten atomically — serving
+  from memory would need the provider to know about it and was not worth
+  the seam for a per-segment write of a few KB.
+
+  Measured (cold seek to an unproduced segment 25, `audio0/` then variant
+  fetch, over a Range-capable loopback HTTP server, 3-minute 300 kbps
+  H.264 + stereo AC3 MKV, 7 runs): before F 6–11 ms (median 7), after F
+  6–13 ms (median 9) — **no change, as expected**: that fixture's rendition
+  is stream-copied, and the bridge keep-alive that F1 is about cannot run
+  on this machine's stock MPVKit build (no EAC3 encoder). The number that
+  will show it is a scrub on a TrueHD/DTS title on a device with Aether's
+  build.
+
+### Tests — package F
+
+- `SeekSteadyStateTests` (new): scrub burst coalesces (held under the
+  debounce, newest wins, forced never held, released once the first segment
+  lands); a discontinuous request inside the window re-anchors while
+  read-ahead waits; the lead cap is seconds from the plan (24 s of 2 s
+  segments sails, 36 s of 12 s segments parks); cache headers per type and
+  byte/length-identical two-send responses (GET and HEAD); the pointer NAL
+  rewrite is byte-identical to the array shape and allocates nothing when
+  nothing changes; `BridgeClock`/`FrameChunker` reset; the append-only
+  EVENT playlist text is what a rebuild wrote.
+- `DemandDrivenTests`: lead-cap cases expressed through the seconds cap;
+  the last-wins case lands its first segment before the next request (the
+  debounce would otherwise hold it — which is the point).
+
 ## [1.10.1] — 2026-08-22
 
 ### Fixed

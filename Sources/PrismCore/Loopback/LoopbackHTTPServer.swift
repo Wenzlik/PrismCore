@@ -331,9 +331,8 @@ public actor LoopbackHTTPServer {
             _ = await send(Self.errorResponse(status: "404 Not Found", keepAlive: keepAlive), on: connection)
             return .completed
         case .data(let body, let contentType):
-            _ = await send(
-                Self.response(body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly),
-                on: connection
+            _ = await sendResponse(
+                body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly, on: connection
             )
             return .completed
         case .pending(let pending):
@@ -363,9 +362,8 @@ public actor LoopbackHTTPServer {
         if let quick {
             switch quick {
             case .data(let body, let contentType):
-                _ = await send(
-                    Self.response(body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly),
-                    on: connection
+                _ = await sendResponse(
+                    body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly, on: connection
                 )
             default:
                 _ = await send(Self.errorResponse(status: "404 Not Found", keepAlive: keepAlive), on: connection)
@@ -416,10 +414,18 @@ public actor LoopbackHTTPServer {
 
     // MARK: - Response framing
 
-    /// The playlist grows while the remux runs — a cached copy is a stale copy.
-    /// Segments are immutable but header-cheap to refetch.
-    private static func commonHeaders(keepAlive: Bool) -> String {
-        var headers = "Cache-Control: no-store\r\n"
+    /// Playlists grow (EVENT) or are the truth of the moment — never cached.
+    /// Init segments, media segments and WebVTT segments are immutable for
+    /// the life of their URL: the init is written once ("first write wins",
+    /// see `HLSRemuxer.writeInitSegmentIfAbsent`), a re-produced media
+    /// segment is the same bytes at the same time span, and the session's
+    /// port dies with it — so AVPlayer may keep them rather than re-read and
+    /// re-copy them across a seek.
+    private static func commonHeaders(keepAlive: Bool, contentType: String? = nil) -> String {
+        let immutable = contentType.map { $0 != "application/vnd.apple.mpegurl" } ?? false
+        var headers = immutable
+            ? "Cache-Control: max-age=86400, immutable\r\n"
+            : "Cache-Control: no-store\r\n"
         if keepAlive {
             headers += "Connection: keep-alive\r\n"
         } else {
@@ -428,16 +434,39 @@ public actor LoopbackHTTPServer {
         return headers
     }
 
-    static func response(body: Data, contentType: String, keepAlive: Bool, headOnly: Bool) -> Data {
+    /// The header block for a whole-body 200. The body is sent as its own
+    /// `send` (see `sendResponse`) — appending a multi-megabyte segment to a
+    /// header `Data` was a full copy of the segment per request.
+    static func responseHeader(bodyCount: Int, contentType: String, keepAlive: Bool) -> Data {
         var response = "HTTP/1.1 200 OK\r\n"
         response += "Content-Type: \(contentType)\r\n"
-        response += "Content-Length: \(body.count)\r\n"
+        response += "Content-Length: \(bodyCount)\r\n"
         response += "Accept-Ranges: none\r\n"
-        response += commonHeaders(keepAlive: keepAlive)
+        response += commonHeaders(keepAlive: keepAlive, contentType: contentType)
         response += "\r\n"
-        var payload = Data(response.utf8)
+        return Data(response.utf8)
+    }
+
+    /// Header and body as they go on the wire, for tests and for callers that
+    /// want one buffer.
+    static func response(body: Data, contentType: String, keepAlive: Bool, headOnly: Bool) -> Data {
+        var payload = responseHeader(bodyCount: body.count, contentType: contentType, keepAlive: keepAlive)
         if !headOnly { payload.append(body) }
         return payload
+    }
+
+    /// Header, then body, as two sends on the connection. NWConnection
+    /// serialises sends in order, so the wire is identical to one buffer —
+    /// minus the copy of the body into it.
+    private nonisolated func sendResponse(
+        body: Data, contentType: String, keepAlive: Bool, headOnly: Bool, on connection: NWConnection
+    ) async -> Bool {
+        guard await send(
+            Self.responseHeader(bodyCount: body.count, contentType: contentType, keepAlive: keepAlive),
+            on: connection
+        ) else { return false }
+        if headOnly || body.isEmpty { return true }
+        return await send(body, on: connection)
     }
 
     static func errorResponse(status: String, keepAlive: Bool = false) -> Data {
@@ -453,7 +482,7 @@ public actor LoopbackHTTPServer {
         var response = "HTTP/1.1 200 OK\r\n"
         response += "Content-Type: \(contentType)\r\n"
         response += "Transfer-Encoding: chunked\r\n"
-        response += commonHeaders(keepAlive: keepAlive)
+        response += commonHeaders(keepAlive: keepAlive, contentType: contentType)
         response += "\r\n"
         return Data(response.utf8)
     }
