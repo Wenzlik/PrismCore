@@ -76,11 +76,6 @@ final class SoftwareAudioDecoder {
     private var resampler: OpaquePointer?
     private var decodedFrame: UnsafeMutablePointer<AVFrame>?
 
-    /// Interleaved output scratch, grown on demand. One plane, because
-    /// interleaved.
-    private var converted: UnsafeMutablePointer<UInt8>?
-    private var convertedCapacityFrames: Int32 = 0
-
     /// Output channel layout, owned here (it has heap storage for custom orders).
     private var outputLayout = AVChannelLayout()
 
@@ -148,10 +143,6 @@ final class SoftwareAudioDecoder {
         }
         if codecContext != nil {
             avcodec_free_context(&codecContext)
-        }
-        if converted != nil {
-            av_freep(&converted)
-            convertedCapacityFrames = 0
         }
         av_channel_layout_uninit(&outputLayout)
         av_channel_layout_uninit(&resamplerInputLayout)
@@ -274,12 +265,42 @@ final class SoftwareAudioDecoder {
 
         let capacity = Int32(swr_get_out_samples(resampler, frame.pointee.nb_samples))
         guard capacity > 0 else { return nil }
-        try growConvertedBuffer(to: capacity)
-        guard let converted else { return nil }
+
+        // The resampler writes straight into the block buffer's memory: one
+        // allocation per buffer instead of a scratch conversion plus a malloc
+        // plus a copy — this ran ~40 times a second, per channel set, on the
+        // audio thread's budget. CoreMedia owns the allocation from the start,
+        // so a buffer the renderer drops leaks nothing.
+        let capacityBytes = Int(capacity) * Int(outputFormat.bytesPerFrame)
+        var storage: CMBlockBuffer?
+        let allocStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: capacityBytes,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: capacityBytes,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
+            blockBufferOut: &storage
+        )
+        guard allocStatus == noErr, let storage else {
+            throw Failure.blockBufferCreationFailed(allocStatus)
+        }
+        var payloadLength = 0
+        var payload: UnsafeMutablePointer<CChar>?
+        let pointerStatus = CMBlockBufferGetDataPointer(
+            storage, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &payloadLength, dataPointerOut: &payload
+        )
+        guard pointerStatus == noErr, let payload, payloadLength >= capacityBytes else {
+            throw Failure.blockBufferCreationFailed(pointerStatus)
+        }
 
         // One output plane (interleaved); the rest of the array stays nil, which
         // is what libswresample expects for a packed format.
-        var outputPlanes: [UnsafeMutablePointer<UInt8>?] = [converted, nil, nil, nil, nil, nil, nil, nil]
+        var outputPlanes: [UnsafeMutablePointer<UInt8>?] = [
+            UnsafeMutableRawPointer(payload).assumingMemoryBound(to: UInt8.self), nil, nil, nil, nil, nil, nil, nil,
+        ]
         let inputPlanes = UnsafeMutableRawPointer(frame.pointee.extended_data)?
             .assumingMemoryBound(to: UnsafePointer<UInt8>?.self)
         let produced = swr_convert(
@@ -289,30 +310,26 @@ final class SoftwareAudioDecoder {
         guard produced > 0 else { return nil }
 
         let byteCount = Int(produced) * Int(outputFormat.bytesPerFrame)
-        // The block buffer owns this allocation: `kCFAllocatorMalloc` as the
-        // block allocator makes CoreMedia free it when the last reference to the
-        // sample buffer goes, so a buffer dropped by the renderer doesn't leak.
-        guard let payload = malloc(byteCount) else {
-            throw Failure.allocationFailed("PCM block")
+        // `swr_get_out_samples` is an upper bound; the sample buffer must see
+        // exactly the produced range. A reference buffer over the prefix is a
+        // window onto the same memory, not another copy.
+        var blockBuffer: CMBlockBuffer? = storage
+        if byteCount < capacityBytes {
+            var window: CMBlockBuffer?
+            let windowStatus = CMBlockBufferCreateWithBufferReference(
+                allocator: kCFAllocatorDefault,
+                referenceBuffer: storage,
+                offsetToData: 0,
+                dataLength: byteCount,
+                flags: 0,
+                blockBufferOut: &window
+            )
+            guard windowStatus == noErr, let window else {
+                throw Failure.blockBufferCreationFailed(windowStatus)
+            }
+            blockBuffer = window
         }
-        payload.copyMemory(from: UnsafeRawPointer(converted), byteCount: byteCount)
-
-        var blockBuffer: CMBlockBuffer?
-        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: payload,
-            blockLength: byteCount,
-            blockAllocator: kCFAllocatorMalloc,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: byteCount,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-        guard blockStatus == noErr, let blockBuffer else {
-            free(payload)
-            throw Failure.blockBufferCreationFailed(blockStatus)
-        }
+        guard let blockBuffer else { return nil }
 
         let description = try audioFormatDescription()
 
@@ -356,19 +373,6 @@ final class SoftwareAudioDecoder {
             throw Failure.sampleBufferCreationFailed(status)
         }
         return sampleBuffer
-    }
-
-    private func growConvertedBuffer(to frames: Int32) throws {
-        if convertedCapacityFrames >= frames, converted != nil { return }
-        if converted != nil {
-            av_freep(&converted)
-        }
-        let byteCount = Int(frames) * Int(outputFormat.bytesPerFrame)
-        guard let allocation = av_malloc(byteCount) else {
-            throw Failure.allocationFailed("PCM scratch")
-        }
-        converted = allocation.assumingMemoryBound(to: UInt8.self)
-        convertedCapacityFrames = frames
     }
 
     /// Built once: the LPCM description plus the channel layout tag, which is
