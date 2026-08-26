@@ -18,6 +18,38 @@ struct SegmentPlanTests {
         #expect(entries.map(\.duration) == [6, 6, 6, 2])
     }
 
+    @Test("A partial map plans its prefix on keyframes and the tail on the stride")
+    func partialMapMixedPlan() throws {
+        // Keyframes every 2 s up to 14 s (the covered prefix), 60 s file.
+        let keyframes: [Int64] = stride(from: 0, through: 14_000, by: 2_000).map(Int64.init)
+        let entries = try #require(SegmentPlan.keyframePlan(
+            keyframes: keyframes, durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
+            coveredThroughPTS: 14_000
+        ))
+        // Prefix: 6 s boundaries on keyframes 6000 and 12000; from 12000 the
+        // stride continues in 6 s time targets to the end.
+        #expect(entries.map(\.startPTS) == [0, 6_000, 12_000, 18_000, 24_000, 30_000, 36_000, 42_000, 48_000, 54_000])
+        #expect(entries.map(\.duration) == Array(repeating: 6, count: 10))
+        #expect(abs(entries.map(\.duration).reduce(0, +) - 60) < 0.001)
+        // Keyframes PAST the covered end are not trusted (a hole may precede them).
+        let withStray = try #require(SegmentPlan.keyframePlan(
+            keyframes: keyframes + [40_000], durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
+            coveredThroughPTS: 14_000
+        ))
+        #expect(withStray == entries)
+        // The same map with no covered end is complete: one tail entry.
+        let complete = try #require(SegmentPlan.keyframePlan(
+            keyframes: keyframes, durationSeconds: 60, tickSeconds: tick, targetSeconds: 6
+        ))
+        #expect(complete.map(\.startPTS) == [0, 6_000, 12_000])
+        #expect(complete.last?.duration == 48)
+        // A prefix too short for one target fails the coverage witness.
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: [0, 2_000, 4_000], durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
+            coveredThroughPTS: 4_000
+        ) == nil)
+    }
+
     @Test("A boundary between keyframes waits for the NEXT keyframe")
     func irregularCadence() throws {
         // Keyframes at 0, 5 s, 9 s: the 6 s boundary falls between 5 and 9 —

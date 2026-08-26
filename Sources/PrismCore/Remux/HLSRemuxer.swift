@@ -178,6 +178,12 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
 
+    /// Called on the producer thread after each variant segment file lands,
+    /// with its index. A test seam: a 30 s fixture produces in milliseconds,
+    /// so "cancel mid-file" can only be made deterministic from inside the
+    /// cut path. `nil` in production.
+    var onSegmentLanded: ((Int) -> Void)?
+
     /// The WebVTT subtitle renditions produced alongside the fMP4 (phase 6).
     /// Exposed so the session can register external files before the run and
     /// read the produced renditions for the master playlist.
@@ -383,14 +389,17 @@ final class HLSRemuxer: @unchecked Sendable {
         // context brings the probe's guard along and a self-opened one gets
         // its own before the open.
         let interruptGuard: ReadInterruptGuard
+        // The probe left an adopted context wherever its reads ended — the
+        // interlace verification decodes a dozen frames. Production starts at
+        // the head, but the rewind is deferred until the plan is built: the
+        // index-load path ends with its own seek to 0, and over HTTP every
+        // seek is a Range request, so rewinding here first was a round trip
+        // spent to arrive where the next call was going anyway.
+        var needsRewindToHead = false
         if let adopted = probed?.consumeContext(), let probed {
             input = adopted
             interruptGuard = probed.interruptGuard
-            // The probe left the position wherever its reads ended — the
-            // interlace verification decodes a dozen frames. Production starts
-            // at the head, and the demand-driven planner seeks from there.
-            _ = av_seek_frame(adopted, -1, 0, AVSEEK_FLAG_BACKWARD)
-            avformat_flush(adopted)
+            needsRewindToHead = true
             adoptedInfo = probed.info
         } else {
             // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
@@ -526,7 +535,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // matches the stream's. It replaces the demuxer index in the plan —
         // and skips the index-load seek, so a cache hit starts faster than
         // even a well-indexed first play.
-        let cachedKeyframes: [Int64]? = {
+        let cachedEntry: KeyframeIndexCache.Entry? = {
             guard demandEligible, let keyframeCache, let cacheIdentity,
                   // A plan is a promise to re-anchor, and a re-anchor is a
                   // seek — on a transport that can't (an HTTP server that
@@ -540,18 +549,31 @@ final class HLSRemuxer: @unchecked Sendable {
             guard entry.timeBaseNum == timeBase.num, entry.timeBaseDen == timeBase.den,
                   entry.keyframePTS.count >= 2
             else { return nil }
-            return entry.keyframePTS
+            return entry
         }()
+        let cachedKeyframes = cachedEntry?.keyframePTS
+        // A partial map (a play cancelled before EOF) plans its prefix
+        // exactly and the tail on the uniform stride — see `keyframePlan`.
+        let cachedCoveredThrough: Int64? = cachedEntry.flatMap { $0.complete ? nil : $0.coveredThroughPTS }
 
-        let builtPlan: SegmentPlan? = demandEligible
-            ? SegmentPlan.build(
+        let (builtPlan, planRewoundToHead): (SegmentPlan?, Bool) = demandEligible
+            ? SegmentPlan.buildReportingPosition(
                 input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds,
                 firstSegmentSeconds: firstSegmentSeconds,
                 indexLoadBudget: indexLoadBudget,
-                interruptGuard: interruptGuard, cachedKeyframes: cachedKeyframes
+                interruptGuard: interruptGuard, cachedKeyframes: cachedKeyframes,
+                cachedCoveredThroughPTS: cachedCoveredThrough
             )
-            : nil
+            : (nil, false)
+        if needsRewindToHead, !planRewoundToHead {
+            // The plan did not pass through the head (cached map, an index
+            // loaded at open, or no plan at all): rewind the adopted context
+            // ourselves. `avformat_flush` drops the probe's queued packets.
+            _ = av_seek_frame(input, -1, 0, AVSEEK_FLAG_BACKWARD)
+            avformat_flush(input)
+        }
         let plannedPlan: SegmentPlan? = builtPlan?.basis == .keyframeIndex ? builtPlan : nil
+        let planIsPartial = plannedPlan != nil && cachedCoveredThrough != nil
 
         // Harvest for next time (issue #34): this session degraded to the
         // sequential shape even though it could have been planned — the map
@@ -561,9 +583,18 @@ final class HLSRemuxer: @unchecked Sendable {
         // the NEXT play's plan builds from. Strictly a by-product: no plan
         // possible at all (`builtPlan == nil`, a live source) means the next
         // play can't use a map either, so nothing is collected.
+        //
+        // A session planned on a PARTIAL map harvests too, to extend the
+        // prefix: only a contiguous run counts, so keyframes are appended
+        // while the current run started at-or-before the covered end
+        // (`harvestRunExtendsCoverage`) — a seek into the un-covered tail
+        // sees keyframes with a hole before them, and the gap witness would
+        // reject the whole map if they were stored.
         let shouldHarvestKeyframes = keyframeCache != nil && cacheIdentity != nil
-            && demandEligible && builtPlan != nil && plannedPlan == nil
-        var harvestedKeyframes: [Int64]? = shouldHarvestKeyframes ? [] : nil
+            && demandEligible && builtPlan != nil && (plannedPlan == nil || planIsPartial)
+        var harvestedKeyframes: [Int64]? = shouldHarvestKeyframes ? (cachedKeyframes ?? []) : nil
+        var harvestCoveredThrough: Int64? = cachedCoveredThrough
+        var harvestRunExtendsCoverage = true
 
         // MARK: Output setup
 
@@ -939,6 +970,7 @@ final class HLSRemuxer: @unchecked Sendable {
             if plannedPlan == nil {
                 try playlist.appendSegment(duration: duration, file: file)
             }
+            onSegmentLanded?(segmentIndex)
             // Same wall-time window, so rendition segment N covers variant
             // segment N — cut only when a media segment really landed.
             try subtitles.flushSegment(
@@ -984,6 +1016,9 @@ final class HLSRemuxer: @unchecked Sendable {
             nextBoundaryPTS = plannedBoundary(after: anchor)
             droppingUntilPTS = target
             demand?.setProducing(index: anchor)
+            // A run that starts inside the covered prefix extends it; one
+            // that starts past it leaves a hole and must not be stored.
+            harvestRunExtendsCoverage = harvestCoveredThrough.map { target <= $0 } ?? true
         }
 
         var packet = av_packet_alloc()
@@ -1069,7 +1104,10 @@ final class HLSRemuxer: @unchecked Sendable {
                         // The keyframe harvest (issue #34): the packet is in
                         // hand either way, so the cost is one append on a
                         // packet already being examined for cut points.
-                        if isKey { harvestedKeyframes?.append(pts) }
+                        if isKey, harvestRunExtendsCoverage {
+                            harvestedKeyframes?.append(pts)
+                            harvestCoveredThrough = max(harvestCoveredThrough ?? pts, pts)
+                        }
                         if isKey {
                             if segmentStartPTS == nil {
                                 segmentStartPTS = pts
@@ -1255,19 +1293,28 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil {
                     try playlist.finish()
                 }
-                // Only a complete run persists its harvest: a cancelled
-                // session saw a prefix of the file, and a map that passes the
-                // witnesses while covering half the source would plan
-                // segments whose keyframes it never saw.
-                if let keyframeCache, let cacheIdentity,
-                   let harvested = harvestedKeyframes, harvested.count >= 2 {
-                    keyframeCache.store(.init(
-                        identity: cacheIdentity,
-                        timeBaseNum: videoTimeBase.num,
-                        timeBaseDen: videoTimeBase.den,
-                        keyframePTS: harvested
-                    ))
-                }
+            }
+            // Persist the harvest — complete when this contiguous run reached
+            // EOF, partial otherwise (a cancelled play). A partial map used to
+            // be thrown away as "worse than none", because a map that passes
+            // the witnesses while covering half the file would plan segments
+            // whose keyframes it never saw; it is now stored WITH its covered
+            // end, and the planner trusts it only up to there
+            // (`SegmentPlan.keyframePlan(coveredThroughPTS:)`), so the next
+            // play of a source that could not be planned gets a seekable VOD
+            // over exactly the prefix this one watched.
+            if let keyframeCache, let cacheIdentity,
+               let harvested = harvestedKeyframes, harvested.count >= 2,
+               let covered = harvestCoveredThrough {
+                let complete = reachedEOF && harvestRunExtendsCoverage
+                keyframeCache.store(.init(
+                    identity: cacheIdentity,
+                    timeBaseNum: videoTimeBase.num,
+                    timeBaseDen: videoTimeBase.den,
+                    keyframePTS: Array(Set(harvested)).sorted(),
+                    complete: complete,
+                    coveredThroughPTS: complete ? nil : covered
+                ))
             }
 
             // Park: EOF reached with a plan published — wait for demand.

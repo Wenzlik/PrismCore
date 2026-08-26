@@ -162,27 +162,93 @@ struct KeyframeIndexCacheTests {
         #expect(media.range(of: Data("moof".utf8)) != nil, "the demanded tail segment did not serve a real fragment")
     }
 
-    @Test("A cancelled run persists nothing — a partial map is worse than none")
-    func cancelledRunDoesNotPersist() async throws {
+    @Test("A run cancelled before any keyframe persists nothing; a cancelled prefix persists a PARTIAL map the next play plans on")
+    func cancelledRunPersistsPartialMap() async throws {
         let cacheDirectory = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: cacheDirectory) }
         let output = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: output) }
+        let source = try fixture("h264_ac3_30s.ts")
 
-        // Cancelled before the first packet — the deterministic stand-in for
-        // "the user backed out mid-file". A session-level stop() can lose the
-        // race against a 30 s fixture that produces in milliseconds.
-        let remuxer = HLSRemuxer(
-            sourceURL: try fixture("h264_ac3_30s.ts"),
-            outputDirectory: output,
-            demand: DemandCoordinator(),
-            keyframeCacheDirectory: cacheDirectory
+        // Cancelled before the first packet: fewer than two keyframes seen,
+        // nothing worth storing.
+        let empty = HLSRemuxer(
+            sourceURL: source, outputDirectory: output,
+            demand: DemandCoordinator(), keyframeCacheDirectory: cacheDirectory
         )
-        remuxer.cancel()
-        try remuxer.run()
-
-        let sidecars = (try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path))?
+        empty.cancel()
+        try empty.run()
+        var sidecars = (try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path))?
             .filter { $0.hasSuffix(".json") } ?? []
         #expect(sidecars.isEmpty)
+
+        // A run that saw a prefix and was cancelled: the cut of segment 1
+        // (~8 s in) is where the cancel lands, so the harvest holds the
+        // keyframes up to there and is stored as partial.
+        let partial = HLSRemuxer(
+            sourceURL: source, outputDirectory: output,
+            demand: DemandCoordinator(), keyframeCacheDirectory: cacheDirectory,
+            indexLoadBudget: .zero
+        )
+        // Deterministic: the fixture produces in milliseconds, so the cancel
+        // comes from the cut path itself, right after segment 1 lands.
+        partial.onSegmentLanded = { index in if index == 1 { partial.cancel() } }
+        try partial.run()
+        sidecars = (try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path))?
+            .filter { $0.hasSuffix(".json") } ?? []
+        #expect(sidecars.count == 1)
+        let entry = try JSONDecoder().decode(
+            KeyframeIndexCache.Entry.self,
+            from: Data(contentsOf: cacheDirectory.appendingPathComponent(try #require(sidecars.first)))
+        )
+        #expect(!entry.complete)
+        #expect(entry.coveredThroughPTS == entry.keyframePTS.max())
+        #expect(entry.keyframePTS.count >= 2 && entry.keyframePTS.count < 15, "\(entry.keyframePTS.count)")
+
+        // The next play plans on it: a VOD playlist whose entries cover the
+        // whole 30 s — the prefix on keyframes, the tail on the stride.
+        let second = try PrismCoreSession(url: source, keyframeIndexCacheDirectory: cacheDirectory)
+        let playlist = try await second.start()
+        defer { Task { await second.stop() } }
+        // The TS fixture has Annex-B extradata → no CODECS → the muxed shape,
+        // whose media playlist is served directly.
+        let (data, _) = try await URLSession.shared.data(from: playlist)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("#EXT-X-PLAYLIST-TYPE:VOD"), "a partial map must still plan")
+        let durations = text.split(separator: "\n").filter { $0.hasPrefix("#EXTINF:") }
+            .compactMap { Double($0.dropFirst(8).dropLast()) }
+        // The TS starts at PTS ~1.48 s and the plan runs from its first keyframe.
+        #expect(abs(durations.reduce(0, +) - 28.5) < 1, "\(durations)")
+        // And a tail segment — past the covered prefix — is still producible
+        // on demand (the time-target boundary cuts at the next keyframe).
+        let segments = text.split(separator: "\n").filter { $0.hasSuffix(".m4s") }.map(String.init)
+        let (media, response) = try await URLSession.shared.data(
+            from: playlist.deletingLastPathComponent().appendingPathComponent(try #require(segments.last))
+        )
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(media.range(of: Data("moof".utf8)) != nil)
+    }
+
+    @Test("A partial entry never replaces a complete one, nor a longer partial; old entries decode as complete")
+    func partialStoreRules() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = KeyframeIndexCache(directory: directory)
+        let complete = KeyframeIndexCache.Entry(identity: "a", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 4000])
+        cache.store(complete)
+        cache.store(.init(identity: "a", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000], complete: false, coveredThroughPTS: 2000))
+        #expect(cache.lookup(identity: "a") == complete)
+
+        cache.store(.init(identity: "b", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 4000], complete: false, coveredThroughPTS: 4000))
+        cache.store(.init(identity: "b", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000], complete: false, coveredThroughPTS: 2000))
+        #expect(cache.lookup(identity: "b")?.coveredThroughPTS == 4000)
+        cache.store(.init(identity: "b", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 4000, 6000], complete: false, coveredThroughPTS: 6000))
+        #expect(cache.lookup(identity: "b")?.coveredThroughPTS == 6000)
+
+        // Pre-1.11 sidecar: no flag at all.
+        let legacy = Data(#"{"identity":"c","timeBaseNum":1,"timeBaseDen":1000,"keyframePTS":[0,2000]}"#.utf8)
+        let decoded = try JSONDecoder().decode(KeyframeIndexCache.Entry.self, from: legacy)
+        #expect(decoded.complete)
+        #expect(decoded.coveredThroughPTS == nil)
     }
 }
