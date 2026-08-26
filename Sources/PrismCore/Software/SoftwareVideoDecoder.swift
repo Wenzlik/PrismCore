@@ -244,9 +244,6 @@ final class SoftwareVideoDecoder {
             "avcodec_parameters_to_context(video)"
         )
         context.pointee.pkt_timebase = timeBase
-        // Frame threading is what makes CPU VP9/MPEG-2 keep up with real time on
-        // a mobile core; 0 = "as many as the machine has".
-        context.pointee.thread_count = 0
 
         var wantsHardware = hardware && !hardwareAbandoned
         if wantsHardware {
@@ -259,6 +256,14 @@ final class SoftwareVideoDecoder {
             }
         }
         route = wantsHardware ? .videoToolboxZeroCopy : .softwareCopy
+        // Frame threading is what makes CPU VP9/MPEG-2 keep up with real time
+        // on a mobile core; 0 = "as many as the machine has". With the hwaccel
+        // attached the CPU does no pixel work, and frame threads only add
+        // their count in latency: N threads hold N frames before the first one
+        // comes out, felt as a beat of black on every start and seek. One
+        // thread there. (The CPU reopen in `recoverFromHardwareFailure` comes
+        // back through here with `hardware == false` and gets 0 again.)
+        context.pointee.thread_count = wantsHardware ? 1 : 0
 
         try FFmpegError.check(avcodec_open2(context, decoder, nil), "avcodec_open2(video decoder)")
     }
@@ -351,6 +356,12 @@ final class SoftwareVideoDecoder {
         guard let context = codecContext else { return }
         avcodec_flush_buffers(context)
         teardownFilterGraph()
+    }
+
+    /// Memory pressure: return the conversion pool's idle buffers. Only the
+    /// CPU route owns a pool; VideoToolbox frames are the decoder's.
+    func releaseIdlePixelBuffers() {
+        transfer?.releaseIdleBuffers()
     }
 
     private func drain(emit: Emit) throws {
