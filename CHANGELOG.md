@@ -121,11 +121,11 @@ source-compatible.)
   offer, so it keeps producing boost renditions eagerly — today's cost and
   today's behaviour, on the sources that already could not be planned.
 
-  Not measured here: the stock MPVKit build has no EAC3 encoder, so no bridge
-  can be built on this machine at all. The saving is the two decode→encode
-  chains themselves (`AudioBridgeTests` time one at roughly real-time÷40 per
-  level on this hardware); the host's own CPU sampling on a device is the
-  number that matters.
+  Not measured: the stock MPVKit build on this machine has no EAC3 encoder,
+  so no bridge can be built here at all. What is removed is structural — two
+  decode→filter→encode chains per session, from before the first segment to
+  EOF — and the host's own CPU sampling on a device with its encoder-capable
+  build is the number that will say how much that was.
 
 ### Tests — package B
 
