@@ -378,6 +378,15 @@ final class AudioBridge {
     /// equivalent. The muxer is still rebuilt by the caller (frag_discont
     /// needs a new one for the tfdt), and the encoder is NOT flushed: every
     /// `send_frame` is drained on the spot, so it holds nothing.
+    ///
+    /// Not after `flush`: EOF put both codec contexts into their terminal
+    /// drain state, and while `avcodec_flush_buffers` revives a decoder, an
+    /// encoder without `AV_CODEC_CAP_ENCODER_FLUSH` (EAC3's) cannot be
+    /// reopened that way — `feed` would return at once and every reproduced
+    /// segment would be silent (review finding). `isDrained` tells the
+    /// caller to rebuild instead; a re-anchor after EOF is the rarer case.
+    var isDrained: Bool { drained }
+
     func reset() {
         if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
         if let fifo { av_audio_fifo_reset(fifo) }

@@ -236,7 +236,10 @@ source-compatible.)
   re-anchors the clock; the contexts live on. The muxer is still rebuilt
   (`frag_discont` needs a fresh one for the tfdt), the directory is created
   once. The encoder is not flushed: every `send_frame` is drained on the
-  spot, so it holds nothing.
+  spot, so it holds nothing. The one bridge that IS rebuilt is a drained
+  one — after EOF both codec contexts are in their terminal state, and an
+  EAC3 encoder cannot be revived from it (review finding: a re-anchor after
+  EOF would otherwise reproduce silent segments).
 
 - **Scrub bursts coalesce.** While a re-anchor is in flight (its first
   segment not yet landed), an anchor request younger than 150 ms

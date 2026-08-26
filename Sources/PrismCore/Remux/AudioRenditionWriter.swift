@@ -220,11 +220,19 @@ final class AudioRenditionWriter {
     func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
         writer = FMP4SegmentWriter()
         if isProducing {
-            // The bridge stays: its buffered state is reset, its contexts
-            // live on (`AudioBridge.reset`). Only the muxer is new — tfdt
-            // continuity under frag_discont needs a fresh one.
-            bridge?.reset()
-            try openMuxer(input: input, restart: true)
+            if let bridge, bridge.isDrained {
+                // Flushed at EOF: the encoder is in its terminal state and
+                // cannot be revived, so this one case rebuilds the bridge.
+                bridge.close()
+                self.bridge = nil
+                try open(input: input, restart: true)
+            } else {
+                // The bridge stays: its buffered state is reset, its contexts
+                // live on (`AudioBridge.reset`). Only the muxer is new — tfdt
+                // continuity under frag_discont needs a fresh one.
+                bridge?.reset()
+                try openMuxer(input: input, restart: true)
+            }
         } else {
             // A lazy rendition that nobody armed stays dormant through the
             // re-anchor (`open` returns before the muxer); an armed one opens
