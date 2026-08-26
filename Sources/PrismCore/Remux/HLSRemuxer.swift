@@ -589,10 +589,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 // is the whole point of not muxing them together.
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).
-                rendition.onSkippedPlannedSegment = { [demand, name = rendition.directoryName] index in
-                    demand?.markUnproducible(
-                        path: name + "/" + String(format: "seg%05d.m4s", index)
-                    )
+                rendition.onPlannedSegment = { [demand, name = rendition.directoryName] index, produced in
+                    let path = name + "/" + String(format: "seg%05d.m4s", index)
+                    if produced {
+                        demand?.clearUnproducible(path: path)
+                    } else {
+                        demand?.markUnproducible(path: path)
+                    }
                 }
                 do {
                     try rendition.open(input: input)
@@ -628,10 +631,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 )
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).
-                rendition.onSkippedPlannedSegment = { [demand, name = rendition.directoryName] index in
-                    demand?.markUnproducible(
-                        path: name + "/" + String(format: "seg%05d.m4s", index)
-                    )
+                rendition.onPlannedSegment = { [demand, name = rendition.directoryName] index, produced in
+                    let path = name + "/" + String(format: "seg%05d.m4s", index)
+                    if produced {
+                        demand?.clearUnproducible(path: path)
+                    } else {
+                        demand?.markUnproducible(path: path)
+                    }
                 }
                 do {
                     try rendition.open(input: input)

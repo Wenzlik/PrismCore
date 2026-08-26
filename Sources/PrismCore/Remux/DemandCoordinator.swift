@@ -146,6 +146,13 @@ final class DemandCoordinator: @unchecked Sendable {
         lock.withLock { unproduciblePaths.contains(path) }
     }
 
+    /// Production DID write `path` after all (a re-anchor landed on audio the
+    /// first pass missed). Cleared so that, once retention evicts the file,
+    /// the next miss re-anchors instead of answering a stale 404.
+    func clearUnproducible(path: String) {
+        lock.withLock { _ = unproduciblePaths.remove(path) }
+    }
+
     // MARK: - Provider side
 
     /// The plan, if published.

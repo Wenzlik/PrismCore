@@ -179,6 +179,11 @@ struct PlanSegmentProvider: SegmentProvider {
                 if let data = try? Data(contentsOf: fileURL) {
                     return .data(data, contentType: contentType)
                 }
+                // The slot may have been declared empty AFTER this serve went
+                // pending (the cut that decides it runs later than the miss);
+                // without this re-check the loop would sleep out the whole
+                // window for a file production has said is not coming.
+                if coordinator.isUnproducible(path: path) { return onTimeout }
                 // This wait sits on the SEEK path: a demand fetch is answered
                 // the moment the produced file lands, plus whatever sits
                 // here. It used to be a 10 ms poll, which alone contributed

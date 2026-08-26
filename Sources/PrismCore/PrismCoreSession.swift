@@ -548,9 +548,12 @@ public actor PrismCoreSession {
         } catch {
             // No listener means no session: the producer is already writing
             // into the work directory and must not be left running for a
-            // server that never came up. Same shutdown order as `stop()`.
+            // server that never came up. Cancelled, not joined: the flag is
+            // checked once per packet, and a producer parked in a slow
+            // network read would hold the join for the length of that read —
+            // the host should get the bind error now. `stop()` still joins
+            // and removes the work directory, exactly as for any session.
             remuxer.cancel()
-            await producer.join()
             throw error
         }
 

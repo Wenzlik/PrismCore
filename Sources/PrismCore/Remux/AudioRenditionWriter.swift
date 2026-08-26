@@ -66,11 +66,13 @@ final class AudioRenditionWriter {
 
     static let initFileName = "init.mp4"
 
-    /// Planned mode only: a boundary this rendition had no audio for. The
-    /// slot keeps its index (see `cut`) and the remuxer tells the demand
-    /// seam the file will never exist, so a fetch of it is a fast 404 rather
-    /// than a 15 s pending wait.
-    var onSkippedPlannedSegment: ((Int) -> Void)?
+    /// Planned mode only: the outcome of a boundary for this rendition —
+    /// `produced == false` means it had no audio and the slot keeps its
+    /// index empty (see `cut`), which the remuxer relays to the demand seam
+    /// so a fetch of it is a fast 404 rather than a 15 s pending wait;
+    /// `true` clears that mark, because a re-anchor can land audio in a slot
+    /// the first pass found empty.
+    var onPlannedSegment: ((_ index: Int, _ produced: Bool) -> Void)?
 
     init(route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL) {
         self.route = route
@@ -262,7 +264,7 @@ final class AudioRenditionWriter {
                 // late-starting track, or an interleave lagging the shorter
                 // 2 s head) would otherwise write its first audio as
                 // segment 0 and shift every later segment against the video.
-                onSkippedPlannedSegment?(segmentIndex)
+                onPlannedSegment?(segmentIndex, false)
                 segmentIndex += 1
                 return
             }
@@ -274,7 +276,9 @@ final class AudioRenditionWriter {
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
-        if !plannedMode {
+        if plannedMode {
+            onPlannedSegment?(segmentIndex, true)
+        } else {
             try playlist.appendSegment(
                 duration: max(0.001, pendingDuration + durationSeconds),
                 file: file
