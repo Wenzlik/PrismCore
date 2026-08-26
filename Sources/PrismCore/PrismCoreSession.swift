@@ -78,6 +78,10 @@ public actor PrismCoreSession {
     let workDirectory: URL
     private let server: LoopbackHTTPServer
     private let remuxer: HLSRemuxer
+    /// The producer's per-write broadcast: what `start()` sleeps on until
+    /// the video variant is playable, and what the provider's pending serves
+    /// sleep on until their file lands (replacing two 10 ms polls).
+    private let landed = ProductionSignal()
     /// The remux's own thread. Not a `Task`: `run()` blocks in FFmpeg reads and
     /// parks at EOF, which is a contract violation on the cooperative pool and
     /// a deadlock once several sessions do it at once (#44, `ProducerThread`).
@@ -289,6 +293,7 @@ public actor PrismCoreSession {
         // never publish a plan, and the provider then behaves exactly like
         // the plain directory provider.
         let demand = DemandCoordinator()
+        let landed = self.landed
         let remuxer = HLSRemuxer(
             sourceURL: url,
             httpHeaders: httpHeaders,
@@ -303,10 +308,11 @@ public actor PrismCoreSession {
             forceMuxed: forceMuxedShape,
             dialogueBoost: dialogueBoost,
             probed: probed,
-            keyframeCacheDirectory: keyframeIndexCacheDirectory
+            keyframeCacheDirectory: keyframeIndexCacheDirectory,
+            landed: landed
         )
         self.remuxer = remuxer
-        var provider = PlanSegmentProvider(root: directory, coordinator: demand)
+        var provider = PlanSegmentProvider(root: directory, coordinator: demand, landed: landed)
         // The demand seam for lazy OCR: a `.vtt` fetch is what arms a bitmap
         // rendition, so a 29-PGS-track disc pays for the one track someone
         // selected, not all of them.
@@ -521,18 +527,40 @@ public actor PrismCoreSession {
         precondition(!started, "PrismCoreSession is single-use — make a new one per load")
         started = true
 
-        let base = try await server.start()
-
+        // The producer first, the listener second: the remux's opening move
+        // is a source open over the network (hundreds of milliseconds on a
+        // remote server), and nothing about it needs the port — so the bind
+        // overlaps it instead of preceding it. The signal is broadcast when
+        // the thread exits too, so a producer that dies in its first
+        // millisecond wakes the gate below rather than being waited out.
         let remuxer = self.remuxer
+        let landed = self.landed
         let producer = ProducerThread(name: "cz.zmrhal.prismcore.remux") {
+            defer { landed.broadcast() }
             try remuxer.run()
         }
         self.producer = producer
         watchForTerminalError(producer)
 
+        let base: URL
+        do {
+            base = try await server.start()
+        } catch {
+            // No listener means no session: the producer is already writing
+            // into the work directory and must not be left running for a
+            // server that never came up. Same shutdown order as `stop()`.
+            remuxer.cancel()
+            await producer.join()
+            throw error
+        }
+
         let deadline = ContinuousClock.now.advanced(by: startupTimeout)
         while ContinuousClock.now < deadline {
-            if let ready = readyPlaylistName() {
+            // Generation BEFORE the disk check (see `ProductionSignal`): a
+            // cut that lands between the check and the wait then returns the
+            // wait immediately instead of costing a backstop interval.
+            let generation = landed.currentGeneration
+            if let ready = Self.readyPlaylistName(in: workDirectory) {
                 return base.appendingPathComponent(ready)
             }
             // A remux that already died will never produce the playlist —
@@ -547,11 +575,12 @@ public actor PrismCoreSession {
             // coming, so don't burn the rest of the timeout waiting for it.
             if producer.isFinished { break }
             if let remuxError { throw SessionError.startupTimedOut(underlying: remuxError) }
-            // 10 ms, not 100: readiness lands ~30 ms after start on a warm
-            // source, and a coarser poll was quantizing every startup up to
-            // its own interval — measured 103 ms returned for 33 ms ready.
-            // The check is two small file reads; at this rate it is noise.
-            try await Task.sleep(for: .milliseconds(10))
+            // Woken by the producer's broadcast after each write. The 10 ms
+            // poll this replaces was itself a fix for a 100 ms one quantizing
+            // startups (103 ms returned for 33 ms ready); the wake removes the
+            // interval altogether, and the backstop only exists for a landing
+            // nobody announced.
+            await landed.wait(after: generation, backstop: .milliseconds(250))
         }
         throw SessionError.startupTimedOut(underlying: remuxError)
     }
@@ -574,20 +603,51 @@ public actor PrismCoreSession {
     ///
     /// The remuxer writes the master first (its contents are known before the
     /// first packet), so the master's presence is what decides the shape. What
-    /// takes a moment is the *renditions*: a master whose audio playlist doesn't
-    /// exist yet is a 404 for AVPlayer, which it can fail the item over rather
-    /// than retry. So every playlist the master references — the video variant
-    /// and each rendition — has to be there, carry an `EXTINF`, and have its
+    /// takes a moment is the first cut, and the gate waits for exactly one
+    /// thing from it: the **video variant** playable — an `EXTINF` and its
     /// `EXT-X-MAP` init segment on disk.
-    private func readyPlaylistName() -> String? {
+    ///
+    /// The renditions only have to EXIST (their playlist file written), not
+    /// be playable. The gate used to demand an `EXTINF` and an init segment
+    /// from every one of them, which made startup wait for the slowest
+    /// rendition's first cut — in the sequential shape, a bridged track whose
+    /// first cut carried no audio yet pushed readiness a whole segment out.
+    /// Waiting is not what protects AVPlayer from a missing rendition file
+    /// anyway: a fetch of an unproduced rendition segment or init goes
+    /// through the loopback's demand seam (`PlanSegmentProvider.handleMiss`),
+    /// which answers `.pending` and serves the file when the producer lands
+    /// it. A playlist that is not yet on disk would be a 404, and AVPlayer
+    /// fails an item over a 404 rather than retrying — hence the existence
+    /// check stays.
+    ///
+    /// `nonisolated static` so a test can run the gate over a hand-built
+    /// directory without a producer behind it.
+    nonisolated static func readyPlaylistName(in workDirectory: URL) -> String? {
         let master = workDirectory.appendingPathComponent(HLSRemuxer.masterPlaylistFileName)
         guard let masterText = try? String(contentsOf: master, encoding: .utf8) else {
-            return isPlayable(playlist: HLSRemuxer.mediaPlaylistFileName)
+            return isPlayable(playlist: HLSRemuxer.mediaPlaylistFileName, in: workDirectory)
                 ? HLSRemuxer.mediaPlaylistFileName
                 : nil
         }
-        let referenced = Self.playlistURIs(inMaster: masterText)
-        guard !referenced.isEmpty, referenced.allSatisfy(isPlayable(playlist:)) else { return nil }
+        let referenced = playlistURIs(inMaster: masterText)
+        guard !referenced.isEmpty else { return nil }
+        // The variant is the plain URI after EXT-X-STREAM-INF — the builder
+        // writes exactly one, and it is the only playlist whose first cut
+        // AVPlayer cannot start without.
+        var variant: String?
+        var expectingVariantURI = false
+        for rawLine in masterText.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if expectingVariantURI, !line.hasPrefix("#") { variant = line; break }
+            expectingVariantURI = line.hasPrefix("#EXT-X-STREAM-INF:")
+        }
+        guard let variant, isPlayable(playlist: variant, in: workDirectory) else { return nil }
+        for uri in referenced where uri != variant {
+            guard FileManager.default.fileExists(
+                atPath: workDirectory.appendingPathComponent(uri).path
+            ) else { return nil }
+        }
         return HLSRemuxer.masterPlaylistFileName
     }
 
@@ -626,7 +686,7 @@ public actor PrismCoreSession {
 
     /// Does this relative media playlist exist, list a segment, and have the
     /// init segment it maps to?
-    private func isPlayable(playlist relativePath: String) -> Bool {
+    private nonisolated static func isPlayable(playlist relativePath: String, in workDirectory: URL) -> Bool {
         let url = workDirectory.appendingPathComponent(relativePath)
         guard let text = try? String(contentsOf: url, encoding: .utf8),
               text.contains("#EXTINF")
