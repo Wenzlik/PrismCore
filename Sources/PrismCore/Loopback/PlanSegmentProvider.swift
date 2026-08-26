@@ -83,6 +83,9 @@ struct PlanSegmentProvider: SegmentProvider {
 
     private func handleMiss(path: String) async -> ProviderResult {
         guard coordinator.publishedPlan != nil else { return .notFound }
+        // A slot production declared empty: waiting would only stall the
+        // rendition for the whole pending window before the same 404.
+        if coordinator.isUnproducible(path: path) { return .notFound }
 
         // Unproduced planned artifacts by shape:
         if let index = Self.segmentIndex(inPath: path) {

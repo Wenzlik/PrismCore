@@ -607,18 +607,18 @@ public actor PrismCoreSession {
     /// thing from it: the **video variant** playable — an `EXTINF` and its
     /// `EXT-X-MAP` init segment on disk.
     ///
-    /// The renditions only have to EXIST (their playlist file written), not
-    /// be playable. The gate used to demand an `EXTINF` and an init segment
-    /// from every one of them, which made startup wait for the slowest
-    /// rendition's first cut — in the sequential shape, a bridged track whose
-    /// first cut carried no audio yet pushed readiness a whole segment out.
-    /// Waiting is not what protects AVPlayer from a missing rendition file
-    /// anyway: a fetch of an unproduced rendition segment or init goes
-    /// through the loopback's demand seam (`PlanSegmentProvider.handleMiss`),
-    /// which answers `.pending` and serves the file when the producer lands
-    /// it. A playlist that is not yet on disk would be a 404, and AVPlayer
-    /// fails an item over a 404 rather than retrying — hence the existence
-    /// check stays.
+    /// The renditions have to exist (playlist on disk — a 404 on a playlist
+    /// fails the item outright) and have the init segment their `EXT-X-MAP`
+    /// names, but they need NOT list a segment yet. The gate used to demand
+    /// an `EXTINF` from every one of them, which in the sequential shape made
+    /// startup wait for a bridged track whose first cut carried no audio. An
+    /// unproduced rendition *segment* goes through the loopback's demand seam
+    /// (`PlanSegmentProvider.handleMiss` answers `.pending` and serves it
+    /// when the producer lands it), so it is not the gate's job. The init
+    /// stays a requirement on purpose: a declared track that never delivers
+    /// a packet never mints one, and returning a master whose default
+    /// rendition can never become playable would move the failure from
+    /// `start()` (where the host can fall back) to AVPlayer.
     ///
     /// `nonisolated static` so a test can run the gate over a hand-built
     /// directory without a producer behind it.
@@ -644,9 +644,7 @@ public actor PrismCoreSession {
         }
         guard let variant, isPlayable(playlist: variant, in: workDirectory) else { return nil }
         for uri in referenced where uri != variant {
-            guard FileManager.default.fileExists(
-                atPath: workDirectory.appendingPathComponent(uri).path
-            ) else { return nil }
+            guard hasInitIfMapped(playlist: uri, in: workDirectory) else { return nil }
         }
         return HLSRemuxer.masterPlaylistFileName
     }
@@ -691,6 +689,14 @@ public actor PrismCoreSession {
         guard let text = try? String(contentsOf: url, encoding: .utf8),
               text.contains("#EXTINF")
         else { return false }
+        return hasInitIfMapped(playlist: relativePath, in: workDirectory)
+    }
+
+    /// Does this relative media playlist exist and, when it names an
+    /// `EXT-X-MAP`, have that init segment on disk? (No `EXTINF` demanded.)
+    private nonisolated static func hasInitIfMapped(playlist relativePath: String, in workDirectory: URL) -> Bool {
+        let url = workDirectory.appendingPathComponent(relativePath)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
         guard let mapLine = text.split(separator: "\n").first(where: {
             $0.hasPrefix("#EXT-X-MAP:")
         }) else { return true }

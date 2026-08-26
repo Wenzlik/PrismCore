@@ -42,7 +42,7 @@ struct FirstSegmentReadinessTests {
         return text + "#EXT-X-ENDLIST\n"
     }
 
-    @Test("The gate opens on the video variant's init + EXTINF while the audio rendition is still pending")
+    @Test("The gate opens on the video variant's EXTINF while the audio rendition has only an init")
     func gateWaitsForVideoOnly() throws {
         let root = try makeDirectory("Gate")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -62,13 +62,44 @@ struct FirstSegmentReadinessTests {
         try Data("moov".utf8).write(to: root.appendingPathComponent("init.mp4"))
         #expect(PrismCoreSession.readyPlaylistName(in: root) == nil)
 
-        // Rendition playlist on disk but its init segment NOT: ready. The
-        // rendition's init and segments are served through the demand seam
-        // (`.pending` until the producer lands them), so waiting for them
-        // here would only delay the URL.
-        try Data(plannedVOD(segments: 5).utf8).write(to: root.appendingPathComponent("audio0/index.m3u8"))
+        // Rendition playlist on disk with NO segment listed and no init: not
+        // ready — a declared track that never delivers a packet never mints
+        // an init, and that failure belongs in start(), not in AVPlayer.
+        let headerOnly = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+        try Data(headerOnly.utf8).write(to: root.appendingPathComponent("audio0/index.m3u8"))
+        #expect(PrismCoreSession.readyPlaylistName(in: root) == nil)
+
+        // Init present, still no EXTINF: ready. The rendition's segments are
+        // served through the demand seam (`.pending` until the producer
+        // lands them), so waiting for a listed segment here would only delay
+        // the URL.
+        try Data("moov".utf8).write(to: root.appendingPathComponent("audio0/init.mp4"))
         #expect(PrismCoreSession.readyPlaylistName(in: root) == "master.m3u8")
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("audio0/init.mp4").path))
+    }
+
+    @Test("A planned rendition slot production declared empty is a fast 404, not a pending wait")
+    func unproducibleSlotIsNotFound() async throws {
+        let root = try makeDirectory("Unproducible")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<5).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        ))
+        coordinator.setProducing(index: 3)
+        let provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+        // The head boundary carried no audio for this rendition: the writer
+        // kept the slot (index alignment with the video) and declared it.
+        coordinator.markUnproducible(path: "audio0/seg00000.m4s")
+        guard case .notFound = await provider.data(forPath: "audio0/seg00000.m4s") else {
+            Issue.record("an unproducible slot must 404 immediately"); return
+        }
+        // And it did not re-anchor the producer back to the head for it.
+        #expect(coordinator.takeAnchorRequest() == nil)
+        // The video's own slot 0 is untouched: still a real demand.
+        guard case .pending = await provider.data(forPath: "seg00000.m4s") else {
+            Issue.record("the variant's head must still be demandable"); return
+        }
     }
 
     @Test("An unproduced rendition init or segment is served as pending, resolved by the producer's broadcast")

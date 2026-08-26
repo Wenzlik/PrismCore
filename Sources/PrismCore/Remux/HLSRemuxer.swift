@@ -587,6 +587,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 // encoder can't express, say) costs that rendition, not the
                 // session: the other tracks and the picture still play, which
                 // is the whole point of not muxing them together.
+                // An empty planned boundary keeps its index and is declared
+                // to the demand seam (see `AudioRenditionWriter.cut`).
+                rendition.onSkippedPlannedSegment = { [demand, name = rendition.directoryName] index in
+                    demand?.markUnproducible(
+                        path: name + "/" + String(format: "seg%05d.m4s", index)
+                    )
+                }
                 do {
                     try rendition.open(input: input)
                     renditions.append(rendition)
@@ -619,6 +626,13 @@ final class HLSRemuxer: @unchecked Sendable {
                     ordinal: renditions.count,
                     parent: outputDirectory
                 )
+                // An empty planned boundary keeps its index and is declared
+                // to the demand seam (see `AudioRenditionWriter.cut`).
+                rendition.onSkippedPlannedSegment = { [demand, name = rendition.directoryName] index in
+                    demand?.markUnproducible(
+                        path: name + "/" + String(format: "seg%05d.m4s", index)
+                    )
+                }
                 do {
                     try rendition.open(input: input)
                     renditions.append(rendition)

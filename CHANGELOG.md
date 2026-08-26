@@ -35,18 +35,31 @@ source-compatible.)
   that difference scales with bandwidth, which is why the number that
   matters is the host's own TTFF log on a device rather than this one.
 
-- **Readiness is the video variant, not every rendition.** The gate used to
-  require an `EXTINF` and an init segment from every playlist the master
-  references. Only the variant's first cut is something AVPlayer cannot
-  start without: a rendition's init or head segment that is not on disk yet
-  goes through the loopback's demand seam (`PlanSegmentProvider.handleMiss`
-  answers `.pending` and serves the file when the producer lands it —
-  covered by a test now). Rendition playlists must still *exist*, because a
-  404 on a playlist fails the item outright rather than retrying. Honest
-  note: in the planned shape the renditions cut at the same boundary as the
-  video, microseconds later, so most of the win here is the shorter first
-  segment; the relaxed gate matters when a rendition's first cut is late or
-  empty (a bridged track lagging the interleave at the head).
+- **Readiness no longer waits for a segment from every rendition.** The gate
+  used to require an `EXTINF` and an init segment from every playlist the
+  master references. It now requires the video variant playable, and from
+  each rendition only its playlist and the init its `EXT-X-MAP` names: an
+  unproduced rendition *segment* goes through the loopback's demand seam
+  (`PlanSegmentProvider.handleMiss` answers `.pending` and serves it when
+  the producer lands it — covered by a test now). The init stays required
+  (review finding): a declared track that never delivers a packet never
+  mints one, and handing out a master whose default rendition can never
+  play would move that failure from `start()` to AVPlayer. Honest note: in
+  the planned shape the renditions cut at the same boundary as the video,
+  microseconds later, so the win here is small; most of it is the shorter
+  first segment.
+
+- **A planned rendition boundary with no audio keeps its index.** Found by
+  review of the shorter head: a rendition whose audio starts after a
+  boundary (a late-starting track, or an interleave lagging a 2 s head) had
+  its empty cut folded into the next one — in the planned shape that wrote
+  the first real audio as `seg00000.m4s` and shifted every later rendition
+  segment against the video, silently. The slot now stays empty and the
+  writer declares it to the demand coordinator, so a fetch of it is an
+  immediate 404 (AVPlayer skips a failed media segment) instead of a 15 s
+  pending wait for a file that is not coming. The sequential EVENT shape is
+  unchanged (its playlist is appended as segments land, so folding is
+  correct there).
 
 - **Startup and demand waits are wakes, not polls.** The session's readiness
   gate and every pending serve in `PlanSegmentProvider` slept 10 ms between
