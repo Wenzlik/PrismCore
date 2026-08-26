@@ -35,6 +35,15 @@ struct PlanSegmentProvider: SegmentProvider {
     /// segments forever.
     var subtitleDemand: (@Sendable (String) -> SubtitleRenditionSet.DemandVerdict)?
 
+    /// Consulted on every fetch under an `audioN/` directory, BEFORE the disk
+    /// read — the seam that arms a lazy (dialogue-boost) rendition. Returns
+    /// `true` when THIS fetch armed it, in which case production is
+    /// re-anchored — forced, so it happens even inside the forward-wait
+    /// window — at the demanded segment (or the one being produced, for an
+    /// init fetch), so the rendition's first segment is a whole one. A fetch
+    /// of an armed or eager rendition returns `false` and changes nothing.
+    var audioDemand: (@Sendable (String) -> Bool)?
+
     init(root: URL, coordinator: DemandCoordinator, landed: ProductionSignal? = nil) {
         self.root = root
         self.coordinator = coordinator
@@ -73,6 +82,16 @@ struct PlanSegmentProvider: SegmentProvider {
         // itself is instant.
         if let index = Self.segmentIndex(inPath: path) {
             coordinator.noteFetch(of: index)
+        }
+        // An init or segment fetch under `audioN/` is the demand that arms a
+        // lazy rendition — not the playlist fetch, which AVPlayer makes for
+        // renditions it never plays. Lazy renditions exist only in the
+        // planned shape (see `HLSRemuxer`), so the plan is always there to
+        // re-anchor against.
+        if path.hasPrefix("audio"), path.hasSuffix(".m4s") || path.hasSuffix("init.mp4"),
+           audioDemand?(path) == true,
+           let anchor = Self.segmentIndex(inPath: path) ?? coordinator.armAnchorIndex {
+            coordinator.requestProduction(of: anchor, force: true)
         }
         let direct = await directory.data(forPath: path)
         if case .notFound = direct {

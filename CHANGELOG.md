@@ -89,6 +89,59 @@ source-compatible.)
 - `SubtitleRenditionTests`: the straddling-cue assertions moved from the 6 s
   cut to the 2 s one — same behaviour, new boundary.
 
+### Changed — lazy dialogue-boost renditions (#65 package B)
+
+- **Dialogue-boost renditions are produced on demand, not from the first
+  packet.** The host requests `[.medium, .high]` on every eligible session,
+  and each level was a full `AudioBridge` — decoder, `pan` filter,
+  resampler, EAC3 encoder, FIFO — opened before the first segment and fed
+  a clone of every default-track packet for the length of the film, whether
+  or not anyone ever opened Enhance Dialogue. They are now declared exactly
+  as before (same `EXT-X-MEDIA` lines, `CHANNELS` from a bridge that is
+  built once for the negotiated layout and released again, complete
+  planned VOD playlists) but nothing else exists — no bridge, no muxer, no
+  init — until an init or segment fetch lands under the rendition's
+  directory. That fetch arms it (`HLSRemuxer.noteAudioDemand`, through
+  `PlanSegmentProvider.audioDemand` — the same seam OCR subtitles use) and
+  **forces** a re-anchor at the demanded segment even inside the
+  forward-wait window (`DemandCoordinator.requestProduction(force:)`), so
+  the rendition joins at a plan boundary with a whole first segment and its
+  init is minted by that cut. Playlist fetches never arm: AVPlayer prefetches
+  rendition playlists it never plays.
+
+  Two consequences worth knowing. The readiness gate no longer waits for a
+  lazy rendition's init (`readyPlaylistName(in:lazyRenditions:)`) — it is
+  not coming until someone selects the rendition, and AVPlayer fetches an
+  init only for the selection. And a dormant boundary does NOT mark its
+  slot unproducible: the arming fetch is what reproduces exactly those
+  slots, and a 404 mark would race its pending wait.
+
+  Lazy only in the planned (demand-driven) shape. The sequential EVENT
+  shape's provider has no demand seam (a miss there is a 404) and no seek to
+  offer, so it keeps producing boost renditions eagerly — today's cost and
+  today's behaviour, on the sources that already could not be planned.
+
+  Not measured here: the stock MPVKit build has no EAC3 encoder, so no bridge
+  can be built on this machine at all. The saving is the two decode→encode
+  chains themselves (`AudioBridgeTests` time one at roughly real-time÷40 per
+  level on this hardware); the host's own CPU sampling on a device is the
+  number that matters.
+
+### Tests — package B
+
+- `LazyDialogueBoostTests` (new): forced anchor requests bypass the window
+  and the "already there" check; the gate skips a lazy rendition's init but
+  still requires its playlist; a lazy `AudioRenditionWriter` opens nothing,
+  drops packets and passes boundaries unmarked until armed, then joins at a
+  re-anchor with init + whole segment; the provider seam arms on
+  init/segment fetches only and forces the re-anchor (init fetch → newest
+  demanded index); a session with `[.medium, .high]` over a 5.1 default
+  track (`h264_ac3_51_20s.mkv`, new synthetic fixture) produces the whole
+  default rendition and NOTHING under the boost directories until a fetch,
+  then serves the boost segment with an EAC3 init and the default rendition
+  untouched — on a build with the encoder; on stock MPVKit it pins the
+  graceful skip.
+
 ## [1.10.1] — 2026-08-22
 
 ### Fixed

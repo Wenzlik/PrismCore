@@ -19,6 +19,11 @@ final class DemandCoordinator: @unchecked Sendable {
     private let lock = NSCondition()
     private var plan: SegmentPlan?
     private var requestedAnchor: Int?
+    /// Set with `requestedAnchor` when the request must be honoured even at
+    /// the index production is already on: a lazy rendition was just armed,
+    /// and the muxers have to be rebuilt at a boundary for it to join with a
+    /// whole first segment. Consumed together with the anchor.
+    private var anchorIsForced = false
     /// The producer's current position: the segment it is producing now.
     /// `-1` until production starts.
     private var producingIndex = -1
@@ -72,8 +77,20 @@ final class DemandCoordinator: @unchecked Sendable {
     /// packet; a nil answer is the hot path.
     func takeAnchorRequest() -> Int? {
         lock.withLock {
-            defer { requestedAnchor = nil }
+            defer { requestedAnchor = nil; anchorIsForced = false }
             return requestedAnchor
+        }
+    }
+
+    /// The pending anchor request with its force flag, consumed — the copy
+    /// loop's variant of `takeAnchorRequest`, which ignores a request for the
+    /// index it is already producing unless `forced` says the muxers must be
+    /// rebuilt anyway (a lazy rendition joining).
+    func takeAnchorRequestDetailed() -> (index: Int, forced: Bool)? {
+        lock.withLock {
+            defer { requestedAnchor = nil; anchorIsForced = false }
+            guard let requestedAnchor else { return nil }
+            return (requestedAnchor, anchorIsForced)
         }
     }
 
@@ -91,6 +108,20 @@ final class DemandCoordinator: @unchecked Sendable {
         defer { lock.unlock() }
         guard requestedAnchor == nil, !isCancelled() else { return }
         lock.wait(until: Date(timeIntervalSinceNow: Self.parkBackstopSeconds))
+    }
+
+    /// Where a lazy rendition's arming re-anchors to when the fetch that
+    /// armed it named no segment (an `init.mp4` fetch): the newest demanded
+    /// index — the closest thing to the playhead, and where the rendition's
+    /// own segment fetches are about to start — else the segment being
+    /// produced; `nil` before production started. The rebuilt muxers restart
+    /// that segment from its boundary, so the new rendition's first file is
+    /// whole and the abandoned partial fragment was never on disk anyway.
+    var armAnchorIndex: Int? {
+        lock.withLock {
+            if lastDemandedIndex >= 0 { return lastDemandedIndex }
+            return producingIndex >= 0 ? producingIndex : nil
+        }
     }
 
     /// Park the calling thread while the producer is more than
@@ -174,15 +205,21 @@ final class DemandCoordinator: @unchecked Sendable {
     /// exist. Decide whether the producer should jump: anything outside the
     /// forward-wait window re-anchors; inside it, the producer is about to
     /// make the segment anyway and a jump would only tear down its muxers.
-    func requestProduction(of index: Int) {
+    ///
+    /// `force` skips the window AND the producer's "already there" check:
+    /// used when a lazy rendition has just been armed, because its bridge
+    /// can only join at a muxer rebuild, and the segment AVPlayer is asking
+    /// for has to come out whole — even if production is on that very index.
+    func requestProduction(of index: Int, force: Bool = false) {
         lock.withLock {
             let current = producingIndex
-            if current >= 0, index >= current, index <= current + Self.forwardWaitWindow {
+            if !force, current >= 0, index >= current, index <= current + Self.forwardWaitWindow {
                 return
             }
             // Last request wins: AVPlayer's newest fetch is where the
             // playhead actually is.
             requestedAnchor = index
+            anchorIsForced = force || anchorIsForced
             // Signalled under the lock, so a producer that is between its
             // `requestedAnchor == nil` check and its `wait` cannot miss this.
             lock.broadcast()
