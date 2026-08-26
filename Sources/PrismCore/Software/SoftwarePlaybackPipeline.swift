@@ -457,6 +457,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// executes only the newest, because each earlier one would flush and
     /// refill a queue the next one flushes again.
     public func seek(to time: CMTime) {
+        performSeek(to: time, forceRefill: false)
+    }
+
+    /// - Parameter forceRefill: flush and re-prime even when the demuxer
+    ///   refuses the seek (renderer recovery needs the flush more than the
+    ///   position).
+    private func performSeek(to time: CMTime, forceRefill: Bool) {
         let generation = seekLock.withLock {
             seekGeneration += 1
             return seekGeneration
@@ -471,13 +478,17 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             // buffer we enqueue lands in the clock's past and is dropped.
             timeline.setRate(0, time: timeline.currentTime)
 
-            guard seekDemuxer(input, to: time) else {
+            guard seekDemuxer(input, to: time) || forceRefill else {
                 // A source with no index (raw MPEG-2 TS) can refuse; leaving the
                 // demuxer where it is beats tearing the session down.
                 setState(wasPlaying ? .playing : .paused)
                 if wasPlaying { timeline.setRate(1, time: timeline.currentTime) }
                 return
             }
+            // `forceRefill` with a refused seek: a renderer recovery on a
+            // non-seekable source. The demuxer stays where it is and the
+            // renderers are re-fed from there — a gap of the queue's
+            // look-ahead, which beats staying black.
 
             videoDecoder?.flushBuffers()
             audioDecoder?.flushBuffers()
@@ -1118,7 +1129,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             return
         }
         let resumeAt = timeline.currentTime.isValid ? timeline.currentTime : anchorTime
-        seek(to: resumeAt)
+        performSeek(to: resumeAt, forceRefill: true)
     }
 
     private func observeRendererFailures() {

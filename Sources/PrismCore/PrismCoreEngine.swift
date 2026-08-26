@@ -183,9 +183,10 @@ public enum PrismCoreEngine {
         display: DisplayCapabilities = .conservative,
         segmentCacheBytes: Int? = 1 << 30
     ) async throws -> Playback {
-        // Keep the probe's CONTEXT, not just its answer: the software path
-        // adopts it and skips a second open (the remux path still opens its
-        // own — see `PrismCoreSession(probed:)` for that half of the story).
+        // Keep the probe's CONTEXT, not just its answer: whichever engine
+        // takes the source adopts it and skips a second open — and releases
+        // the probe's connection, which a one-connection-per-client server
+        // would otherwise count against the producer's.
         let probed: ProbedSource
         do {
             probed = try SourceProbe.open(url: url, httpHeaders: httpHeaders)
@@ -203,7 +204,8 @@ public enum PrismCoreEngine {
                     url: url,
                     httpHeaders: httpHeaders,
                     display: display,
-                    segmentCacheBytes: segmentCacheBytes
+                    segmentCacheBytes: segmentCacheBytes,
+                    probed: probed
                 )
                 return .remux(session: session, playlist: try await session.start())
             } catch {
