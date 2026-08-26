@@ -156,8 +156,8 @@ struct SegmentPlan: Equatable {
             durationSeconds: durationSeconds, targetSeconds: targetSeconds
         ) {
             // Nothing to nudge: the index is already in the stream. Two Range
-            // requests saved on every MP4 (stss lives in the moov the open
-            // read) and on every Matroska whose Cues the demuxer already
+            // requests saved on every plain MP4 (stss lives in the moov the
+            // open read) and on any Matroska whose Cues the demuxer already
             // fetched while executing the SeekHead.
             keyframes = indexedKeyframes(of: stream)
         } else {
@@ -231,15 +231,17 @@ struct SegmentPlan: Equatable {
         return indexed
     }
 
-    /// Whether the demuxer's index is already complete without a nudge seek.
+    /// Whether the demuxer's index is already complete without a nudge seek:
+    /// its keyframe entries reach into the last target-length of the file.
     ///
-    /// The mov demuxer builds its index from `stss`/`stts` in the `moov` the
-    /// open already read, so for it the nudge only costs two Range requests
-    /// and loads nothing new. Any other demuxer counts as loaded when its
-    /// index already reaches into the last target-length of the file — the
-    /// Matroska demuxer sometimes parses the Cues while executing the
-    /// SeekHead at open — because open-time entries from a Cues-less file
-    /// only ever cover the first cluster, which this cannot mistake.
+    /// True for a plain MP4/MOV, whose index comes from `stss`/`stts` in the
+    /// `moov` the open already read — the nudge there costs two Range
+    /// requests and loads nothing. Deliberately NOT decided by the demuxer's
+    /// name (review finding): a fragmented MP4's `moov` describes only the
+    /// first fragment, and the rest needs `sidx`/`mfra`/a tail read the
+    /// nudge provides. Coverage is the honest criterion for every container:
+    /// open-time entries from a Cues-less Matroska or an fMP4 head cover the
+    /// first cluster/fragment only, which this cannot mistake for the tail.
     static func indexIsLoadedAtOpen(
         input: UnsafeMutablePointer<AVFormatContext>,
         stream: UnsafeMutablePointer<AVStream>,
@@ -247,10 +249,6 @@ struct SegmentPlan: Equatable {
         durationSeconds: Double,
         targetSeconds: Int
     ) -> Bool {
-        if let name = input.pointee.iformat?.pointee.name,
-           String(cString: name).split(separator: ",").contains("mov") {
-            return true
-        }
         guard let last = indexedKeyframes(of: stream).last else { return false }
         return Double(last) * tickSeconds >= durationSeconds - Double(targetSeconds)
     }
@@ -325,7 +323,13 @@ struct SegmentPlan: Equatable {
             // the timeline drifts cumulatively (10 s GOPs advertised as 6 s
             // entries — review finding). A stride no shorter than the gap
             // gives every target its own GOP, so the error stays one GOP per
-            // entry and never accumulates.
+            // entry and never accumulates — PROVIDED the tail's cadence is no
+            // coarser than the prefix's. The tail is unobserved by definition,
+            // so this is an inference, not a bound: a tail whose GOPs grow
+            // past the prefix's largest would drift again there. Known
+            // limitation, accepted for the un-watched remainder of a source
+            // that otherwise has no seekable shape at all; the harvest closes
+            // it on the next contiguous play.
             var largestGap: Int64 = 0
             for (earlier, later) in zip(sorted, sorted.dropFirst()) {
                 largestGap = max(largestGap, later - earlier)

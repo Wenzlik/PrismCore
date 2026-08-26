@@ -162,14 +162,16 @@ source-compatible.)
   server (one `SourceProbe.open` + `start()` over `h264_aac_30s.mkv`, 3 runs
   each, identical every run): **5 requests → 4**.
 
-- **No index-load nudge for MP4/MOV.** The mov demuxer builds its index from
-  `stss`/`stts` in the `moov` the open already read, so the tail seek loaded
-  nothing and cost two Range requests. `SegmentPlan.indexIsLoadedAtOpen`
-  skips the nudge for `iformat` names containing `mov`, and for any demuxer
-  whose index already reaches into the last target-length of the file
-  (open-time entries from a Cues-less Matroska only ever cover the first
-  cluster, so this cannot be mistaken). Not measured (no MP4 fixture; the
-  MKV fixture's Cues are not parsed at open, so it still nudges).
+- **No index-load nudge when the index is already loaded.** A plain MP4's
+  index comes from `stss`/`stts` in the `moov` the open already read, so the
+  tail seek loaded nothing and cost two Range requests.
+  `SegmentPlan.indexIsLoadedAtOpen` skips the nudge when the stream's
+  keyframe entries already reach into the last target-length of the file —
+  by coverage, not by demuxer name (review finding: a fragmented MP4's
+  `moov` describes its first fragment only, and open-time entries from a
+  Cues-less Matroska cover the first cluster only; neither can pass). Not
+  measured (no MP4 fixture; the MKV fixture's Cues are not parsed at open,
+  so it still nudges).
 
 - **A cancelled play persists its keyframe harvest as a PARTIAL map.** The
   harvest of a source that could not be planned (no usable index) was stored
@@ -183,8 +185,10 @@ source-compatible.)
   at-or-after, with a stride no shorter than the largest gap the prefix
   showed (review finding: a 6 s stride over 10 s GOPs would resolve two
   targets to one keyframe and drift the timeline cumulatively), so a seek
-  INTO the un-watched tail lands up to one GOP late and the error never
-  accumulates;
+  INTO the un-watched tail lands up to one GOP late and the error does not
+  accumulate as long as the tail's cadence is no coarser than the prefix's
+  (an inference about an unobserved tail, not a bound — known limitation,
+  closed by the harvest on the next contiguous play);
   in exchange the watched prefix (where the resume point is) gets a
   seekable VOD on a source that had none. A session planned on a partial
   map keeps harvesting to extend the prefix — only while its run started
