@@ -319,6 +319,12 @@ public actor PrismCoreSession {
         provider.subtitleDemand = { [subtitles = remuxer.subtitles] path in
             subtitles.noteSegmentDemand(path: path)
         }
+        // The same seam for lazy dialogue-boost renditions: an init/segment
+        // fetch under `audioN/` is what arms one, so the two levels the host
+        // requests on every session cost nothing until someone picks one.
+        provider.audioDemand = { [remuxer] path in
+            remuxer.noteAudioDemand(path: path)
+        }
         self.server = LoopbackHTTPServer(provider: provider)
     }
 
@@ -563,7 +569,9 @@ public actor PrismCoreSession {
             // cut that lands between the check and the wait then returns the
             // wait immediately instead of costing a backstop interval.
             let generation = landed.currentGeneration
-            if let ready = Self.readyPlaylistName(in: workDirectory) {
+            if let ready = Self.readyPlaylistName(
+                in: workDirectory, lazyRenditions: remuxer.lazyRenditionPlaylistURIs
+            ) {
                 return base.appendingPathComponent(ready)
             }
             // A remux that already died will never produce the playlist —
@@ -623,9 +631,17 @@ public actor PrismCoreSession {
     /// rendition can never become playable would move the failure from
     /// `start()` (where the host can fall back) to AVPlayer.
     ///
+    /// `lazyRenditions` (relative playlist URIs) are declared renditions that
+    /// produce nothing — no init either — until a fetch arms them
+    /// (`HLSRemuxer.lazyRenditionPlaylistURIs`). Only their playlist has to
+    /// exist; AVPlayer fetches an init only for the rendition it selected,
+    /// and that fetch is what makes the init.
+    ///
     /// `nonisolated static` so a test can run the gate over a hand-built
     /// directory without a producer behind it.
-    nonisolated static func readyPlaylistName(in workDirectory: URL) -> String? {
+    nonisolated static func readyPlaylistName(
+        in workDirectory: URL, lazyRenditions: Set<String> = []
+    ) -> String? {
         let master = workDirectory.appendingPathComponent(HLSRemuxer.masterPlaylistFileName)
         guard let masterText = try? String(contentsOf: master, encoding: .utf8) else {
             return isPlayable(playlist: HLSRemuxer.mediaPlaylistFileName, in: workDirectory)
@@ -647,6 +663,12 @@ public actor PrismCoreSession {
         }
         guard let variant, isPlayable(playlist: variant, in: workDirectory) else { return nil }
         for uri in referenced where uri != variant {
+            if lazyRenditions.contains(uri) {
+                guard FileManager.default.fileExists(
+                    atPath: workDirectory.appendingPathComponent(uri).path
+                ) else { return nil }
+                continue
+            }
             guard hasInitIfMapped(playlist: uri, in: workDirectory) else { return nil }
         }
         return HLSRemuxer.masterPlaylistFileName

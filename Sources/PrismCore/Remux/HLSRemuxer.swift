@@ -283,6 +283,33 @@ final class HLSRemuxer: @unchecked Sendable {
         dialogueBoostLock.withLock { storedDialogueBoostRenditions }
     }
 
+    /// The renditions of the running session, by directory name — what the
+    /// loopback's demand seam arms (`noteAudioDemand`). Written once on the
+    /// producer thread before the master lands; `arm()` itself is
+    /// thread-safe, so the server may call it from any connection.
+    private let renditionsLock = NSLock()
+    private var storedRenditionsByDirectory: [String: AudioRenditionWriter] = [:]
+    private var storedLazyRenditionPlaylistURIs: Set<String> = []
+
+    /// Relative playlist URIs of renditions that are declared in the master
+    /// but produce nothing until a fetch arms them. The readiness gate must
+    /// not wait for their init segment: it is minted by the first cut AFTER
+    /// arming, and nobody has armed anything when `start()` is waiting.
+    var lazyRenditionPlaylistURIs: Set<String> {
+        renditionsLock.withLock { storedLazyRenditionPlaylistURIs }
+    }
+
+    /// The provider reports every init/segment fetch under `audioN/` here.
+    /// Returns `true` when this fetch is the one that armed a lazy rendition
+    /// — the provider then forces a re-anchor so the rendition joins at a
+    /// boundary. `false` for eager renditions, already-armed ones, and paths
+    /// that name no rendition.
+    func noteAudioDemand(path: String) -> Bool {
+        guard let directory = path.split(separator: "/").first else { return false }
+        let rendition = renditionsLock.withLock { storedRenditionsByDirectory[String(directory)] }
+        return rendition?.arm() ?? false
+    }
+
     private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
         let stats = DolbyVisionConversionStats(
             convertedRPUs: converter.convertedRPUs,
@@ -627,7 +654,16 @@ final class HLSRemuxer: @unchecked Sendable {
                     route: route,
                     track: track,
                     ordinal: renditions.count,
-                    parent: outputDirectory
+                    parent: outputDirectory,
+                    // Lazy in the planned shape: declared now, produced from
+                    // the first fetch under its directory, which re-anchors
+                    // production to the demanded segment. The host requests
+                    // every level on every session; a decode→filter→encode
+                    // chain per level ran for the whole film whether or not
+                    // anyone picked it. Eager in the sequential shape, whose
+                    // provider has no demand seam (a miss is a 404 there) —
+                    // that shape keeps today's cost, and today's behaviour.
+                    lazy: plannedPlan != nil
                 )
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).
@@ -650,6 +686,18 @@ final class HLSRemuxer: @unchecked Sendable {
             // now — so it lands before the first segment. `PrismCoreSession`
             // reads its presence to decide which URL it hands out.
             if var variant = videoVariant, !renditions.isEmpty {
+                // Registered BEFORE the master lands: the readiness gate reads
+                // the master the moment it appears, and a lazy rendition it
+                // did not know about would hold the gate for an init that is
+                // not coming until someone arms it.
+                renditionsLock.withLock {
+                    storedRenditionsByDirectory = Dictionary(
+                        uniqueKeysWithValues: renditions.map { ($0.directoryName, $0) }
+                    )
+                    storedLazyRenditionPlaylistURIs = Set(
+                        renditions.filter(\.isLazy).map(\.playlistURI)
+                    )
+                }
                 variant.audioRenditions = renditions.enumerated().map { ordinal, rendition in
                     // DEFAULT on the first rendition only, which is the track
                     // `chooseAudio` would have picked (see `routeAll`).
@@ -968,11 +1016,22 @@ final class HLSRemuxer: @unchecked Sendable {
                 defer { av_packet_unref(packet) }
 
                 // A fetch outside the producer's window re-anchors it — checked
-                // once per packet; nil is the hot path.
-                if plannedPlan != nil, let anchor = demand?.takeAnchorRequest(),
-                   anchor != segmentIndex, anchor >= 0,
-                   anchor < (plannedPlan?.entries.count ?? 0) {
-                    try reanchor(to: anchor)
+                // once per packet; nil is the hot path. A FORCED request is
+                // honoured even for the segment already in production: a lazy
+                // rendition was armed and joins only through a muxer rebuild
+                // at a boundary, and the partial fragment abandoned by the
+                // restart was never on disk.
+                if plannedPlan != nil, let request = demand?.takeAnchorRequestDetailed(),
+                   request.index != segmentIndex || request.forced,
+                   request.index >= 0, request.index < (plannedPlan?.entries.count ?? 0) {
+                    try reanchor(to: request.index)
+                    // The packet in hand was read at the OLD position. Were it
+                    // a keyframe past the anchor (a backward seek from further
+                    // on), the discard check below would take it for the
+                    // anchor keyframe and the segment would open on a picture
+                    // from the wrong place, followed by lower timestamps from
+                    // the seek target. The next read comes from the anchor.
+                    continue
                 }
 
                 // Between a seek and the anchor keyframe, everything is discard:
