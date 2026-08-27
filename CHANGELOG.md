@@ -6,7 +6,11 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
-## [Unreleased] — 1.11.0
+## [Unreleased]
+
+## [2.0.0] — 2026-08-27
+
+A major bump, not a minor one, because the host-visible contract moved: `start()` returns on video-only readiness (renditions may still be pending), dialogue-boost renditions are produced lazily on first fetch, retention and producer lead now apply in the sequential shape too, and the software pipeline gained `load(probed:)` / `openSoftware(probed:)`. Everything below landed in PRs #68, #69, #71, #73, #75 (umbrella #65).
 
 ### Software path
 
@@ -1213,7 +1217,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/1.10.1...main
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.0.0...main
+[2.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/2.0.0
 [1.10.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.1
 [1.10.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.0
 [1.9.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.9.0
