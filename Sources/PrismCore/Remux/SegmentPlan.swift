@@ -56,6 +56,17 @@ struct SegmentPlan: Equatable {
     /// Generous: open-GOP 10 s intervals are real; 60 s is not a VOD cadence.
     static let maxTrustedGapSeconds = 60.0
 
+    /// How long the FIRST segment aims to be, in seconds. Only the first: it
+    /// is the one `start()` has to wait for, and under `delay_moov` the init
+    /// segment does not exist until it is cut — so every second planned into
+    /// it is a second of source demuxed and muxed (video AND every audio
+    /// rendition) before AVPlayer can be handed a URL at all. Two seconds is
+    /// the common keyframe cadence, so on most sources this cut lands on the
+    /// very next keyframe; the rest of the plan keeps `targetSeconds`, and
+    /// TARGETDURATION is the ceiling of the longest entry, so the mixed
+    /// durations are legal HLS.
+    static let defaultFirstSegmentSeconds = 2
+
     // MARK: - Building
 
     /// How long the index-load seek may spend before it is abandoned.
@@ -92,6 +103,7 @@ struct SegmentPlan: Equatable {
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
         targetSeconds: Int,
+        firstSegmentSeconds: Int = SegmentPlan.defaultFirstSegmentSeconds,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
         interruptGuard: ReadInterruptGuard? = nil,
         cachedKeyframes: [Int64]? = nil
@@ -152,7 +164,8 @@ struct SegmentPlan: Equatable {
             keyframes: keyframes,
             durationSeconds: durationSeconds,
             tickSeconds: tick,
-            targetSeconds: targetSeconds
+            targetSeconds: targetSeconds,
+            firstSegmentSeconds: firstSegmentSeconds
         ) {
             return SegmentPlan(
                 entries: planned,
@@ -163,7 +176,10 @@ struct SegmentPlan: Equatable {
         }
 
         return SegmentPlan(
-            entries: uniformPlan(durationSeconds: durationSeconds, tickSeconds: tick, targetSeconds: targetSeconds),
+            entries: uniformPlan(
+                durationSeconds: durationSeconds, tickSeconds: tick,
+                targetSeconds: targetSeconds, firstSegmentSeconds: firstSegmentSeconds
+            ),
             basis: .uniform,
             timeBaseNum: timeBase.num,
             timeBaseDen: timeBase.den
@@ -172,11 +188,18 @@ struct SegmentPlan: Equatable {
 
     /// The keyframe-aligned plan, or nil when the index fails its witnesses.
     /// Pure — unit-tested against synthetic keyframe sets.
+    ///
+    /// `firstSegmentSeconds` is the first entry's target; `nil` gives the
+    /// first entry the same target as the rest (the pre-1.11 shape, kept so
+    /// the arithmetic can still be tested without the head special case).
+    /// A first target longer than `targetSeconds` is clamped: the point of
+    /// the knob is a SHORTER head, never a longer one.
     static func keyframePlan(
         keyframes: [Int64],
         durationSeconds: Double,
         tickSeconds: Double,
-        targetSeconds: Int
+        targetSeconds: Int,
+        firstSegmentSeconds: Int? = nil
     ) -> [Entry]? {
         guard keyframes.count >= 2 else { return nil }
         let sorted = keyframes.sorted()
@@ -191,11 +214,13 @@ struct SegmentPlan: Equatable {
         let span = Double(sorted.last! - sorted.first!) * tickSeconds
         guard span >= Double(targetSeconds) else { return nil }
 
-        // Segment N ends at the first keyframe at-or-after (N+1)×target.
+        // Segment N ends at the first keyframe at-or-after its start plus its
+        // target: the head's short one, then `targetSeconds` for every other.
         var entries: [Entry] = []
         var startPTS = sorted.first!
         let step = Double(targetSeconds) / tickSeconds
-        var boundary = Double(startPTS) + step
+        let firstStep = Double(min(firstSegmentSeconds ?? targetSeconds, targetSeconds)) / tickSeconds
+        var boundary = Double(startPTS) + firstStep
         for keyframe in sorted.dropFirst() where Double(keyframe) >= boundary {
             entries.append(Entry(
                 startPTS: startPTS,
@@ -216,20 +241,27 @@ struct SegmentPlan: Equatable {
     /// Fixed-stride fallback. Anchored at 0 — a late-starting title is rare
     /// enough that v1 doesn't special-case it (anchoring segment 0 at the
     /// real content start is noted for the hardening pass).
+    ///
+    /// The first stride is `firstSegmentSeconds` (clamped to the target) for
+    /// the same reason the keyframe plan's is: the head segment is the one
+    /// startup waits for.
     static func uniformPlan(
         durationSeconds: Double,
         tickSeconds: Double,
-        targetSeconds: Int
+        targetSeconds: Int,
+        firstSegmentSeconds: Int? = nil
     ) -> [Entry] {
         var entries: [Entry] = []
         var start = 0.0
+        var stride = Double(min(firstSegmentSeconds ?? targetSeconds, targetSeconds))
         while start < durationSeconds {
-            let length = min(Double(targetSeconds), durationSeconds - start)
+            let length = min(stride, durationSeconds - start)
             entries.append(Entry(
                 startPTS: Int64(start / tickSeconds),
                 duration: length
             ))
-            start += Double(targetSeconds)
+            start += stride
+            stride = Double(targetSeconds)
         }
         return entries
     }

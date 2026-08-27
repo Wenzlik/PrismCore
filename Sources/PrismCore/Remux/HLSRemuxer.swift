@@ -129,6 +129,16 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Segment length target. 6 s is the HLS-classic default; the keyframe
     /// cadence decides the real cuts.
     private let segmentSeconds: Int
+    /// The FIRST segment's target, shorter than the rest: it is the one
+    /// `start()` waits for, and under `delay_moov` nothing — not even the
+    /// init segment — exists until it is cut. See
+    /// `SegmentPlan.defaultFirstSegmentSeconds`.
+    private let firstSegmentSeconds: Int
+    /// Broadcast after every file the producer lands, so the session's
+    /// readiness gate and the provider's pending serves wake on the write
+    /// instead of polling for it. `nil` = nobody is listening (tests that
+    /// drive the remuxer directly).
+    private let landed: ProductionSignal?
     /// Whether the display this session plays to is in (or can enter) the
     /// source's own dynamic range. See `PrismCoreSession` for why the default
     /// is `false`.
@@ -287,6 +297,7 @@ final class HLSRemuxer: @unchecked Sendable {
         httpHeaders: [String: String] = [:],
         outputDirectory: URL,
         segmentSeconds: Int = 6,
+        firstSegmentSeconds: Int = SegmentPlan.defaultFirstSegmentSeconds,
         displayIsHDRReady: Bool = false,
         displayIsDolbyVisionCapable: Bool = false,
         demand: DemandCoordinator? = nil,
@@ -295,15 +306,18 @@ final class HLSRemuxer: @unchecked Sendable {
         dialogueBoost: [DialogueBoostLevel] = [],
         probed: ProbedSource? = nil,
         keyframeCacheDirectory: URL? = nil,
-        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget
+        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
+        landed: ProductionSignal? = nil
     ) {
         self.probed = probed
+        self.landed = landed
         self.keyframeCache = keyframeCacheDirectory.map { KeyframeIndexCache(directory: $0) }
         self.indexLoadBudget = indexLoadBudget
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
         self.outputDirectory = outputDirectory
         self.segmentSeconds = segmentSeconds
+        self.firstSegmentSeconds = firstSegmentSeconds
         self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory)
         self.displayIsHDRReady = displayIsHDRReady
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
@@ -505,6 +519,7 @@ final class HLSRemuxer: @unchecked Sendable {
         let builtPlan: SegmentPlan? = demandEligible
             ? SegmentPlan.build(
                 input: input, videoStreamIndex: videoIndex, targetSeconds: segmentSeconds,
+                firstSegmentSeconds: firstSegmentSeconds,
                 indexLoadBudget: indexLoadBudget,
                 interruptGuard: interruptGuard, cachedKeyframes: cachedKeyframes
             )
@@ -572,6 +587,16 @@ final class HLSRemuxer: @unchecked Sendable {
                 // encoder can't express, say) costs that rendition, not the
                 // session: the other tracks and the picture still play, which
                 // is the whole point of not muxing them together.
+                // An empty planned boundary keeps its index and is declared
+                // to the demand seam (see `AudioRenditionWriter.cut`).
+                rendition.onPlannedSegment = { [demand, name = rendition.directoryName] index, produced in
+                    let path = name + "/" + String(format: "seg%05d.m4s", index)
+                    if produced {
+                        demand?.clearUnproducible(path: path)
+                    } else {
+                        demand?.markUnproducible(path: path)
+                    }
+                }
                 do {
                     try rendition.open(input: input)
                     renditions.append(rendition)
@@ -604,6 +629,16 @@ final class HLSRemuxer: @unchecked Sendable {
                     ordinal: renditions.count,
                     parent: outputDirectory
                 )
+                // An empty planned boundary keeps its index and is declared
+                // to the demand seam (see `AudioRenditionWriter.cut`).
+                rendition.onPlannedSegment = { [demand, name = rendition.directoryName] index, produced in
+                    let path = name + "/" + String(format: "seg%05d.m4s", index)
+                    if produced {
+                        demand?.clearUnproducible(path: path)
+                    } else {
+                        demand?.markUnproducible(path: path)
+                    }
+                }
                 do {
                     try rendition.open(input: input)
                     renditions.append(rendition)
@@ -700,6 +735,13 @@ final class HLSRemuxer: @unchecked Sendable {
         let videoTimeBase = input.pointee.streams[Int(videoIndex)]!.pointee.time_base
         let tickSeconds = av_q2d(videoTimeBase)
         let boundaryStep = Int64((Double(segmentSeconds) / tickSeconds).rounded())
+        // Sequential (EVENT) sessions have no plan to read the short head
+        // from, so the first boundary is computed here: the same shorter
+        // stride the planner uses, for the same reason (startup waits for
+        // this cut). Clamped like the planner's — the knob only shortens.
+        let firstBoundaryStep = Int64(
+            (Double(min(firstSegmentSeconds, segmentSeconds)) / tickSeconds).rounded()
+        )
         var segmentStartPTS: Int64?
         var nextBoundaryPTS: Int64 = 0
         var lastVideoEndPTS: Int64?
@@ -828,6 +870,10 @@ final class HLSRemuxer: @unchecked Sendable {
         }
 
         func emitSegment(endPTS: Int64) throws {
+            // Whatever this cut wrote — init alone, or init + variant +
+            // renditions — is on disk by the time the defer runs, which is
+            // the ordering the signal's contract demands (state, then wake).
+            defer { landed?.broadcast() }
             let (initSegment, media) = try writer.cutSegment()
             // The first cut also mints the init segment (see cutSegment's
             // doc); write it BEFORE the playlist entry so a reader that saw
@@ -968,9 +1014,12 @@ final class HLSRemuxer: @unchecked Sendable {
                         if isKey {
                             if segmentStartPTS == nil {
                                 segmentStartPTS = pts
+                                // Index 0 only: a re-anchored producer also
+                                // arrives here with no start, and its segment
+                                // is a full one the plan already sized.
                                 nextBoundaryPTS = plannedPlan != nil
                                     ? plannedBoundary(after: segmentIndex)
-                                    : pts + boundaryStep
+                                    : pts + (segmentIndex == 0 ? firstBoundaryStep : boundaryStep)
                                 // The presentation origin: what the WebVTT timestamp
                                 // maps are anchored to (see WebVTTRenditionWriter).
                                 subtitles.setTimelineOrigin(seconds: Double(pts) * tickSeconds)
@@ -1136,6 +1185,9 @@ final class HLSRemuxer: @unchecked Sendable {
             for rendition in renditions {
                 try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF)
             }
+            // A sub-first-target source cuts here for the first time, so this
+            // can be the write the readiness gate is waiting on.
+            landed?.broadcast()
             if reachedEOF {
                 try subtitles.finish()
                 // ENDLIST only on a genuinely finished remux — a cancelled one leaves the

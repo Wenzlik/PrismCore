@@ -66,6 +66,14 @@ final class AudioRenditionWriter {
 
     static let initFileName = "init.mp4"
 
+    /// Planned mode only: the outcome of a boundary for this rendition —
+    /// `produced == false` means it had no audio and the slot keeps its
+    /// index empty (see `cut`), which the remuxer relays to the demand seam
+    /// so a fetch of it is a fast 404 rather than a 15 s pending wait;
+    /// `true` clears that mark, because a re-anchor can land audio in a slot
+    /// the first pass found empty.
+    var onPlannedSegment: ((_ index: Int, _ produced: Bool) -> Void)?
+
     init(route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL) {
         self.route = route
         self.track = track
@@ -249,16 +257,28 @@ final class AudioRenditionWriter {
             try writeInitSegment(initSegment)
         }
         guard !media.isEmpty else {
-            // Nothing to carry for this boundary (audio lagging the video's
-            // interleave at the head of the file, or a genuine gap). Skipping
-            // the entry keeps the playlist free of zero-byte segments; the time
-            // it covered joins the next one.
+            if plannedMode {
+                // The planned playlist already maps this index to this time
+                // span, so the slot must stay EMPTY rather than be reused: a
+                // rendition whose audio starts after the head boundary (a
+                // late-starting track, or an interleave lagging the shorter
+                // 2 s head) would otherwise write its first audio as
+                // segment 0 and shift every later segment against the video.
+                onPlannedSegment?(segmentIndex, false)
+                segmentIndex += 1
+                return
+            }
+            // Sequential: nothing to carry for this boundary. Skipping the
+            // entry keeps the EVENT playlist free of zero-byte segments; the
+            // time it covered joins the next one.
             pendingDuration += durationSeconds
             return
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
-        if !plannedMode {
+        if plannedMode {
+            onPlannedSegment?(segmentIndex, true)
+        } else {
             try playlist.appendSegment(
                 duration: max(0.001, pendingDuration + durationSeconds),
                 file: file

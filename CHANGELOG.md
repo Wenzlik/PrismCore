@@ -6,6 +6,89 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
+## [Unreleased] — 1.11.0
+
+### Changed
+
+- **`start()` returns after a ~2 s first segment instead of a ~6 s one.**
+  The first cut is where everything a player needs is minted: under
+  `delay_moov` the init segment does not exist until it, and the readiness
+  gate waits for it. With a 6 s target that meant demuxing and muxing six
+  seconds of source (plus the GOP overshoot to the next keyframe) — for the
+  video AND every audio rendition — before the host got a URL at all. The
+  first planned entry now targets `SegmentPlan.defaultFirstSegmentSeconds`
+  (2 s; on the common 2 s keyframe cadence the cut lands on the very next
+  keyframe), every later entry keeps the 6 s target, and the sequential
+  EVENT path uses the same shorter first stride. Mixed durations are legal:
+  `TARGETDURATION` was already the ceiling of the longest entry. Segment
+  names, URLs and the plan-index ↔ segment-index mapping are unchanged; only
+  the head's duration moved. A tunable (`firstSegmentSeconds` on
+  `HLSRemuxer`), clamped so it can only shorten the head.
+
+  Measured (`start()` wall time, 7 runs each, same 3-minute 1080p 12 Mbps
+  H.264+AAC MKV with a 2 s keyframe cadence served over a Range-capable
+  loopback HTTP server, plan basis `keyframeIndex` on both): main @1.10.1
+  42–62 ms (median 55); this branch 40–47 ms (median 41). Loopback makes the
+  source read nearly free, so the absolute gap is small there; what changed
+  is the amount of source demuxed before the URL comes back — one 2 s GOP
+  (~3 MB at this bitrate) instead of three (~9 MB), and over a real network
+  that difference scales with bandwidth, which is why the number that
+  matters is the host's own TTFF log on a device rather than this one.
+
+- **Readiness no longer waits for a segment from every rendition.** The gate
+  used to require an `EXTINF` and an init segment from every playlist the
+  master references. It now requires the video variant playable, and from
+  each rendition only its playlist and the init its `EXT-X-MAP` names: an
+  unproduced rendition *segment* goes through the loopback's demand seam
+  (`PlanSegmentProvider.handleMiss` answers `.pending` and serves it when
+  the producer lands it — covered by a test now). The init stays required
+  (review finding): a declared track that never delivers a packet never
+  mints one, and handing out a master whose default rendition can never
+  play would move that failure from `start()` to AVPlayer. Honest note: in
+  the planned shape the renditions cut at the same boundary as the video,
+  microseconds later, so the win here is small; most of it is the shorter
+  first segment.
+
+- **A planned rendition boundary with no audio keeps its index.** Found by
+  review of the shorter head: a rendition whose audio starts after a
+  boundary (a late-starting track, or an interleave lagging a 2 s head) had
+  its empty cut folded into the next one — in the planned shape that wrote
+  the first real audio as `seg00000.m4s` and shifted every later rendition
+  segment against the video, silently. The slot now stays empty and the
+  writer declares it to the demand coordinator, so a fetch of it is an
+  immediate 404 (AVPlayer skips a failed media segment) instead of a 15 s
+  pending wait for a file that is not coming. The sequential EVENT shape is
+  unchanged (its playlist is appended as segments land, so folding is
+  correct there).
+
+- **Startup and demand waits are wakes, not polls.** The session's readiness
+  gate and every pending serve in `PlanSegmentProvider` slept 10 ms between
+  disk checks. They now sleep on `ProductionSignal`, which the producer
+  broadcasts after each write (and on thread exit, so a producer that dies
+  in its first millisecond wakes the gate instead of being waited out). A
+  generation counter enforces the wake-before-wait rule: snapshot, check the
+  disk, wait only if nothing has landed since — so a broadcast racing the
+  check cannot be lost. A coarse 200–250 ms poll stays as the backstop for a
+  landing nobody announced; it is no longer the mechanism.
+
+- **The producer thread starts before the loopback listener binds.** The
+  remux's first act is a source open (a network round trip on a remote
+  server); the bind needs nothing from it and now overlaps it. A listener
+  that fails to bind cancels the producer and joins it before `start()`
+  rethrows, so no orphan keeps writing into a work directory nobody serves.
+
+### Tests
+
+- `SegmentPlanTests`: short head then full-target entries, clamping, uniform
+  fallback; the real-fixture expectation follows the new head.
+- `FirstSegmentReadinessTests` (new): the gate opens on the video variant
+  with the audio rendition still pending; a pending rendition init/segment
+  resolves on the broadcast (well inside the backstop); the signal's
+  lost-wake and backstop semantics; a session end to end serving
+  `[2, 6, 6, 6, 6, 4]` and the rendition's head segment.
+- `SubtitleRenditionTests`: the straddling-cue assertions moved from the 6 s
+  cut to the 2 s one — same behaviour, new boundary.
+
 ## [1.10.1] — 2026-08-22
 
 ### Fixed
@@ -845,6 +928,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/1.10.1...main
 [1.10.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.1
 [1.10.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.0
 [1.9.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.9.0

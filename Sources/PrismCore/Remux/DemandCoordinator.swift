@@ -30,6 +30,10 @@ final class DemandCoordinator: @unchecked Sendable {
     /// poll notices the file, and "farthest from the producer" is then exactly
     /// the segment that was demanded.
     private var outstandingServes: [Int: Int] = [:]
+    /// Root-relative paths production has declared it will never write — a
+    /// rendition boundary that carried no audio. Consulted only on a MISS,
+    /// so a later re-anchor that does produce the file is served normally.
+    private var unproduciblePaths: Set<String> = []
 
     /// How far ahead of the producer a request may point and still be worth
     /// WAITING for instead of re-anchoring. Two segments ≈ 12 s of content —
@@ -129,6 +133,24 @@ final class DemandCoordinator: @unchecked Sendable {
     /// per-packet hot path.
     var demandProtectedIndexes: Set<Int> {
         lock.withLock { Set(outstandingServes.keys) }
+    }
+
+    /// Production skipped `path` for good (planned rendition slot with no
+    /// audio). A fetch of it answers 404 at once instead of waiting out the
+    /// pending window for a file that is not coming.
+    func markUnproducible(path: String) {
+        lock.withLock { _ = unproduciblePaths.insert(path) }
+    }
+
+    func isUnproducible(path: String) -> Bool {
+        lock.withLock { unproduciblePaths.contains(path) }
+    }
+
+    /// Production DID write `path` after all (a re-anchor landed on audio the
+    /// first pass missed). Cleared so that, once retention evicts the file,
+    /// the next miss re-anchors instead of answering a stale 404.
+    func clearUnproducible(path: String) {
+        lock.withLock { _ = unproduciblePaths.remove(path) }
     }
 
     // MARK: - Provider side
