@@ -55,6 +55,13 @@ public enum SourceOpenTuning {
         // Reconnect on dropped HTTP connections — the demuxer read side.
         av_dict_set(&options, "reconnect", "1", 0)
         av_dict_set(&options, "reconnect_streamed", "1", 0)
+        // Deliberately NOT `multiple_requests=1` (HTTP keep-alive). Measured
+        // 2026-08-26 against a Range-capable loopback server, one session
+        // start over a 30 s MKV: without it 4 requests on 4 connections;
+        // with it 5–6 requests on 2–3 connections — the socket was reused,
+        // but a duplicated Range request appeared in two runs of three, so
+        // the round trips did not go down, and keep-alive semantics against
+        // Plex/Jellyfin/Emby were an untested risk for no measured gain.
         av_dict_set(&options, "probesize", String(probeSizeBytes), 0)
         av_dict_set(&options, "analyzeduration", String(analyzeDurationMicroseconds), 0)
         return options

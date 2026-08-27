@@ -23,6 +23,10 @@ struct PlanSegmentProvider: SegmentProvider {
     var subtitleProductionTimeout: Duration = .seconds(8)
 
     private let directory: DirectorySegmentProvider
+    /// The producer's "a file landed" broadcast. A pending serve sleeps on
+    /// it instead of polling the path; `nil` (tests that build the provider
+    /// bare) leaves only the backstop poll, which is correct, just slower.
+    private let landed: ProductionSignal?
 
     /// Consulted on every subtitle-segment fetch, BEFORE the disk read — this
     /// is what lazily arms OCR bitmap renditions (the fetch is the demand),
@@ -31,11 +35,28 @@ struct PlanSegmentProvider: SegmentProvider {
     /// segments forever.
     var subtitleDemand: (@Sendable (String) -> SubtitleRenditionSet.DemandVerdict)?
 
-    init(root: URL, coordinator: DemandCoordinator) {
+    /// Consulted on every fetch under an `audioN/` directory, BEFORE the disk
+    /// read — the seam that arms a lazy (dialogue-boost) rendition. Returns
+    /// `true` when THIS fetch armed it, in which case production is
+    /// re-anchored — forced, so it happens even inside the forward-wait
+    /// window — at the demanded segment (or the one being produced, for an
+    /// init fetch), so the rendition's first segment is a whole one. A fetch
+    /// of an armed or eager rendition returns `false` and changes nothing.
+    var audioDemand: (@Sendable (String) -> Bool)?
+
+    init(root: URL, coordinator: DemandCoordinator, landed: ProductionSignal? = nil) {
         self.root = root
         self.coordinator = coordinator
         self.directory = DirectorySegmentProvider(root: root)
+        self.landed = landed
     }
+
+    /// How long a pending serve sleeps between disk checks when no broadcast
+    /// wakes it. A backstop, not the mechanism: every producer write is
+    /// followed by a broadcast, so this only bounds the damage of a landing
+    /// nobody announced. Coarse on purpose — at 10 ms it WAS the mechanism,
+    /// and a poll on the seek path is latency by definition.
+    static let backstopPoll: Duration = .milliseconds(200)
 
     func data(forPath path: String) async -> ProviderResult {
         if path.hasSuffix(".vtt"), subtitleDemand?(path) == .regenerate {
@@ -62,6 +83,16 @@ struct PlanSegmentProvider: SegmentProvider {
         if let index = Self.segmentIndex(inPath: path) {
             coordinator.noteFetch(of: index)
         }
+        // An init or segment fetch under `audioN/` is the demand that arms a
+        // lazy rendition — not the playlist fetch, which AVPlayer makes for
+        // renditions it never plays. Lazy renditions exist only in the
+        // planned shape (see `HLSRemuxer`), so the plan is always there to
+        // re-anchor against.
+        if path.hasPrefix("audio"), path.hasSuffix(".m4s") || path.hasSuffix("init.mp4"),
+           audioDemand?(path) == true,
+           let anchor = Self.segmentIndex(inPath: path) ?? coordinator.armAnchorIndex {
+            coordinator.requestProduction(of: anchor, force: true)
+        }
         let direct = await directory.data(forPath: path)
         if case .notFound = direct {
             return await handleMiss(path: path)
@@ -71,6 +102,9 @@ struct PlanSegmentProvider: SegmentProvider {
 
     private func handleMiss(path: String) async -> ProviderResult {
         guard coordinator.publishedPlan != nil else { return .notFound }
+        // A slot production declared empty: waiting would only stall the
+        // rendition for the whole pending window before the same 404.
+        if coordinator.isUnproducible(path: path) { return .notFound }
 
         // Unproduced planned artifacts by shape:
         if let index = Self.segmentIndex(inPath: path) {
@@ -148,6 +182,7 @@ struct PlanSegmentProvider: SegmentProvider {
         let contentType = LoopbackHTTPServer.contentType(for: fileURL)
         let timeout = timeout ?? productionTimeout
         let coordinator = self.coordinator
+        let landed = self.landed
         return PendingResult {
             defer {
                 if let servingIndex { coordinator.endServing(index: servingIndex) }
@@ -156,14 +191,29 @@ struct PlanSegmentProvider: SegmentProvider {
             // a queued pending must get its full window.
             let deadline = ContinuousClock.now.advanced(by: timeout)
             while ContinuousClock.now < deadline {
-                if let data = try? Data(contentsOf: fileURL) {
+                // Snapshot BEFORE the disk check: a broadcast between the
+                // check and the wait then makes the wait return at once,
+                // instead of being lost to a waiter that was not yet asleep.
+                let generation = landed?.currentGeneration
+                if let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) {
                     return .data(data, contentType: contentType)
                 }
-                // This poll sits on the SEEK path: a demand fetch is answered
-                // the moment the produced file lands, plus this interval. At
-                // 100 ms the polling alone contributed more to seek latency
-                // than the production of a warm segment did.
-                try? await Task.sleep(for: .milliseconds(10))
+                // The slot may have been declared empty AFTER this serve went
+                // pending (the cut that decides it runs later than the miss);
+                // without this re-check the loop would sleep out the whole
+                // window for a file production has said is not coming.
+                if coordinator.isUnproducible(path: path) { return onTimeout }
+                // This wait sits on the SEEK path: a demand fetch is answered
+                // the moment the produced file lands, plus whatever sits
+                // here. It used to be a 10 ms poll, which alone contributed
+                // more to seek latency than a warm segment's production did;
+                // now the producer's broadcast is the wake and the poll is
+                // only the backstop.
+                if let landed, let generation {
+                    await landed.wait(after: generation, backstop: Self.backstopPoll)
+                } else {
+                    try? await Task.sleep(for: Self.backstopPoll)
+                }
             }
             return onTimeout
         }

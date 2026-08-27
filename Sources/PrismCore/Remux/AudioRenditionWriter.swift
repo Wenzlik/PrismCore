@@ -66,13 +66,67 @@ final class AudioRenditionWriter {
 
     static let initFileName = "init.mp4"
 
-    init(route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL) {
+    /// Planned mode only: the outcome of a boundary for this rendition —
+    /// `produced == false` means it had no audio and the slot keeps its
+    /// index empty (see `cut`), which the remuxer relays to the demand seam
+    /// so a fetch of it is a fast 404 rather than a 15 s pending wait;
+    /// `true` clears that mark, because a re-anchor can land audio in a slot
+    /// the first pass found empty.
+    var onPlannedSegment: ((_ index: Int, _ produced: Bool) -> Void)?
+
+    /// Lazy renditions (dialogue boost) are DECLARED at open but PRODUCED
+    /// only once a fetch under `audioN/` says someone selected them — the
+    /// same pattern as OCR subtitles (`SubtitleRenditionSet.noteSegmentDemand`).
+    /// Until then the bridge (decoder + filter + encoder + resampler + FIFO)
+    /// does not exist and the copy loop's `write` is a no-op, so a session
+    /// that never touches Enhance Dialogue pays nothing for the two levels
+    /// the host always requests. `arm()` is called from the server's thread,
+    /// hence the lock; the producer applies it at the next safe point.
+    let isLazy: Bool
+    private let armLock = NSLock()
+    private var armRequested = false
+    /// Whether the muxer (and bridge) currently exist. Always true for an
+    /// eager rendition after `open`; a lazy one turns it on when the
+    /// producer honours the arm request.
+    private(set) var isProducing = false
+    /// The encoder's negotiated channel count, learned at `open` from a
+    /// bridge that is built and torn down again — `CHANNELS` in the master
+    /// has to be right before the first fetch, but the bridge itself need
+    /// not exist for that.
+    private var negotiatedChannelCount: Int?
+
+    init(
+        route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL,
+        lazy: Bool = false
+    ) {
         self.route = route
         self.track = track
         self.ordinal = ordinal
+        self.isLazy = lazy
         self.directoryName = "audio\(ordinal)"
         self.directory = parent.appendingPathComponent(directoryName, isDirectory: true)
         self.playlist = MediaPlaylistWriter(directory: directory, initFileName: Self.initFileName)
+    }
+
+    /// A fetch under this rendition's directory: the demand that turns a
+    /// lazy rendition on. Returns `true` when this call is the one that armed
+    /// it (the caller then re-anchors production so the first produced
+    /// segment is a complete one); `false` for an already-armed or eager
+    /// rendition. Server-thread safe.
+    func arm() -> Bool {
+        guard isLazy else { return false }
+        return armLock.withLock {
+            if armRequested { return false }
+            armRequested = true
+            return true
+        }
+    }
+
+    /// Whether a lazy rendition has been asked for (armed) — not the same as
+    /// producing: the producer opens the bridge at the next safe point.
+    var isArmed: Bool {
+        guard isLazy else { return true }
+        return armLock.withLock { armRequested }
     }
 
     /// Create the rendition's directory, its muxer and — for a bridged track —
@@ -80,15 +134,39 @@ final class AudioRenditionWriter {
     /// rendition's declared codec and channel count come from the encoder that
     /// only exists after this call.
     func open(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool = false) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Once: a re-anchor goes through `reanchor`, which keeps the directory
+        // (and the bridge) and only rebuilds the muxer.
+        if !directoryCreated {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            directoryCreated = true
+        }
 
         let index = Int32(track.streamIndex)
-        var plan: FMP4SegmentWriter.StreamPlan
-        if route.mode == .streamCopy {
-            plan = .init(inputIndex: index, language: sourceLanguage)
-        } else {
+        if isLazy, !isArmed {
+            // Declared, not produced. The bridge is built once so that the
+            // eligibility checks (a stereo track has no centre to favour, a
+            // build without the encoder) fail HERE — where the caller skips
+            // the rendition — rather than after the master has promised it,
+            // and so `CHANNELS` can be read off the negotiated layout; then
+            // it is released again. Nothing else exists until `arm()`.
+            if negotiatedChannelCount == nil, route.mode != .streamCopy {
+                let inStream = input.pointee.streams[Int(index)]!
+                let probeBridge = try AudioBridge(
+                    codecpar: inStream.pointee.codecpar,
+                    timeBase: inStream.pointee.time_base,
+                    globalHeader: true,
+                    dialogueBoost: route.mode.dialogueBoostLevel
+                )
+                negotiatedChannelCount = probeBridge.outputChannelCount
+                probeBridge.close()
+            }
+            isProducing = false
+            return
+        }
+
+        if route.mode != .streamCopy, bridge == nil {
             let inStream = input.pointee.streams[Int(index)]!
-            let audioBridge = try AudioBridge(
+            bridge = try AudioBridge(
                 codecpar: inStream.pointee.codecpar,
                 timeBase: inStream.pointee.time_base,
                 // mp4/mov is a global-header muxer: the encoder's extradata
@@ -98,14 +176,27 @@ final class AudioRenditionWriter {
                 // the centre-favouring filter between decode and re-encode.
                 dialogueBoost: route.mode.dialogueBoostLevel
             )
-            bridge = audioBridge
-            plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
-                try audioBridge.configure(outputStream: outStream)
-            }
         }
+        try openMuxer(input: input, restart: restart)
+    }
 
+    private var directoryCreated = false
+
+    /// The muxer alone, described from the bridge when there is one — the
+    /// part of `open` a re-anchor repeats.
+    private func openMuxer(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool) throws {
+        let index = Int32(track.streamIndex)
+        let plan: FMP4SegmentWriter.StreamPlan
+        if let bridge {
+            plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
+                try bridge.configure(outputStream: outStream)
+            }
+        } else {
+            plan = .init(inputIndex: index, language: sourceLanguage)
+        }
         _ = try writer.open(input: input, plan: [plan], restart: restart)
         outputIndex = writer.streamMap[track.streamIndex] ?? 0
+        isProducing = true
     }
 
     func close() {
@@ -127,15 +218,37 @@ final class AudioRenditionWriter {
     /// `segmentIndex`. The old muxer's partial fragment is abandoned — that
     /// segment gets reproduced if anything ever asks for it.
     func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
-        close()
         writer = FMP4SegmentWriter()
-        try open(input: input, restart: true)
+        if isProducing {
+            if let bridge, bridge.isDrained {
+                // Flushed at EOF: the encoder is in its terminal state and
+                // cannot be revived, so this one case rebuilds the bridge.
+                bridge.close()
+                self.bridge = nil
+                try open(input: input, restart: true)
+            } else {
+                // The bridge stays: its buffered state is reset, its contexts
+                // live on (`AudioBridge.reset`). Only the muxer is new — tfdt
+                // continuity under frag_discont needs a fresh one.
+                bridge?.reset()
+                try openMuxer(input: input, restart: true)
+            }
+        } else {
+            // A lazy rendition that nobody armed stays dormant through the
+            // re-anchor (`open` returns before the muxer); an armed one opens
+            // here, at a plan boundary, which is what makes its first segment
+            // a complete one.
+            try open(input: input, restart: true)
+        }
         self.segmentIndex = segmentIndex
         pendingDuration = 0
     }
 
     /// Push one source packet for this track through copy or bridge.
     func write(_ packet: UnsafeMutablePointer<AVPacket>, sourceTimeBase: AVRational) throws {
+        // Dormant lazy rendition: the packet is nobody's. The check is the
+        // whole per-packet cost of a boost level nobody selected.
+        guard isProducing else { return }
         sniffAtmosIfNeeded(packet)
         if let bridge {
             // Timestamps arrive in the source stream's base (the bridge's
@@ -191,8 +304,9 @@ final class AudioRenditionWriter {
               let data = packet.pointee.data, packet.pointee.size > 0
         else { return }
         atmosSniffPacketsRead += 1
-        let bytes = [UInt8](UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)))
-        if let index = EAC3Syncframe.atmosComplexityIndex(in: bytes) {
+        if let index = EAC3Syncframe.atmosComplexityIndex(
+            in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+        ) {
             atmosComplexityIndex = index
             settleAtmos()
             return
@@ -241,7 +355,25 @@ final class AudioRenditionWriter {
     /// renditions for AVPlayer to switch between them without drifting. The
     /// real sample times ride in the segments' own `tfdt`, which is what
     /// playback follows.
-    func cut(durationSeconds: Double) throws {
+    /// Returns the media bytes written for this boundary (0 for an empty or
+    /// dormant one) — what retention accounts, without a `stat` per rendition
+    /// per cut.
+    @discardableResult
+    func cut(durationSeconds: Double) throws -> Int {
+        guard isProducing else {
+            // Dormant: the boundary still passes. The planned slot keeps its
+            // index (the playlist maps it to this time) but is NOT declared
+            // unproducible — the fetch that arms this rendition re-anchors
+            // production to reproduce exactly these slots, and a 404 mark
+            // would race that fetch's pending wait. In the sequential shape
+            // the time folds into the next entry, as for any silent boundary.
+            if plannedMode {
+                segmentIndex += 1
+            } else {
+                pendingDuration += durationSeconds
+            }
+            return 0
+        }
         let (initSegment, media) = try writer.cutSegment()
         // The first cut mints the init segment; write it BEFORE the playlist
         // entry that references it.
@@ -249,16 +381,28 @@ final class AudioRenditionWriter {
             try writeInitSegment(initSegment)
         }
         guard !media.isEmpty else {
-            // Nothing to carry for this boundary (audio lagging the video's
-            // interleave at the head of the file, or a genuine gap). Skipping
-            // the entry keeps the playlist free of zero-byte segments; the time
-            // it covered joins the next one.
+            if plannedMode {
+                // The planned playlist already maps this index to this time
+                // span, so the slot must stay EMPTY rather than be reused: a
+                // rendition whose audio starts after the head boundary (a
+                // late-starting track, or an interleave lagging the shorter
+                // 2 s head) would otherwise write its first audio as
+                // segment 0 and shift every later segment against the video.
+                onPlannedSegment?(segmentIndex, false)
+                segmentIndex += 1
+                return 0
+            }
+            // Sequential: nothing to carry for this boundary. Skipping the
+            // entry keeps the EVENT playlist free of zero-byte segments; the
+            // time it covered joins the next one.
             pendingDuration += durationSeconds
-            return
+            return 0
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
-        if !plannedMode {
+        if plannedMode {
+            onPlannedSegment?(segmentIndex, true)
+        } else {
             try playlist.appendSegment(
                 duration: max(0.001, pendingDuration + durationSeconds),
                 file: file
@@ -266,10 +410,18 @@ final class AudioRenditionWriter {
         }
         pendingDuration = 0
         segmentIndex += 1
+        return media.count
     }
 
     /// Final cut: whatever is buffered plus the trailer's tail bytes.
     func finish(durationSeconds: Double, endList: Bool) throws {
+        guard isProducing else {
+            // Dormant to the end: an EVENT playlist still gets its ENDLIST so
+            // a late selection sees a finished (empty) rendition rather than
+            // one that looks live forever; planned playlists were born ended.
+            if endList, !plannedMode { try playlist.finish() }
+            return
+        }
         let (initSegment, media) = try writer.cutSegment()
         if let initSegment, !initSegment.isEmpty {
             try writeInitSegment(initSegment)
@@ -384,7 +536,7 @@ final class AudioRenditionWriter {
         case .streamCopy:
             return track.channelCount > 0 ? track.channelCount : nil
         case .bridge, .boost:
-            return bridge?.outputChannelCount
+            return bridge?.outputChannelCount ?? negotiatedChannelCount
         }
     }
 

@@ -34,6 +34,37 @@ struct KeyframeIndexCache: Sendable {
         var timeBaseDen: Int32
         /// Every video keyframe PTS the producer saw, in decode order.
         var keyframePTS: [Int64]
+        /// Whether the harvest ran head-to-EOF. A play cancelled partway
+        /// persists what it saw (`complete == false`) so the next play can
+        /// plan the watched prefix exactly instead of paying the sequential
+        /// shape again; `coveredThroughPTS` is the last keyframe of the
+        /// contiguous run, past which the map says nothing.
+        var complete: Bool = true
+        var coveredThroughPTS: Int64? = nil
+
+        init(
+            identity: String, timeBaseNum: Int32, timeBaseDen: Int32, keyframePTS: [Int64],
+            complete: Bool = true, coveredThroughPTS: Int64? = nil
+        ) {
+            self.identity = identity
+            self.timeBaseNum = timeBaseNum
+            self.timeBaseDen = timeBaseDen
+            self.keyframePTS = keyframePTS
+            self.complete = complete
+            self.coveredThroughPTS = coveredThroughPTS
+        }
+
+        // Entries written before `complete` existed were only ever stored at
+        // EOF, so their absence of a flag means complete.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            identity = try container.decode(String.self, forKey: .identity)
+            timeBaseNum = try container.decode(Int32.self, forKey: .timeBaseNum)
+            timeBaseDen = try container.decode(Int32.self, forKey: .timeBaseDen)
+            keyframePTS = try container.decode([Int64].self, forKey: .keyframePTS)
+            complete = try container.decodeIfPresent(Bool.self, forKey: .complete) ?? true
+            coveredThroughPTS = try container.decodeIfPresent(Int64.self, forKey: .coveredThroughPTS)
+        }
     }
 
     let directory: URL
@@ -90,7 +121,22 @@ struct KeyframeIndexCache: Sendable {
     /// least-recently-used entries past the bound. Best-effort throughout: a
     /// cache that cannot write is a cache that misses, never an error the
     /// remux surfaces.
+    ///
+    /// A partial entry never overwrites a complete one for the same identity,
+    /// and a partial one covering less than the stored partial does not
+    /// replace it either: a short second play must not shrink what a longer
+    /// first play learned.
     func store(_ entry: Entry) {
+        // The compare-and-write is one critical section: two sessions of the
+        // same source ending together could both pass the check below and
+        // the shorter one land last (review finding). Process-wide, since
+        // every session's cache value points at the same directory.
+        Self.storeLock.lock()
+        defer { Self.storeLock.unlock() }
+        if !entry.complete, let existing = lookup(identity: entry.identity) {
+            if existing.complete { return }
+            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return }
+        }
         guard let data = try? JSONEncoder().encode(entry) else { return }
         try? FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true
@@ -98,6 +144,8 @@ struct KeyframeIndexCache: Sendable {
         try? data.write(to: fileURL(identity: entry.identity), options: .atomic)
         prune()
     }
+
+    private static let storeLock = NSLock()
 
     private func prune() {
         guard let files = try? FileManager.default.contentsOfDirectory(

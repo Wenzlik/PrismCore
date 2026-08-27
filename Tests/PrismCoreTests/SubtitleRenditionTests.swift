@@ -101,14 +101,16 @@ struct SubtitleRenditionTests {
         // The fixture's first video PTS is 0, so the media axis and the cue
         // axis coincide and the map is the neutral one.
         #expect(first.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"))
-        #expect(first.contains("00:00:01.000 --> 00:00:03.000"))
+        // The first cut is the short head (2 s), so the 1–3 s cue straddles
+        // it: clamped into this segment…
+        #expect(first.contains("00:00:01.000 --> 00:00:02.000"))
         #expect(first.contains("Ahoj <i>světe</i>"))
-        // The cue straddling the 6 s cut is clamped into this segment…
-        #expect(first.contains("00:00:05.500 --> 00:00:06.000"))
 
-        // …and repeated in the next one.
+        // …and repeated in the next one, which runs 2–8 s and so carries
+        // the rest of the fixture's cues whole.
         let (second, _) = try await fetch(base.appendingPathComponent("subs0/seg00001.vtt"))
-        #expect(second.contains("00:00:06.000 --> 00:00:06.500"))
+        #expect(second.contains("00:00:02.000 --> 00:00:03.000"))
+        #expect(second.contains("00:00:05.500 --> 00:00:06.500"))
         #expect(second.contains("Přes hranici segmentu"))
         #expect(second.contains("Konec"))
 

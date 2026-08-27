@@ -256,6 +256,10 @@ final class FMP4SegmentWriter {
     private func takeBufferedBytes() -> Data {
         let bytes = sink.buffer
         sink.buffer = Data()
+        // The next segment is about the size of this one, so reserve it up
+        // front: a fragment's worth of 64 KiB avio writes was regrowing the
+        // sink a dozen times per segment.
+        sink.buffer.reserveCapacity(bytes.count)
         return bytes
     }
 }

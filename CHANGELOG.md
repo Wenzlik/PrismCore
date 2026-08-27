@@ -52,6 +52,327 @@ source-compatible.)
 
   Not measured: these are latency/memory claims from the audit (#65) verified
   by tests on synthetic fixtures, not yet by a device run over HTTP.
+### Changed
+
+- **`start()` returns after a ~2 s first segment instead of a ~6 s one.**
+  The first cut is where everything a player needs is minted: under
+  `delay_moov` the init segment does not exist until it, and the readiness
+  gate waits for it. With a 6 s target that meant demuxing and muxing six
+  seconds of source (plus the GOP overshoot to the next keyframe) — for the
+  video AND every audio rendition — before the host got a URL at all. The
+  first planned entry now targets `SegmentPlan.defaultFirstSegmentSeconds`
+  (2 s; on the common 2 s keyframe cadence the cut lands on the very next
+  keyframe), every later entry keeps the 6 s target, and the sequential
+  EVENT path uses the same shorter first stride. Mixed durations are legal:
+  `TARGETDURATION` was already the ceiling of the longest entry. Segment
+  names, URLs and the plan-index ↔ segment-index mapping are unchanged; only
+  the head's duration moved. A tunable (`firstSegmentSeconds` on
+  `HLSRemuxer`), clamped so it can only shorten the head.
+
+  Measured (`start()` wall time, 7 runs each, same 3-minute 1080p 12 Mbps
+  H.264+AAC MKV with a 2 s keyframe cadence served over a Range-capable
+  loopback HTTP server, plan basis `keyframeIndex` on both): main @1.10.1
+  42–62 ms (median 55); this branch 40–47 ms (median 41). Loopback makes the
+  source read nearly free, so the absolute gap is small there; what changed
+  is the amount of source demuxed before the URL comes back — one 2 s GOP
+  (~3 MB at this bitrate) instead of three (~9 MB), and over a real network
+  that difference scales with bandwidth, which is why the number that
+  matters is the host's own TTFF log on a device rather than this one.
+
+- **Readiness no longer waits for a segment from every rendition.** The gate
+  used to require an `EXTINF` and an init segment from every playlist the
+  master references. It now requires the video variant playable, and from
+  each rendition only its playlist and the init its `EXT-X-MAP` names: an
+  unproduced rendition *segment* goes through the loopback's demand seam
+  (`PlanSegmentProvider.handleMiss` answers `.pending` and serves it when
+  the producer lands it — covered by a test now). The init stays required
+  (review finding): a declared track that never delivers a packet never
+  mints one, and handing out a master whose default rendition can never
+  play would move that failure from `start()` to AVPlayer. Honest note: in
+  the planned shape the renditions cut at the same boundary as the video,
+  microseconds later, so the win here is small; most of it is the shorter
+  first segment.
+
+- **A planned rendition boundary with no audio keeps its index.** Found by
+  review of the shorter head: a rendition whose audio starts after a
+  boundary (a late-starting track, or an interleave lagging a 2 s head) had
+  its empty cut folded into the next one — in the planned shape that wrote
+  the first real audio as `seg00000.m4s` and shifted every later rendition
+  segment against the video, silently. The slot now stays empty and the
+  writer declares it to the demand coordinator, so a fetch of it is an
+  immediate 404 (AVPlayer skips a failed media segment) instead of a 15 s
+  pending wait for a file that is not coming. The sequential EVENT shape is
+  unchanged (its playlist is appended as segments land, so folding is
+  correct there).
+
+- **Startup and demand waits are wakes, not polls.** The session's readiness
+  gate and every pending serve in `PlanSegmentProvider` slept 10 ms between
+  disk checks. They now sleep on `ProductionSignal`, which the producer
+  broadcasts after each write (and on thread exit, so a producer that dies
+  in its first millisecond wakes the gate instead of being waited out). A
+  generation counter enforces the wake-before-wait rule: snapshot, check the
+  disk, wait only if nothing has landed since — so a broadcast racing the
+  check cannot be lost. A coarse 200–250 ms poll stays as the backstop for a
+  landing nobody announced; it is no longer the mechanism.
+
+- **The producer thread starts before the loopback listener binds.** The
+  remux's first act is a source open (a network round trip on a remote
+  server); the bind needs nothing from it and now overlaps it. A listener
+  that fails to bind cancels the producer and joins it before `start()`
+  rethrows, so no orphan keeps writing into a work directory nobody serves.
+
+### Tests
+
+- `SegmentPlanTests`: short head then full-target entries, clamping, uniform
+  fallback; the real-fixture expectation follows the new head.
+- `FirstSegmentReadinessTests` (new): the gate opens on the video variant
+  with the audio rendition still pending; a pending rendition init/segment
+  resolves on the broadcast (well inside the backstop); the signal's
+  lost-wake and backstop semantics; a session end to end serving
+  `[2, 6, 6, 6, 6, 4]` and the rendition's head segment.
+- `SubtitleRenditionTests`: the straddling-cue assertions moved from the 6 s
+  cut to the 2 s one — same behaviour, new boundary.
+
+### Changed — lazy dialogue-boost renditions (#65 package B)
+
+- **Dialogue-boost renditions are produced on demand, not from the first
+  packet.** The host requests `[.medium, .high]` on every eligible session,
+  and each level was a full `AudioBridge` — decoder, `pan` filter,
+  resampler, EAC3 encoder, FIFO — opened before the first segment and fed
+  a clone of every default-track packet for the length of the film, whether
+  or not anyone ever opened Enhance Dialogue. They are now declared exactly
+  as before (same `EXT-X-MEDIA` lines, `CHANNELS` from a bridge that is
+  built once for the negotiated layout and released again, complete
+  planned VOD playlists) but nothing else exists — no bridge, no muxer, no
+  init — until an init or segment fetch lands under the rendition's
+  directory. That fetch arms it (`HLSRemuxer.noteAudioDemand`, through
+  `PlanSegmentProvider.audioDemand` — the same seam OCR subtitles use) and
+  **forces** a re-anchor at the demanded segment even inside the
+  forward-wait window (`DemandCoordinator.requestProduction(force:)`), so
+  the rendition joins at a plan boundary with a whole first segment and its
+  init is minted by that cut. Playlist fetches never arm: AVPlayer prefetches
+  rendition playlists it never plays.
+
+  Found by review while adding the forced re-anchor, and fixed for every
+  re-anchor: the packet already in hand when the copy loop re-anchors was
+  read at the OLD position and was still processed afterwards. A keyframe
+  past the anchor (a backward seek from further on) satisfied the
+  "anchor keyframe arrived" check and opened the segment on a picture from
+  the wrong place, followed by lower timestamps from the seek target. The
+  loop now discards it and reads on from the anchor.
+
+  Two consequences worth knowing. The readiness gate no longer waits for a
+  lazy rendition's init (`readyPlaylistName(in:lazyRenditions:)`) — it is
+  not coming until someone selects the rendition, and AVPlayer fetches an
+  init only for the selection. And a dormant boundary does NOT mark its
+  slot unproducible: the arming fetch is what reproduces exactly those
+  slots, and a 404 mark would race its pending wait.
+
+  Lazy only in the planned (demand-driven) shape. The sequential EVENT
+  shape's provider has no demand seam (a miss there is a 404) and no seek to
+  offer, so it keeps producing boost renditions eagerly — today's cost and
+  today's behaviour, on the sources that already could not be planned.
+
+  Not measured: the stock MPVKit build on this machine has no EAC3 encoder,
+  so no bridge can be built here at all. What is removed is structural — two
+  decode→filter→encode chains per session, from before the first segment to
+  EOF — and the host's own CPU sampling on a device with its encoder-capable
+  build is the number that will say how much that was.
+
+### Tests — package B
+
+- `LazyDialogueBoostTests` (new): forced anchor requests bypass the window
+  and the "already there" check; the gate skips a lazy rendition's init but
+  still requires its playlist; a lazy `AudioRenditionWriter` opens nothing,
+  drops packets and passes boundaries unmarked until armed, then joins at a
+  re-anchor with init + whole segment; the provider seam arms on
+  init/segment fetches only and forces the re-anchor (init fetch → newest
+  demanded index); a session with `[.medium, .high]` over a 5.1 default
+  track (`h264_ac3_51_20s.mkv`, new synthetic fixture) produces the whole
+  default rendition and NOTHING under the boost directories until a fetch,
+  then serves the boost segment with an EAC3 init and the default rendition
+  untouched — on a build with the encoder; on stock MPVKit it pins the
+  graceful skip.
+
+### Changed — fewer source round trips (#65 package C)
+
+- **An adopted probe context is rewound once, not twice.** The remuxer used
+  to seek an adopted context back to 0 (and flush) immediately, then hand it
+  to `SegmentPlan.build`, whose Cues-loading nudge ends with its own seek to
+  0. Over HTTP every seek is a Range request. The rewind is now deferred:
+  `SegmentPlan.buildReportingPosition` says whether it passed through the
+  head, and the remuxer rewinds itself only when it did not (cached map,
+  index already loaded, no plan). Measured against a Range-capable loopback
+  server (one `SourceProbe.open` + `start()` over `h264_aac_30s.mkv`, 3 runs
+  each, identical every run): **5 requests → 4**.
+
+- **No index-load nudge when the index is already loaded.** A plain MP4's
+  index comes from `stss`/`stts` in the `moov` the open already read, so the
+  tail seek loaded nothing and cost two Range requests.
+  `SegmentPlan.indexIsLoadedAtOpen` skips the nudge when the stream's
+  keyframe entries already reach into the last target-length of the file —
+  by coverage, not by demuxer name (review finding: a fragmented MP4's
+  `moov` describes its first fragment only, and open-time entries from a
+  Cues-less Matroska cover the first cluster only; neither can pass). Not
+  measured (no MP4 fixture; the MKV fixture's Cues are not parsed at open,
+  so it still nudges).
+
+- **A cancelled play persists its keyframe harvest as a PARTIAL map.** The
+  harvest of a source that could not be planned (no usable index) was stored
+  only at EOF — a film stopped at minute 40 learned nothing, and the next
+  play paid the sequential shape again. `KeyframeIndexCache.Entry` now
+  carries `complete` and `coveredThroughPTS`; a cancelled run stores what it
+  saw, and `SegmentPlan.keyframePlan(coveredThroughPTS:)` trusts the map as
+  a contiguous prefix — planned exactly on keyframes up to the covered end,
+  then continued on the 6 s uniform stride to the container's end. Tail
+  boundaries are time targets the producer cuts at the next keyframe
+  at-or-after, with a stride no shorter than the largest gap the prefix
+  showed (review finding: a 6 s stride over 10 s GOPs would resolve two
+  targets to one keyframe and drift the timeline cumulatively), so a seek
+  INTO the un-watched tail lands up to one GOP late and the error does not
+  accumulate as long as the tail's cadence is no coarser than the prefix's
+  (an inference about an unobserved tail, not a bound — known limitation,
+  closed by the harvest on the next contiguous play);
+  in exchange the watched prefix (where the resume point is) gets a
+  seekable VOD on a source that had none. A session planned on a partial
+  map keeps harvesting to extend the prefix — only while its run started
+  inside the covered end (a seek past it would leave a hole the gap witness
+  must never see) — and flips the entry complete when such a run reaches
+  EOF. A partial entry never replaces a complete or longer one; pre-1.11
+  sidecars decode as complete.
+
+- **`SourceProbe.openDetached`** — `open` on a one-shot dedicated thread,
+  handed back through a continuation. `open` blocks on the transport for up
+  to its 10 s budget, and a host calling it from `async` code parks a
+  cooperative-pool thread for that long; several at once (a row of episodes,
+  a fallback racing a transcode) can stall every other `await` in the
+  process. Aether's call site adopts it in its own PR.
+
+- **Tried and not shipped: `multiple_requests=1` (HTTP keep-alive).**
+  Measured on the same setup: 4 requests on 4 connections without it;
+  5–6 requests on 2–3 connections with it — the socket was reused, but a
+  duplicated Range request appeared in two runs of three, so the round trips
+  did not go down, and keep-alive semantics against Plex/Jellyfin/Emby were
+  an untested risk for no measured gain. Recorded in `SourceOpenTuning`.
+
+### Tests — package C
+
+- `KeyframeIndexCacheTests`: a run cancelled before any keyframe still
+  persists nothing; a run cancelled after segment 1 (deterministic through
+  the new `HLSRemuxer.onSegmentLanded` seam) stores a partial map that the
+  next play plans on, tail segment producible on demand; partial-store rules
+  and legacy-sidecar decoding.
+- `SegmentPlanTests`: partial map → keyframe prefix + uniform tail, stray
+  keyframes past the covered end ignored, coverage witness still applies.
+- `ProbedSourceReuseTests`: an adopted context pushed to 20 s produces a
+  head segment with `tfdt` 0 on both paths (plan seeks / cached map, no
+  seek); `openDetached` matches `open`'s verdict and throws for a missing
+  file.
+
+### Changed — seek & steady state (#65 package F)
+
+- **A re-anchor keeps the audio bridge.** Every demand-driven seek tore down
+  each bridged rendition's `AudioBridge` — decoder, encoder, resampler,
+  filter graph, FIFO, frame allocations — and opened a new one, per
+  rendition, per seek. `AudioBridge.reset()` now flushes the decoder,
+  resets the FIFO and chunker, drops the resampler's delay line and the
+  boost graph (both rebuild on the next frame, as for a format change) and
+  re-anchors the clock; the contexts live on. The muxer is still rebuilt
+  (`frag_discont` needs a fresh one for the tfdt), the directory is created
+  once. The encoder is not flushed: every `send_frame` is drained on the
+  spot, so it holds nothing. The one bridge that IS rebuilt is a drained
+  one — after EOF both codec contexts are in their terminal state, and an
+  EAC3 encoder cannot be revived from it (review finding: a re-anchor after
+  EOF would otherwise reproduce silent segments).
+
+- **Scrub bursts coalesce.** While a re-anchor is in flight (its first
+  segment not yet landed), an anchor request younger than 150 ms
+  (`DemandCoordinator.anchorDebounce`) is held rather than acted on — the
+  newest still wins, it is what the burst settles on; a scrub bar used to
+  tear the muxers down once per fetch it emitted. A forced request (a lazy
+  rendition joining) is never held, and a parked producer re-checks when
+  the debounce comes due, not after its 1 s backstop.
+
+- **A discontinuous request re-anchors even inside the forward-wait
+  window.** AVPlayer's read-ahead asks for N after N-1 (the variant and each
+  rendition of one index arrive together, so ±1 of the previous fetch is
+  continuous); a request that jumps further is a seek however close it
+  lands, and waiting for serial production to reach it cost up to two
+  segments of silence.
+
+- **Producer lead is 30 s of content, not ten segments**
+  (`producerLeadSeconds`, from the plan's start times; the nominal stride
+  where there is no plan). Segments vary — a 2 s head, keyframe-stretched
+  entries — and the buffer AVPlayer cares about is time. **The sequential
+  shape now parks on the same cap and keeps a retention budget too**: a
+  fast source demuxed and wrote the whole film to the device while the
+  viewer was on minute two. Eviction there never reaches the playhead or
+  anything ahead of it; behind it, an evicted EVENT segment is NOT
+  reproducible (no plan to re-anchor on), so a backward seek to one is a
+  404 AVPlayer treats as a failed segment — accepted against a 50 GB work
+  directory, and documented in `HLSRemuxer`. The cost of the cap: a
+  sequential keyframe harvest completes only when the viewer reaches the
+  end (the partial harvest from package C covers the rest).
+
+- **Retention accounts what the cuts report, not what `stat` says.**
+  `AudioRenditionWriter.cut` returns the bytes it wrote; a
+  `attributesOfItem` per rendition per cut is gone from the cut path, and
+  the unlinks moved to a serial utility-QoS queue (the window in which a
+  stale unlink could hit a re-produced file is the queue's latency against
+  a demuxer seek — a fetch that finds the stale file serves the same bytes).
+
+- **Serve path.** Header and body go out as two `send`s (NWConnection
+  serialises them; the multi-megabyte append of the body into the header
+  `Data` is gone). Providers read with `.mappedIfSafe` — the pages come in
+  as the send touches them, and a mapping outlives eviction's unlink.
+  `FMP4SegmentWriter`'s sink reserves the previous segment's size at each
+  cut. `Cache-Control: max-age=86400, immutable` on init, media and WebVTT
+  segments (all immutable for the life of their URL — the init is
+  first-write-wins, a re-produced segment is the same bytes); playlists
+  stay `no-store`. Partial-segment streaming is NOT attempted: it needs the
+  `.part` contract (LL-HLS) and is a follow-up.
+
+- **Hot loop.** `HEVCNALUnits.units(in:)`/`rewrite` walk an
+  `UnsafeBufferPointer<UInt8>` — the packet's own buffer — with `[UInt8]`
+  overloads kept for tests and the fuzzer; a changed P7 packet is written
+  ONCE into an `av_buffer_alloc`ed buffer (padded) that replaces the
+  packet's `AVBufferRef` (`rewritePayload`), instead of copy-in +
+  `make_writable` + grow + memcpy. The parameter-set harvest is gated on
+  `AV_PKT_FLAG_KEY` (a non-keyframe cost the walk to find nothing).
+  `EAC3Syncframe.atmosComplexityIndex` reads a pointer. Output bytes are
+  unchanged: the pointer and array shapes are asserted byte-identical, and
+  the real-media P7→8.1 verification (`RealMediaVerificationTests`,
+  `PRISMCORE_MEDIA`) is the standing check.
+
+- **EVENT playlist text is append-only**: the entries block is appended
+  per segment and only the header (a running TARGETDURATION maximum) is
+  recomputed per write; the file is still rewritten atomically — serving
+  from memory would need the provider to know about it and was not worth
+  the seam for a per-segment write of a few KB.
+
+  Measured (cold seek to an unproduced segment 25, `audio0/` then variant
+  fetch, over a Range-capable loopback HTTP server, 3-minute 300 kbps
+  H.264 + stereo AC3 MKV, 7 runs): before F 6–11 ms (median 7), after F
+  6–13 ms (median 9) — **no change, as expected**: that fixture's rendition
+  is stream-copied, and the bridge keep-alive that F1 is about cannot run
+  on this machine's stock MPVKit build (no EAC3 encoder). The number that
+  will show it is a scrub on a TrueHD/DTS title on a device with Aether's
+  build.
+
+### Tests — package F
+
+- `SeekSteadyStateTests` (new): scrub burst coalesces (held under the
+  debounce, newest wins, forced never held, released once the first segment
+  lands); a discontinuous request inside the window re-anchors while
+  read-ahead waits; the lead cap is seconds from the plan (24 s of 2 s
+  segments sails, 36 s of 12 s segments parks); cache headers per type and
+  byte/length-identical two-send responses (GET and HEAD); the pointer NAL
+  rewrite is byte-identical to the array shape and allocates nothing when
+  nothing changes; `BridgeClock`/`FrameChunker` reset; the append-only
+  EVENT playlist text is what a rebuild wrote.
+- `DemandDrivenTests`: lead-cap cases expressed through the seconds cap;
+  the last-wins case lands its first segment before the next request (the
+  debounce would otherwise hold it — which is the point).
 
 ## [1.10.1] — 2026-08-22
 
@@ -892,6 +1213,7 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/1.10.1...main
 [1.10.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.1
 [1.10.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.0
 [1.9.0]: https://github.com/Wenzlik/PrismCore/releases/tag/1.9.0
