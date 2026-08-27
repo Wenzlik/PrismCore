@@ -18,9 +18,9 @@ enum HEVCNALUnits {
         /// Profile 7 stream dual-layer, and what no Apple decoder will take.
         let layerID: UInt8
         /// The whole NAL unit including its two-byte header, without the length
-        /// prefix. A slice into the caller's buffer: valid for the duration of
-        /// the transform call only.
-        let bytes: ArraySlice<UInt8>
+        /// prefix. A view into the caller's buffer: valid for the duration of
+        /// the transform call only (or, for the array overloads, of the array).
+        let bytes: UnsafeBufferPointer<UInt8>
     }
 
     /// `lengthSizeMinusOne + 1` out of an `hvcC` record: how many bytes each NAL
@@ -38,26 +38,35 @@ enum HEVCNALUnits {
     /// parsed packet rewritten back would splice garbage into the bitstream,
     /// where leaving the packet untouched merely leaves the RPU unconverted.
     static func units(in bytes: [UInt8], lengthSize: Int) -> [Unit]? {
-        guard (1...4).contains(lengthSize) else { return nil }
+        bytes.withUnsafeBufferPointer { units(in: $0, lengthSize: lengthSize) }
+    }
+
+    /// The pointer shape: the copy loop hands the packet's own buffer in, so
+    /// a Profile 7 stream's per-packet walk allocates the `[Unit]` and
+    /// nothing else. The units' `bytes` alias the buffer — valid only while
+    /// it is.
+    static func units(in bytes: UnsafeBufferPointer<UInt8>, lengthSize: Int) -> [Unit]? {
+        guard (1...4).contains(lengthSize), let base = bytes.baseAddress else { return nil }
         var units: [Unit] = []
         var cursor = 0
-        while cursor < bytes.count {
-            guard cursor + lengthSize <= bytes.count else { return nil }
+        let count = bytes.count
+        while cursor < count {
+            guard cursor + lengthSize <= count else { return nil }
             var length = 0
             for offset in 0..<lengthSize {
-                length = (length << 8) | Int(bytes[cursor + offset])
+                length = (length << 8) | Int(base[cursor + offset])
             }
             cursor += lengthSize
             // A zero-length NAL is not a thing, and treating one as valid would
             // spin this loop forever.
-            guard length > 1, cursor + length <= bytes.count else { return nil }
-            let header0 = bytes[cursor]
-            let header1 = bytes[cursor + 1]
+            guard length > 1, cursor + length <= count else { return nil }
+            let header0 = base[cursor]
+            let header1 = base[cursor + 1]
             units.append(
                 Unit(
                     type: (header0 >> 1) & 0x3F,
                     layerID: ((header0 & 0x01) << 5) | (header1 >> 3),
-                    bytes: bytes[cursor..<(cursor + length)]
+                    bytes: UnsafeBufferPointer(start: base + cursor, count: length)
                 )
             )
             cursor += length
@@ -85,34 +94,81 @@ enum HEVCNALUnits {
         lengthSize: Int,
         transform: (Unit) -> Disposition
     ) -> [UInt8]? {
-        guard let units = units(in: bytes, lengthSize: lengthSize) else { return nil }
+        bytes.withUnsafeBufferPointer { buffer in
+            var output: [UInt8]?
+            let written = rewrite(buffer, lengthSize: lengthSize, transform: transform) { size in
+                output = [UInt8](repeating: 0, count: size)
+                return output!.withUnsafeMutableBufferPointer { $0.baseAddress }
+            }
+            return written ? output : nil
+        }
+    }
+
+    /// The pointer shape, writing the result into a buffer the caller
+    /// provides: `allocate(size)` is called at most once, only when something
+    /// changed, with the exact output size — the copy loop answers it with an
+    /// `av_malloc`ed buffer that is then swapped into the packet, so the
+    /// rewritten payload is written exactly once and never copied. Returns
+    /// `false` (and never calls `allocate`) when every unit was kept, or the
+    /// packet did not frame; `true` once the output has been written.
+    ///
+    /// `allocate` returning `nil` means "could not allocate": the packet is
+    /// then left alone, exactly like a framing failure.
+    static func rewrite(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        lengthSize: Int,
+        transform: (Unit) -> Disposition,
+        into allocate: (Int) -> UnsafeMutablePointer<UInt8>?
+    ) -> Bool {
+        guard let units = units(in: bytes, lengthSize: lengthSize) else { return false }
 
         var dispositions: [Disposition] = []
         dispositions.reserveCapacity(units.count)
         var changed = false
+        var outputSize = 0
         for unit in units {
             let disposition = transform(unit)
-            if case .keep = disposition {} else { changed = true }
+            switch disposition {
+            case .keep:
+                outputSize += lengthSize + unit.bytes.count
+            case .drop:
+                changed = true
+            case .replace(let replacement):
+                changed = true
+                if !replacement.isEmpty { outputSize += lengthSize + replacement.count }
+            }
             dispositions.append(disposition)
         }
-        guard changed else { return nil }
+        guard changed, let output = allocate(outputSize) else { return false }
 
-        var output: [UInt8] = []
-        output.reserveCapacity(bytes.count)
+        var cursor = 0
+        func append(length: Int) {
+            for shift in stride(from: (lengthSize - 1) * 8, through: 0, by: -8) {
+                output[cursor] = UInt8((length >> shift) & 0xFF)
+                cursor += 1
+            }
+        }
         for (unit, disposition) in zip(units, dispositions) {
-            let payload: ArraySlice<UInt8>
             switch disposition {
-            case .keep: payload = unit.bytes
-            case .drop: continue
+            case .keep:
+                append(length: unit.bytes.count)
+                if let base = unit.bytes.baseAddress {
+                    (output + cursor).update(from: base, count: unit.bytes.count)
+                }
+                cursor += unit.bytes.count
+            case .drop:
+                continue
             case .replace(let replacement):
                 guard !replacement.isEmpty else { continue }
-                payload = replacement[...]
+                append(length: replacement.count)
+                replacement.withUnsafeBufferPointer { source in
+                    if let base = source.baseAddress {
+                        (output + cursor).update(from: base, count: source.count)
+                    }
+                }
+                cursor += replacement.count
             }
-            for shift in stride(from: (lengthSize - 1) * 8, through: 0, by: -8) {
-                output.append(UInt8((payload.count >> shift) & 0xFF))
-            }
-            output.append(contentsOf: payload)
         }
-        return output
+        return true
     }
 }

@@ -195,7 +195,7 @@ struct PlanSegmentProvider: SegmentProvider {
                 // check and the wait then makes the wait return at once,
                 // instead of being lost to a waiter that was not yet asleep.
                 let generation = landed?.currentGeneration
-                if let data = try? Data(contentsOf: fileURL) {
+                if let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) {
                     return .data(data, contentType: contentType)
                 }
                 // The slot may have been declared empty AFTER this serve went

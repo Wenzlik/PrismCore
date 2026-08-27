@@ -78,7 +78,10 @@ public struct DirectorySegmentProvider: SegmentProvider {
         guard filePath == rootPath || filePath.hasPrefix(rootPath + "/") else {
             return .notFound
         }
-        guard let data = try? Data(contentsOf: fileURL) else { return .notFound }
+        // Mapped, not read: the segment's pages come in as the send touches
+        // them, instead of a copy into a buffer that is copied again onto the
+        // socket. Eviction unlinks the path; a mapping outlives the unlink.
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return .notFound }
         return .data(data, contentType: LoopbackHTTPServer.contentType(for: fileURL))
     }
 }

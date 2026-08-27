@@ -72,27 +72,39 @@ final class DolbyVisionRPUConverter {
     /// Converted packet payload, or `nil` when this packet needed no change (the
     /// caller then writes the original buffer untouched).
     func convert(packet bytes: [UInt8]) -> [UInt8]? {
-        HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize) { unit in
-            // The enhancement layer goes first: it is the larger half of the
-            // saving, and an EL NAL never carries an RPU we want.
-            if unit.layerID != 0 {
-                droppedEnhancementLayerNALs += 1
-                return .drop
-            }
-            guard unit.type == 62 else { return .keep }
-            guard let converted = Self.convertRPU(Array(unit.bytes)) else {
-                failedRPUs += 1
-                // Keep the unconverted RPU rather than dropping it. A P7 RPU in
-                // a stream declared 8.1 is wrong, but the declaration is what
-                // this session's master says — and `HLSRemuxer` only makes that
-                // claim when conversion succeeded (see `dolbyVisionForOutput`).
-                // Dropping RPUs here would instead corrupt the DV metadata of a
-                // stream we may still be serving as honest P7-to-Prism.
-                return .keep
-            }
-            convertedRPUs += 1
-            return .replace(converted)
+        HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose)
+    }
+
+    /// The copy loop's shape: walk the packet's own buffer, and only when
+    /// something changed write the result once into the buffer `allocate`
+    /// returns (see `HEVCNALUnits.rewrite(_:lengthSize:transform:into:)`).
+    func convert(
+        packet bytes: UnsafeBufferPointer<UInt8>,
+        into allocate: (Int) -> UnsafeMutablePointer<UInt8>?
+    ) -> Bool {
+        HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose, into: allocate)
+    }
+
+    private func dispose(_ unit: HEVCNALUnits.Unit) -> HEVCNALUnits.Disposition {
+        // The enhancement layer goes first: it is the larger half of the
+        // saving, and an EL NAL never carries an RPU we want.
+        if unit.layerID != 0 {
+            droppedEnhancementLayerNALs += 1
+            return .drop
         }
+        guard unit.type == 62 else { return .keep }
+        guard let converted = Self.convertRPU(Array(unit.bytes)) else {
+            failedRPUs += 1
+            // Keep the unconverted RPU rather than dropping it. A P7 RPU in
+            // a stream declared 8.1 is wrong, but the declaration is what
+            // this session's master says — and `HLSRemuxer` only makes that
+            // claim when conversion succeeded (see `dolbyVisionForOutput`).
+            // Dropping RPUs here would instead corrupt the DV metadata of a
+            // stream we may still be serving as honest P7-to-Prism.
+            return .keep
+        }
+        convertedRPUs += 1
+        return .replace(converted)
     }
 
     /// One RPU NAL (including its two-byte HEVC header) through libdovi.
