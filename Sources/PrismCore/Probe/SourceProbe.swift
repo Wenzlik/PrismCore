@@ -673,6 +673,47 @@ public enum SourceProbe {
     ///   probe that answers nothing is a playback that falls back to nothing
     ///   (five silent play attempts over four minutes in the 2026-08-14
     ///   field log, all blocked inside one open against a starved server).
+    /// `open`, run on a dedicated thread so the cooperative pool never
+    /// blocks in it.
+    ///
+    /// `open` is synchronous and blocks on the transport for the whole probe
+    /// — up to `budget` (10 s) against a starved server. Called from an
+    /// `async` context that is a cooperative-pool thread held hostage, and
+    /// a host that probes several sources at once (a row of episodes, a
+    /// fallback racing a transcode) can park enough of them to stall every
+    /// other `await` in the process (#44 was the producer-side twin). This
+    /// hops to a one-shot `ProducerThread`, hands the `ProbedSource` back
+    /// through a continuation, and returns to the pool. The interrupt guard
+    /// and the budget are `open`'s own; nothing about the probe changes.
+    ///
+    /// Task cancellation is observed at the boundary: a probe already in
+    /// flight runs to its verdict or its budget (the thread is not killed;
+    /// an FFmpeg read cannot be interrupted from outside except through the
+    /// guard, which the budget already arms), and a cancelled caller gets
+    /// `CancellationError` while the result is released.
+    public static func openDetached(
+        url: URL,
+        httpHeaders: [String: String] = [:],
+        budget: Duration = SourceOpenTuning.probeBudget
+    ) async throws -> ProbedSource {
+        try Task.checkCancellation()
+        let outcome: Result<ProbedSource, any Error> = await withCheckedContinuation { continuation in
+            let thread = ProducerThread(name: "cz.zmrhal.prismcore.probe") {
+                continuation.resume(returning: Result {
+                    try open(url: url, httpHeaders: httpHeaders, budget: budget)
+                })
+            }
+            // Kept alive by its own closure until it exits; nothing to join.
+            withExtendedLifetime(thread) {}
+        }
+        if Task.isCancelled {
+            // The probe finished after the caller stopped caring: releasing
+            // the `ProbedSource` closes its context.
+            throw CancellationError()
+        }
+        return try outcome.get()
+    }
+
     public static func open(
         url: URL,
         httpHeaders: [String: String] = [:],

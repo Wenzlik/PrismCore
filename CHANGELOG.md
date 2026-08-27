@@ -150,6 +150,81 @@ source-compatible.)
   untouched — on a build with the encoder; on stock MPVKit it pins the
   graceful skip.
 
+### Changed — fewer source round trips (#65 package C)
+
+- **An adopted probe context is rewound once, not twice.** The remuxer used
+  to seek an adopted context back to 0 (and flush) immediately, then hand it
+  to `SegmentPlan.build`, whose Cues-loading nudge ends with its own seek to
+  0. Over HTTP every seek is a Range request. The rewind is now deferred:
+  `SegmentPlan.buildReportingPosition` says whether it passed through the
+  head, and the remuxer rewinds itself only when it did not (cached map,
+  index already loaded, no plan). Measured against a Range-capable loopback
+  server (one `SourceProbe.open` + `start()` over `h264_aac_30s.mkv`, 3 runs
+  each, identical every run): **5 requests → 4**.
+
+- **No index-load nudge when the index is already loaded.** A plain MP4's
+  index comes from `stss`/`stts` in the `moov` the open already read, so the
+  tail seek loaded nothing and cost two Range requests.
+  `SegmentPlan.indexIsLoadedAtOpen` skips the nudge when the stream's
+  keyframe entries already reach into the last target-length of the file —
+  by coverage, not by demuxer name (review finding: a fragmented MP4's
+  `moov` describes its first fragment only, and open-time entries from a
+  Cues-less Matroska cover the first cluster only; neither can pass). Not
+  measured (no MP4 fixture; the MKV fixture's Cues are not parsed at open,
+  so it still nudges).
+
+- **A cancelled play persists its keyframe harvest as a PARTIAL map.** The
+  harvest of a source that could not be planned (no usable index) was stored
+  only at EOF — a film stopped at minute 40 learned nothing, and the next
+  play paid the sequential shape again. `KeyframeIndexCache.Entry` now
+  carries `complete` and `coveredThroughPTS`; a cancelled run stores what it
+  saw, and `SegmentPlan.keyframePlan(coveredThroughPTS:)` trusts the map as
+  a contiguous prefix — planned exactly on keyframes up to the covered end,
+  then continued on the 6 s uniform stride to the container's end. Tail
+  boundaries are time targets the producer cuts at the next keyframe
+  at-or-after, with a stride no shorter than the largest gap the prefix
+  showed (review finding: a 6 s stride over 10 s GOPs would resolve two
+  targets to one keyframe and drift the timeline cumulatively), so a seek
+  INTO the un-watched tail lands up to one GOP late and the error does not
+  accumulate as long as the tail's cadence is no coarser than the prefix's
+  (an inference about an unobserved tail, not a bound — known limitation,
+  closed by the harvest on the next contiguous play);
+  in exchange the watched prefix (where the resume point is) gets a
+  seekable VOD on a source that had none. A session planned on a partial
+  map keeps harvesting to extend the prefix — only while its run started
+  inside the covered end (a seek past it would leave a hole the gap witness
+  must never see) — and flips the entry complete when such a run reaches
+  EOF. A partial entry never replaces a complete or longer one; pre-1.11
+  sidecars decode as complete.
+
+- **`SourceProbe.openDetached`** — `open` on a one-shot dedicated thread,
+  handed back through a continuation. `open` blocks on the transport for up
+  to its 10 s budget, and a host calling it from `async` code parks a
+  cooperative-pool thread for that long; several at once (a row of episodes,
+  a fallback racing a transcode) can stall every other `await` in the
+  process. Aether's call site adopts it in its own PR.
+
+- **Tried and not shipped: `multiple_requests=1` (HTTP keep-alive).**
+  Measured on the same setup: 4 requests on 4 connections without it;
+  5–6 requests on 2–3 connections with it — the socket was reused, but a
+  duplicated Range request appeared in two runs of three, so the round trips
+  did not go down, and keep-alive semantics against Plex/Jellyfin/Emby were
+  an untested risk for no measured gain. Recorded in `SourceOpenTuning`.
+
+### Tests — package C
+
+- `KeyframeIndexCacheTests`: a run cancelled before any keyframe still
+  persists nothing; a run cancelled after segment 1 (deterministic through
+  the new `HLSRemuxer.onSegmentLanded` seam) stores a partial map that the
+  next play plans on, tail segment producible on demand; partial-store rules
+  and legacy-sidecar decoding.
+- `SegmentPlanTests`: partial map → keyframe prefix + uniform tail, stray
+  keyframes past the covered end ignored, coverage witness still applies.
+- `ProbedSourceReuseTests`: an adopted context pushed to 20 s produces a
+  head segment with `tfdt` 0 on both paths (plan seeks / cached map, no
+  seek); `openDetached` matches `open`'s verdict and throws for a missing
+  file.
+
 ## [1.10.1] — 2026-08-22
 
 ### Fixed

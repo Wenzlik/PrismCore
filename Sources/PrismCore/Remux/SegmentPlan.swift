@@ -106,28 +106,67 @@ struct SegmentPlan: Equatable {
         firstSegmentSeconds: Int = SegmentPlan.defaultFirstSegmentSeconds,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
         interruptGuard: ReadInterruptGuard? = nil,
-        cachedKeyframes: [Int64]? = nil
+        cachedKeyframes: [Int64]? = nil,
+        cachedCoveredThroughPTS: Int64? = nil
     ) -> SegmentPlan? {
+        buildReportingPosition(
+            input: input, videoStreamIndex: videoStreamIndex, targetSeconds: targetSeconds,
+            firstSegmentSeconds: firstSegmentSeconds, indexLoadBudget: indexLoadBudget,
+            interruptGuard: interruptGuard, cachedKeyframes: cachedKeyframes,
+            cachedCoveredThroughPTS: cachedCoveredThroughPTS
+        ).plan
+    }
+
+    /// `build`, also reporting whether it left the read position at the
+    /// head. The index-load path ends with a seek to 0, so a caller that
+    /// adopted a context positioned mid-file (the probe's) can skip its own
+    /// rewind — over HTTP that rewind is a Range request of its own. `false`
+    /// when no seek ran: cached map, an index already loaded at open, or an
+    /// early exit — the caller then rewinds itself.
+    ///
+    /// `cachedCoveredThroughPTS` marks a PARTIAL cached map (a play cancelled
+    /// before EOF): keyframes are trusted only up to it, and the plan
+    /// continues past it on the uniform stride (see `keyframePlan`).
+    static func buildReportingPosition(
+        input: UnsafeMutablePointer<AVFormatContext>,
+        videoStreamIndex: Int32,
+        targetSeconds: Int,
+        firstSegmentSeconds: Int = SegmentPlan.defaultFirstSegmentSeconds,
+        indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
+        interruptGuard: ReadInterruptGuard? = nil,
+        cachedKeyframes: [Int64]? = nil,
+        cachedCoveredThroughPTS: Int64? = nil
+    ) -> (plan: SegmentPlan?, rewoundToHead: Bool) {
+        var rewound = false
         let stream = input.pointee.streams[Int(videoStreamIndex)]!
         let timeBase = stream.pointee.time_base
         let tick = av_q2d(timeBase)
 
         // Container duration (AV_TIME_BASE) → seconds. No duration, no plan.
         let rawDuration = input.pointee.duration
-        guard rawDuration > 0 else { return nil }
+        guard rawDuration > 0 else { return (nil, false) }
         let durationSeconds = Double(rawDuration) / Double(AV_TIME_BASE)
-        guard durationSeconds.isFinite, durationSeconds > 0 else { return nil }
+        guard durationSeconds.isFinite, durationSeconds > 0 else { return (nil, false) }
 
         let keyframes: [Int64]
         if let cachedKeyframes {
             keyframes = cachedKeyframes
+        } else if indexIsLoadedAtOpen(
+            input: input, stream: stream, tickSeconds: tick,
+            durationSeconds: durationSeconds, targetSeconds: targetSeconds
+        ) {
+            // Nothing to nudge: the index is already in the stream. Two Range
+            // requests saved on every plain MP4 (stss lives in the moov the
+            // open read) and on any Matroska whose Cues the demuxer already
+            // fetched while executing the SeekHead.
+            keyframes = indexedKeyframes(of: stream)
         } else {
             // Nudge the demuxer to load its index (Matroska Cues arrive with a
-            // bounded seek; MP4 has stss in the moov already) — under a deadline,
-            // because "bounded" is a property of the index existing: without one
-            // the demuxer scans the file linearly and this call IS the stall.
-            // The armed guard aborts the underlying reads (AVERROR_EXIT) once the
-            // budget is gone; a partial scan leaves the demuxer consistent, just
+            // bounded seek) — under a deadline, because "bounded" is a
+            // property of the index existing: without one the demuxer scans
+            // the file linearly and this call IS the stall. The armed guard
+            // aborts the underlying reads (AVERROR_EXIT) once the budget is
+            // gone; a partial scan leaves the demuxer consistent, just
             // positioned mid-file.
             interruptGuard?.arm(budget: indexLoadBudget)
             _ = av_seek_frame(input, videoStreamIndex, stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / tick), AVSEEK_FLAG_BACKWARD)
@@ -147,17 +186,8 @@ struct SegmentPlan: Equatable {
                 pb.pointee.error = 0
             }
             _ = av_seek_frame(input, videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD)
-
-            var indexed: [Int64] = []
-            let count = avformat_index_get_entries_count(stream)
-            indexed.reserveCapacity(Int(count))
-            for i in 0..<count {
-                guard let entry = avformat_index_get_entry(stream, i) else { continue }
-                if entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 {
-                    indexed.append(entry.pointee.timestamp)
-                }
-            }
-            keyframes = indexed
+            rewound = true
+            keyframes = indexedKeyframes(of: stream)
         }
 
         if let planned = keyframePlan(
@@ -165,17 +195,18 @@ struct SegmentPlan: Equatable {
             durationSeconds: durationSeconds,
             tickSeconds: tick,
             targetSeconds: targetSeconds,
-            firstSegmentSeconds: firstSegmentSeconds
+            firstSegmentSeconds: firstSegmentSeconds,
+            coveredThroughPTS: cachedKeyframes != nil ? cachedCoveredThroughPTS : nil
         ) {
-            return SegmentPlan(
+            return (SegmentPlan(
                 entries: planned,
                 basis: .keyframeIndex,
                 timeBaseNum: timeBase.num,
                 timeBaseDen: timeBase.den
-            )
+            ), rewound)
         }
 
-        return SegmentPlan(
+        return (SegmentPlan(
             entries: uniformPlan(
                 durationSeconds: durationSeconds, tickSeconds: tick,
                 targetSeconds: targetSeconds, firstSegmentSeconds: firstSegmentSeconds
@@ -183,7 +214,43 @@ struct SegmentPlan: Equatable {
             basis: .uniform,
             timeBaseNum: timeBase.num,
             timeBaseDen: timeBase.den
-        )
+        ), rewound)
+    }
+
+    /// The keyframe timestamps in the stream's index right now.
+    static func indexedKeyframes(of stream: UnsafeMutablePointer<AVStream>) -> [Int64] {
+        var indexed: [Int64] = []
+        let count = avformat_index_get_entries_count(stream)
+        indexed.reserveCapacity(Int(count))
+        for i in 0..<count {
+            guard let entry = avformat_index_get_entry(stream, i) else { continue }
+            if entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 {
+                indexed.append(entry.pointee.timestamp)
+            }
+        }
+        return indexed
+    }
+
+    /// Whether the demuxer's index is already complete without a nudge seek:
+    /// its keyframe entries reach into the last target-length of the file.
+    ///
+    /// True for a plain MP4/MOV, whose index comes from `stss`/`stts` in the
+    /// `moov` the open already read — the nudge there costs two Range
+    /// requests and loads nothing. Deliberately NOT decided by the demuxer's
+    /// name (review finding): a fragmented MP4's `moov` describes only the
+    /// first fragment, and the rest needs `sidx`/`mfra`/a tail read the
+    /// nudge provides. Coverage is the honest criterion for every container:
+    /// open-time entries from a Cues-less Matroska or an fMP4 head cover the
+    /// first cluster/fragment only, which this cannot mistake for the tail.
+    static func indexIsLoadedAtOpen(
+        input: UnsafeMutablePointer<AVFormatContext>,
+        stream: UnsafeMutablePointer<AVStream>,
+        tickSeconds: Double,
+        durationSeconds: Double,
+        targetSeconds: Int
+    ) -> Bool {
+        guard let last = indexedKeyframes(of: stream).last else { return false }
+        return Double(last) * tickSeconds >= durationSeconds - Double(targetSeconds)
     }
 
     /// The keyframe-aligned plan, or nil when the index fails its witnesses.
@@ -194,15 +261,29 @@ struct SegmentPlan: Equatable {
     /// the arithmetic can still be tested without the head special case).
     /// A first target longer than `targetSeconds` is clamped: the point of
     /// the knob is a SHORTER head, never a longer one.
+    ///
+    /// `coveredThroughPTS` marks a PARTIAL map — a harvest persisted when
+    /// the play was cancelled before EOF (`KeyframeIndexCache.Entry`). The
+    /// keyframes are trusted as a contiguous prefix up to it (keyframes past
+    /// it are ignored) and planned exactly; past the last boundary keyframe
+    /// the plan continues on the uniform stride to the container's end.
+    /// Those tail boundaries are time targets the producer cuts at the next
+    /// keyframe at-or-after, so a seek INTO the tail lands up to one GOP
+    /// late — the trade for a seekable VOD over the prefix that was actually
+    /// watched, on a source whose first play could not be planned at all.
+    /// The witnesses are unchanged: a gap over the cap or a prefix shorter
+    /// than one target still distrusts the map.
     static func keyframePlan(
         keyframes: [Int64],
         durationSeconds: Double,
         tickSeconds: Double,
         targetSeconds: Int,
-        firstSegmentSeconds: Int? = nil
+        firstSegmentSeconds: Int? = nil,
+        coveredThroughPTS: Int64? = nil
     ) -> [Entry]? {
-        guard keyframes.count >= 2 else { return nil }
-        let sorted = keyframes.sorted()
+        let trusted = coveredThroughPTS.map { limit in keyframes.filter { $0 <= limit } } ?? keyframes
+        guard trusted.count >= 2 else { return nil }
+        let sorted = trusted.sorted()
 
         // Witness 1: no gap over the cap.
         var previous = sorted[0]
@@ -229,11 +310,42 @@ struct SegmentPlan: Equatable {
             startPTS = keyframe
             boundary = Double(keyframe) + step
         }
-        // The tail: from the last boundary keyframe to the container's end.
+        // The tail: from the last boundary keyframe to the container's end —
+        // one entry for a complete map; for a partial one the uniform stride
+        // takes over where the trusted keyframes end.
         let endPTS = Int64(durationSeconds / tickSeconds)
-        let tail = Double(max(endPTS - startPTS, 0)) * tickSeconds
-        if tail > 0.01 {
-            entries.append(Entry(startPTS: startPTS, duration: tail))
+        if coveredThroughPTS != nil {
+            // The tail stride is at least the largest keyframe gap the prefix
+            // showed. Boundaries here are time targets the producer cuts at
+            // the next keyframe at-or-after, and with a stride SHORTER than
+            // the GOP two targets resolve to the same keyframe: every entry
+            // then swallows a whole GOP while the playlist promises 6 s, and
+            // the timeline drifts cumulatively (10 s GOPs advertised as 6 s
+            // entries — review finding). A stride no shorter than the gap
+            // gives every target its own GOP, so the error stays one GOP per
+            // entry and never accumulates — PROVIDED the tail's cadence is no
+            // coarser than the prefix's. The tail is unobserved by definition,
+            // so this is an inference, not a bound: a tail whose GOPs grow
+            // past the prefix's largest would drift again there. Known
+            // limitation, accepted for the un-watched remainder of a source
+            // that otherwise has no seekable shape at all; the harvest closes
+            // it on the next contiguous play.
+            var largestGap: Int64 = 0
+            for (earlier, later) in zip(sorted, sorted.dropFirst()) {
+                largestGap = max(largestGap, later - earlier)
+            }
+            let tailStep = max(step, (Double(largestGap) * tickSeconds).rounded(.up) / tickSeconds)
+            var start = Double(startPTS)
+            while Double(endPTS) - start > 0.01 / tickSeconds {
+                let length = min(tailStep, Double(endPTS) - start)
+                entries.append(Entry(startPTS: Int64(start), duration: length * tickSeconds))
+                start += tailStep
+            }
+        } else {
+            let tail = Double(max(endPTS - startPTS, 0)) * tickSeconds
+            if tail > 0.01 {
+                entries.append(Entry(startPTS: startPTS, duration: tail))
+            }
         }
         return entries.isEmpty ? nil : entries
     }

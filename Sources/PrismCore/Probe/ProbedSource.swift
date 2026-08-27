@@ -104,6 +104,13 @@ public final class ProbedSource: @unchecked Sendable {
     /// declined still holds one until it is released.
     var holdsContext: Bool { lock.withLock { context != nil } }
 
+    /// The context WITHOUT consuming it — for tests that need to move its
+    /// read position before a session adopts it. Never for production code:
+    /// the whole point of `consumeContext` is that the handover is a move.
+    func peekContextForTesting() -> UnsafeMutablePointer<AVFormatContext>? {
+        lock.withLock { context }
+    }
+
     deinit {
         // Nobody took it: the probe was for a routing decision that went
         // elsewhere. Closing here is what keeps a declined probe from leaking
