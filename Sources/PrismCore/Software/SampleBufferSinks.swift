@@ -25,10 +25,20 @@ protocol SampleBufferSink: AnyObject {
     /// `nil` for test doubles, which have no timebase to drive — the seam admits
     /// what it is instead of pretending the timeline can attach anything.
     var queuedRenderer: AVQueuedSampleBufferRendering? { get }
+    /// Call `handler` on `queue` whenever the renderer reports it can no
+    /// longer render what it holds (`status == .failed`, or the display
+    /// layer's `requiresFlushToResumeDecoding`). The pipeline answers by
+    /// flushing and re-priming; without the observation a renderer that lost
+    /// its decode session in the background stays black for the rest of the
+    /// film, with `isReadyForMoreMediaData` cheerfully true.
+    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void)
+    func stopObservingFailure()
 }
 
 extension SampleBufferSink {
     var queuedRenderer: AVQueuedSampleBufferRendering? { nil }
+    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) { }
+    func stopObservingFailure() { }
 }
 
 protocol VideoSampleSink: SampleBufferSink {
@@ -56,6 +66,11 @@ protocol RenderTimeline: AnyObject {
     /// renderer) has no business holding a timebase.
     func attach(_ sink: SampleBufferSink)
     func detach(_ sink: SampleBufferSink)
+    /// Call `handler` on `queue` once the clock reaches `time` while running.
+    /// Returns a token for `cancelBoundaryObserver`, or `nil` when the
+    /// timeline cannot observe (a test double with a clock that never moves).
+    func observeBoundary(_ time: CMTime, on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> Any?
+    func cancelBoundaryObserver(_ token: Any)
 }
 
 // MARK: - AVFoundation implementations
@@ -104,6 +119,8 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     var isReadyForMoreSamples: Bool { renderer.isReadyForMoreMediaData }
     var queuedRenderer: AVQueuedSampleBufferRendering? { renderer }
 
+    private var observations: [NSKeyValueObservation] = []
+
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
     }
@@ -119,6 +136,32 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     func flush(removingDisplayedImage: Bool) {
         flushHandler(removingDisplayedImage)
     }
+
+    /// Two signals, both KVO. `status == .failed` is the renderer giving up
+    /// (its `error` says why — logged by the pipeline's host, not acted on
+    /// differently here, because the remedy is the same). The layer's
+    /// `requiresFlushToResumeDecoding` is the softer one: the decode session
+    /// was lost (backgrounding, a display change) and the layer will not draw
+    /// again until flushed — the classic "came back to a black player". Both
+    /// observed on the LAYER, which reflects its renderer's state on every OS
+    /// the package supports, so the availability split above stays in `init`.
+    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+        stopObservingFailure()
+        let statusObservation = layer.observe(\.status, options: [.new]) { layer, _ in
+            guard layer.status == .failed else { return }
+            queue.async(execute: handler)
+        }
+        let flushObservation = layer.observe(\.requiresFlushToResumeDecoding, options: [.new]) { layer, _ in
+            guard layer.requiresFlushToResumeDecoding else { return }
+            queue.async(execute: handler)
+        }
+        observations = [statusObservation, flushObservation]
+    }
+
+    func stopObservingFailure() {
+        observations.forEach { $0.invalidate() }
+        observations.removeAll()
+    }
 }
 
 /// `AVSampleBufferAudioRenderer` behind `AudioSampleSink`.
@@ -132,6 +175,8 @@ final class AudioRendererSink: AudioSampleSink {
 
     var isReadyForMoreSamples: Bool { renderer.isReadyForMoreMediaData }
     var queuedRenderer: AVQueuedSampleBufferRendering? { renderer }
+
+    private var statusObservation: NSKeyValueObservation?
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
@@ -147,6 +192,22 @@ final class AudioRendererSink: AudioSampleSink {
 
     func flush() {
         renderer.flush()
+    }
+
+    /// The audio renderer's only failure signal is `status == .failed` (a
+    /// route it could not follow, a format it stopped accepting); `error`
+    /// carries the reason. Same remedy as video: flush and re-feed.
+    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+        stopObservingFailure()
+        statusObservation = renderer.observe(\.status, options: [.new]) { renderer, _ in
+            guard renderer.status == .failed else { return }
+            queue.async(execute: handler)
+        }
+    }
+
+    func stopObservingFailure() {
+        statusObservation?.invalidate()
+        statusObservation = nil
     }
 }
 
@@ -174,5 +235,15 @@ final class SynchronizerTimeline: RenderTimeline {
 
     func setRate(_ rate: Float, time: CMTime) {
         synchronizer.setRate(rate, time: time)
+    }
+
+    func observeBoundary(_ time: CMTime, on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> Any? {
+        synchronizer.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: time)], queue: queue, using: handler
+        )
+    }
+
+    func cancelBoundaryObserver(_ token: Any) {
+        synchronizer.removeTimeObserver(token)
     }
 }

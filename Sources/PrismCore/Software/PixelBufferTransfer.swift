@@ -105,17 +105,46 @@ final class PixelBufferTransfer {
         }
         self.pool = pool
 
-        // SWS_POINT, not bilinear: this is a pixel-format conversion at
-        // identical dimensions, so there is nothing to interpolate and the
-        // cheapest kernel is also the exact one.
-        guard let scaler = sws_getContext(
-            self.width, self.height, sourceFormat,
-            self.width, self.height, destination.ffmpegFormat,
-            Int32(SWS_POINT.rawValue), nil, nil, nil
-        ) else {
+        // `sws_alloc_context` + options rather than `sws_getContext`: the
+        // convenience constructor has no way to ask for slice threading, and
+        // this conversion runs on the feed queue in series with the decode —
+        // at 1080p it is a couple of milliseconds per frame on one core, which
+        // is the difference between keeping up and not on the A-series parts
+        // this path exists for.
+        guard let scaler = sws_alloc_context() else {
             throw Failure.scalerCreationFailed
         }
         self.scaler = scaler
+        let options = UnsafeMutableRawPointer(scaler)
+        av_opt_set_int(options, "srcw", Int64(self.width), 0)
+        av_opt_set_int(options, "srch", Int64(self.height), 0)
+        av_opt_set_int(options, "src_format", Int64(sourceFormat.rawValue), 0)
+        av_opt_set_int(options, "dstw", Int64(self.width), 0)
+        av_opt_set_int(options, "dsth", Int64(self.height), 0)
+        av_opt_set_int(options, "dst_format", Int64(destination.ffmpegFormat.rawValue), 0)
+        // SWS_POINT, not bilinear: this is a pixel-format conversion at
+        // identical dimensions, so there is nothing to interpolate and the
+        // cheapest kernel is also the exact one.
+        av_opt_set_int(options, "sws_flags", Int64(SWS_POINT.rawValue), 0)
+        // Slices are cheap to split and the conversion is embarrassingly
+        // parallel; capped so a many-core Mac does not spin up eight threads
+        // for a 480p frame that one finishes in the time it takes to wake them.
+        av_opt_set_int(options, "threads", Int64(Self.conversionThreads), 0)
+        guard sws_init_context(scaler, nil, nil) >= 0 else {
+            sws_freeContext(scaler)
+            self.scaler = nil
+            throw Failure.scalerCreationFailed
+        }
+    }
+
+    static let conversionThreads = max(1, min(4, ProcessInfo.processInfo.activeProcessorCount))
+
+    /// Memory pressure: give back every buffer the pool holds that no frame
+    /// references. The pool refills on demand, so the cost is one allocation
+    /// per frame until the window is warm again — cheaper than being killed.
+    func releaseIdleBuffers() {
+        guard let pool else { return }
+        CVPixelBufferPoolFlush(pool, [.excessBuffers])
     }
 
     deinit {

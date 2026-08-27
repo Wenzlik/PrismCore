@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import AVFoundation
 import CoreMedia
+import Libavformat
 @testable import PrismCore
 
 // MARK: - Test doubles
@@ -117,6 +118,28 @@ final class RecordingTimeline: RenderTimeline {
     func detach(_ sink: SampleBufferSink) {
         attachedRenderers -= 1
     }
+
+    /// The boundary the pipeline asked to be told about, and the callback —
+    /// the clock never advances on its own here, so the test fires it.
+    private(set) var pendingBoundary: (time: CMTime, fire: () -> Void)?
+    private(set) var cancelledBoundaries = 0
+
+    func observeBoundary(_ time: CMTime, on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) -> Any? {
+        pendingBoundary = (time, { queue.async(execute: handler) })
+        return time as NSValue
+    }
+
+    func cancelBoundaryObserver(_ token: Any) {
+        pendingBoundary = nil
+        cancelledBoundaries += 1
+    }
+
+    /// Stand in for the synchronizer's clock reaching the boundary.
+    func reachBoundary() {
+        let boundary = pendingBoundary
+        pendingBoundary = nil
+        boundary?.fire()
+    }
 }
 
 // MARK: - Tests
@@ -188,6 +211,8 @@ struct SoftwarePlaybackPipelineTests {
         video.isBlocked = true
         try pipeline.load(url: try fixture("h264_aac.mkv"))
         defer { pipeline.stop() }
+        // `load` returns once the first frame is parked; the depth fills behind it.
+        pipeline.waitForFeedQueue()
 
         #expect(video.enqueued.isEmpty, "a renderer that isn't ready must not be enqueued to")
         #expect(!audio.enqueued.isEmpty, "audio must keep flowing while video is blocked")
@@ -198,6 +223,7 @@ struct SoftwarePlaybackPipelineTests {
         let (pipeline, video, audio, timeline) = makePipeline()
         try pipeline.load(url: try fixture("h264_aac.mkv"))
         defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
 
         #expect(!video.enqueued.isEmpty)
         #expect(!audio.enqueued.isEmpty)
@@ -234,19 +260,14 @@ struct SoftwarePlaybackPipelineTests {
         // even on a local file. Before #58 this pipeline answered nil for the
         // whole session; a host's seek bar had no timeline and nothing to
         // wait for.
-        let (pipeline, video, audio, _) = makePipeline()
+        let (pipeline, video, audio, timeline) = makePipeline()
         try pipeline.load(url: try fixture("h264_aac_noduration.mkv"))
         defer { pipeline.stop() }
         #expect(pipeline.durationSeconds == nil, "the fixture must not know its duration at load")
 
         pipeline.play()
         pipeline.waitForFeedQueue()
-        var pulls = 0
-        while pipeline.state != .ended, pulls < 1_000 {
-            video.playOut()
-            audio.playOut()
-            pulls += 1
-        }
+        drainToEnd(pipeline, video: video, audio: audio, timeline: timeline)
         #expect(pipeline.state == .ended)
 
         // 2 s of content: the furthest packet end is the duration of record.
@@ -256,20 +277,13 @@ struct SoftwarePlaybackPipelineTests {
 
     @Test("Draining to EOF delivers every frame in order and ends")
     func drainsToEndOfStream() throws {
-        let (pipeline, video, audio, _) = makePipeline()
+        let (pipeline, video, audio, timeline) = makePipeline()
         try pipeline.load(url: try fixture("vp9.webm"))
         defer { pipeline.stop() }
         pipeline.play()
         pipeline.waitForFeedQueue()
 
-        // Stand in for the renderer's own pull: keep asking until the pipeline
-        // says it has nothing left.
-        var pulls = 0
-        while pipeline.state != .ended, pulls < 1_000 {
-            video.playOut()
-            audio.playOut()
-            pulls += 1
-        }
+        drainToEnd(pipeline, video: video, audio: audio, timeline: timeline)
         #expect(pipeline.state == .ended)
 
         // 4 s at 24 fps. Asserted as a range because the decoder's tail depends
@@ -347,6 +361,196 @@ struct SoftwarePlaybackPipelineTests {
         #expect(throws: SoftwarePlaybackPipeline.Failure.self) {
             try pipeline.load(url: try self.fixture("vp9.webm"))
         }
+    }
+
+    /// Stand in for the renderers' own pull: keep asking until the pipeline
+    /// has handed over its last buffer and asked the clock for the boundary,
+    /// then let the clock reach it.
+    private func drainToEnd(
+        _ pipeline: SoftwarePlaybackPipeline,
+        video: RecordingVideoSink, audio: RecordingAudioSink, timeline: RecordingTimeline
+    ) {
+        var pulls = 0
+        while timeline.pendingBoundary == nil, pipeline.state != .ended, pulls < 1_000 {
+            video.playOut()
+            audio.playOut()
+            pulls += 1
+        }
+        timeline.reachBoundary()
+        pipeline.waitForFeedQueue()
+    }
+
+    @Test(".ended waits for the clock to reach the last presentation end, not the last enqueue")
+    func endedWaitsForPlayout() throws {
+        let (pipeline, video, audio, timeline) = makePipeline()
+        try pipeline.load(url: try fixture("h264_aac.mkv"))
+        defer { pipeline.stop() }
+        pipeline.play()
+        pipeline.waitForFeedQueue()
+
+        var pulls = 0
+        while timeline.pendingBoundary == nil, pulls < 1_000 {
+            video.playOut()
+            audio.playOut()
+            pulls += 1
+        }
+        // Everything is enqueued, and the pipeline is still playing: the
+        // speaker has the last half-second of audio, and hosts tear down on
+        // `.ended`.
+        let boundary = try #require(timeline.pendingBoundary)
+        #expect(pipeline.state == .playing)
+
+        var lastEnd: CMTime = .zero
+        for buffer in video.enqueued + audio.enqueued {
+            let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+            let duration = CMSampleBufferGetDuration(buffer)
+            let end = duration.isValid ? pts + duration : pts
+            if end > lastEnd { lastEnd = end }
+        }
+        let lastPTS = (video.enqueued + audio.enqueued)
+            .map(CMSampleBufferGetPresentationTimeStamp).max() ?? .zero
+        #expect(boundary.time >= lastPTS, "boundary \(boundary.time.seconds) before last PTS \(lastPTS.seconds)")
+        #expect(boundary.time == lastEnd, "boundary \(boundary.time.seconds) vs last end \(lastEnd.seconds)")
+
+        timeline.reachBoundary()
+        pipeline.waitForFeedQueue()
+        #expect(pipeline.state == .ended)
+        #expect(timeline.rate == 0)
+    }
+
+    @Test("load(startAt:) seeks before priming and lands at or after the target")
+    func loadStartAtLandsOnTarget() throws {
+        let (pipeline, video, audio, timeline) = makePipeline()
+        // 1.5 s into a 2 s GOP: the keyframe is at 0, so the frames between
+        // are decoded and discarded, and the first frame shown is the target's.
+        let target = CMTime(seconds: 1.5, preferredTimescale: 600)
+        try pipeline.load(url: try fixture("h264_aac.mkv"), startAt: target)
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+
+        let first = try #require(video.enqueued.first)
+        let firstPTS = CMSampleBufferGetPresentationTimeStamp(first)
+        #expect(firstPTS >= target, "first frame at \(firstPTS.seconds)s, asked for \(target.seconds)s")
+        // Within a frame of the target — the discard must not overshoot either.
+        #expect(firstPTS.seconds < target.seconds + 0.1)
+        #expect(timeline.currentTime == firstPTS, "the clock parks on the first surviving frame")
+        // Audio from the discarded stretch never reaches the renderer: it would
+        // play as a stale burst before the picture catches up.
+        for buffer in audio.enqueued {
+            let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+            let end = pts + CMSampleBufferGetDuration(buffer)
+            #expect(end > target, "audio ending at \(end.seconds)s precedes the target")
+        }
+    }
+
+    @Test("seek(to:) decodes and discards up to the target instead of stopping at the keyframe")
+    func seekLandsOnTarget() throws {
+        let (pipeline, video, _, timeline) = makePipeline()
+        try pipeline.load(url: try fixture("h264_aac.mkv"))
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+
+        // Keyframes at 0/2/4/6 s; 3 s means one second of discarded decode.
+        let target = CMTime(seconds: 3, preferredTimescale: 600)
+        pipeline.seek(to: target)
+        pipeline.waitForFeedQueue()
+
+        let first = try #require(video.enqueued.first)
+        let firstPTS = CMSampleBufferGetPresentationTimeStamp(first)
+        #expect(firstPTS >= target && firstPTS.seconds < target.seconds + 0.1, "landed at \(firstPTS.seconds)s")
+        #expect(timeline.currentTime == firstPTS)
+    }
+
+    @Test("A seek further past the keyframe than the discard cap shows from the keyframe")
+    func seekBeyondDiscardCapFallsBackToKeyframe() throws {
+        var pacing = SoftwarePlaybackPipeline.Pacing()
+        pacing.maxSeekDiscardSeconds = 0.5
+        let (pipeline, video, _, _) = makePipeline(pacing: pacing)
+        try pipeline.load(url: try fixture("h264_aac.mkv"))
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+
+        pipeline.seek(to: CMTime(seconds: 3, preferredTimescale: 600))
+        pipeline.waitForFeedQueue()
+
+        let first = try #require(video.enqueued.first)
+        let firstPTS = CMSampleBufferGetPresentationTimeStamp(first).seconds
+        // The keyframe is a full second before the target, twice the cap: the
+        // window is not worth decoding, so playback shows from the keyframe —
+        // late, but immediately, rather than a second of black.
+        #expect(firstPTS >= 2 && firstPTS < 2.1, "landed at \(firstPTS)s")
+    }
+
+    @Test("Seeks queued together coalesce: only the newest flushes and refills")
+    func supersededSeeksAreSkipped() throws {
+        let (pipeline, video, audio, timeline) = makePipeline()
+        try pipeline.load(url: try fixture("h264_aac.mkv"))
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+        let flushesBefore = video.flushes.count
+
+        // A scrub: three targets before the feed queue gets to any of them.
+        // Block the queue so they are guaranteed to be pending together.
+        let gate = DispatchSemaphore(value: 0)
+        pipeline.blockFeedQueueForTesting(until: gate)
+        pipeline.seek(to: CMTime(seconds: 2, preferredTimescale: 600))
+        pipeline.seek(to: CMTime(seconds: 4, preferredTimescale: 600))
+        pipeline.seek(to: CMTime(seconds: 6, preferredTimescale: 600))
+        gate.signal()
+        pipeline.waitForFeedQueue()
+
+        #expect(video.flushes.count == flushesBefore + 1, "one flush for three seeks, got \(video.flushes.count - flushesBefore)")
+        #expect(audio.flushCount == 1)
+        let first = try #require(video.enqueued.first)
+        #expect(CMSampleBufferGetPresentationTimeStamp(first).seconds >= 6, "only the last target counts")
+        #expect(timeline.currentTime == CMSampleBufferGetPresentationTimeStamp(first))
+    }
+
+    @Test("load(probed:) adopts the probe's context and primes the same first frame as load(url:)")
+    func loadProbedMatchesLoadURL() throws {
+        let url = try fixture("h264_aac.mkv")
+
+        let (byURL, urlVideo, _, _) = makePipeline()
+        try byURL.load(url: url)
+        defer { byURL.stop() }
+        byURL.waitForFeedQueue()
+
+        // The probe verifies interlace, which decodes a dozen frames and
+        // leaves the read position mid-file — the adopting load has to rewind
+        // or the first frame it primes is not the first frame of the film.
+        let probed = try SourceProbe.open(url: url)
+        #expect(probed.holdsContext)
+        let (byProbe, probeVideo, _, probeTimeline) = makePipeline()
+        try byProbe.load(probed: probed)
+        defer { byProbe.stop() }
+        byProbe.waitForFeedQueue()
+        #expect(!probed.holdsContext, "the pipeline must take the context, not copy the conclusions")
+
+        #expect(byProbe.state == .paused)
+        #expect(byProbe.sourceInfo?.audioTracks.count == byURL.sourceInfo?.audioTracks.count)
+        #expect(byProbe.durationSeconds == byURL.durationSeconds)
+        let urlFirst = try #require(urlVideo.enqueued.first)
+        let probeFirst = try #require(probeVideo.enqueued.first)
+        #expect(
+            CMSampleBufferGetPresentationTimeStamp(urlFirst) == CMSampleBufferGetPresentationTimeStamp(probeFirst),
+            "both loads must start at the head of the film"
+        )
+        #expect(probeTimeline.currentTime == CMSampleBufferGetPresentationTimeStamp(probeFirst))
+    }
+
+    @Test("load(probed:) on a source whose context was already taken falls back to its own open")
+    func loadProbedFallsBackToURL() throws {
+        let probed = try SourceProbe.open(url: try fixture("vp9.webm"))
+        _ = probed.consumeContext().map { context in
+            var closing: UnsafeMutablePointer<AVFormatContext>? = context
+            avformat_close_input(&closing)
+        }
+        let (pipeline, video, _, _) = makePipeline()
+        try pipeline.load(probed: probed)
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+        #expect(pipeline.state == .paused)
+        #expect(!video.enqueued.isEmpty)
     }
 
     @Test("A missing source fails the load and leaves the pipeline in .failed")

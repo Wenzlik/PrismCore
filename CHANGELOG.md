@@ -8,6 +8,50 @@ source-compatible.)
 
 ## [Unreleased] — 1.11.0
 
+### Software path
+
+- **One open per software playback, not three.** `SoftwarePlaybackPipeline.load(probed:)`
+  adopts the context `SourceProbe.open` already holds — the same handover
+  `PrismCoreSession(probed:)` does, for the same reason (the *context* carries
+  state the decoders need, not just the probe's conclusions). The probe leaves
+  the read position mid-file, so the adopting load rewinds and flushes before
+  the first packet. `PrismCoreEngine.open(url:)` now routes the software case
+  through it, and `PrismCoreEngine.openSoftware(probed:)` is the entry for a
+  host that probed and decided itself. `load(url:)` stays.
+- **A starving server can no longer hang `load()`.** The URL open goes through
+  `ReadInterruptGuard.makeContext()` under `SourceOpenTuning` (probesize /
+  analyzeduration / reconnect) and is armed for the probe budget, like every
+  other open site since 1.8.2; `stop()` trips the guard *before* queueing
+  behind the feed loop, so a `stop()` against a blocked read returns.
+- **Start-up and seek latency.** `thread_count = 1` when the VideoToolbox
+  hwaccel is attached (frame threads only add their count in latency there;
+  the CPU reopen keeps 0). `load(url:/probed:, startAt:)` seeks *before* the
+  priming decode instead of decoding the head and throwing it away. `load`
+  returns as soon as the first frame is anchored and enqueued; the rest of the
+  queue depth fills on the renderers' own pull.
+- **Seeks land on the target.** After the keyframe seek the pipeline decodes
+  and discards video before the target and audio ending at or before it, up
+  to `Pacing.maxSeekDiscardSeconds` (2 s) of content — beyond that it shows
+  from the keyframe as before. Seeks queued together coalesce: superseded
+  ones bail before flushing. `avformat_seek_file` throughout (AGENTS.md).
+- **Renderer failure recovery.** The display layer's `status`/`error` and
+  `requiresFlushToResumeDecoding`, and the audio renderer's `status`, are
+  observed; on failure the pipeline flushes, flushes the decoders, re-seeks to
+  the clock and re-primes (three tries in ten seconds, then `.failed` with
+  `Failure.rendererFailed`). Fixes the black-after-background shape.
+- **Memory.** The pending video queue is capped in *bytes*
+  (`Pacing.maxPendingVideoBytes`, 64 MB) — a frame count let 4K P010 chase
+  audio into hundreds of megabytes. A `DispatchSource` memory-pressure handler
+  shrinks the depth and flushes the CPU path's pixel pool. swscale runs
+  slice-threaded (`sws_alloc_context` + `threads`); the audio resampler writes
+  straight into the `CMBlockBuffer` instead of scratch + malloc + copy.
+- **`.ended` means played out.** It fires from a synchronizer boundary
+  observer at the last presentation end (PTS + duration), not on the last
+  enqueue — which cut off roughly the renderer's queue of audio for hosts that
+  tear down on `.ended`.
+
+  Not measured: these are latency/memory claims from the audit (#65) verified
+  by tests on synthetic fixtures, not yet by a device run over HTTP.
 ### Changed
 
 - **`start()` returns after a ~2 s first segment instead of a ~6 s one.**

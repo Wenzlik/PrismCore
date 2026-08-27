@@ -183,12 +183,17 @@ public enum PrismCoreEngine {
         display: DisplayCapabilities = .conservative,
         segmentCacheBytes: Int? = 1 << 30
     ) async throws -> Playback {
-        let info: SourceInfo
+        // Keep the probe's CONTEXT, not just its answer: whichever engine
+        // takes the source adopts it and skips a second open — and releases
+        // the probe's connection, which a one-connection-per-client server
+        // would otherwise count against the producer's.
+        let probed: ProbedSource
         do {
-            info = try SourceProbe.probe(url: url, httpHeaders: httpHeaders)
+            probed = try SourceProbe.open(url: url, httpHeaders: httpHeaders)
         } catch {
             throw RoutingFailure.probeFailed(underlying: error)
         }
+        let info = probed.info
 
         let decision = try decide(for: info)
 
@@ -199,7 +204,8 @@ public enum PrismCoreEngine {
                     url: url,
                     httpHeaders: httpHeaders,
                     display: display,
-                    segmentCacheBytes: segmentCacheBytes
+                    segmentCacheBytes: segmentCacheBytes,
+                    probed: probed
                 )
                 return .remux(session: session, playlist: try await session.start())
             } catch {
@@ -207,17 +213,28 @@ public enum PrismCoreEngine {
             }
 
         case .software:
-            do {
-                let pipeline = SoftwarePlaybackPipeline()
-                // `load` is synchronous and blocking (it opens the container and
-                // both decoders), so it runs off whatever actor called us.
-                try await Task.detached(priority: .userInitiated) {
-                    try pipeline.load(url: url, httpHeaders: httpHeaders)
-                }.value
-                return .software(pipeline: pipeline)
-            } catch {
-                throw RoutingFailure.startupFailed(underlying: error)
-            }
+            return .software(pipeline: try await openSoftware(probed: probed))
+        }
+    }
+
+    /// Start the software pipeline over an already-probed source — the entry
+    /// a host uses when it ran `SourceProbe.open` + `decide` itself (to log
+    /// or gate on the decision) and wants the probe's open to count. The
+    /// pipeline adopts the context; a `ProbedSource` already consumed
+    /// elsewhere makes it open `probed.url` afresh instead.
+    ///
+    /// Returned loaded and paused, like `open(url:)`'s software case.
+    public static func openSoftware(probed: ProbedSource) async throws -> SoftwarePlaybackPipeline {
+        do {
+            let pipeline = SoftwarePlaybackPipeline()
+            // `load` is synchronous and blocking (it rewinds the container and
+            // opens both decoders), so it runs off whatever actor called us.
+            try await Task.detached(priority: .userInitiated) {
+                try pipeline.load(probed: probed)
+            }.value
+            return pipeline
+        } catch {
+            throw RoutingFailure.startupFailed(underlying: error)
         }
     }
 }
