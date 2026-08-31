@@ -1639,7 +1639,18 @@ final class HLSRemuxer: @unchecked Sendable {
     /// source (ffmpeg cannot synthesize an RPU, hence `RealMediaVerification`),
     /// while the decision is three cases that must not drift.
     ///
-    /// - A DV-capable display keeps the record: it is what engages DV.
+    /// - A configuration AVFoundation cannot present as DV is stripped on ANY
+    ///   display (`isPresentableAsDolbyVision`). This is the case a DV-capable
+    ///   display used to fall straight through: a Profile 7 source that isn't
+    ///   being converted keeps the record `avcodec_parameters_copy` brought
+    ///   across, so the served `hvc1` entry carries a `dvcC` announcing a
+    ///   dual-layer stream — an enhancement layer Apple has no decoder for and,
+    ///   for a converted stream, one that is not even there any more. The
+    ///   manifest prints no claim for these profiles (`dolbyVisionBrand`
+    ///   returns nil for 7, for 8.2 and for anything unrecognised), and a
+    ///   sample entry that claims what the manifest doesn't is exactly the
+    ///   mismatch the note above says AVPlayer refuses on its own.
+    /// - A DV-capable display otherwise keeps the record: it is what engages DV.
     /// - Profile 5 keeps it on any display, because for P5 the record is not an
     ///   upgrade but the *description* — its picture is IPT-PQc2, and an entry
     ///   that omits the record has it read as YCbCr (the green-and-purple
@@ -1651,7 +1662,9 @@ final class HLSRemuxer: @unchecked Sendable {
     static func shouldStripDolbyVisionRecord(
         declared: DolbyVisionConfiguration?, displayIsDolbyVisionCapable: Bool
     ) -> Bool {
-        guard let declared, !displayIsDolbyVisionCapable else { return false }
+        guard let declared else { return false }
+        guard declared.isPresentableAsDolbyVision else { return true }
+        guard !displayIsDolbyVisionCapable else { return false }
         return !declared.isSingleLayerDVOnly
     }
 

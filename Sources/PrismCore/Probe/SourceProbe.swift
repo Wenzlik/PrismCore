@@ -255,6 +255,30 @@ public struct DolbyVisionConfiguration: Sendable, Equatable {
     /// groundwork only *reports* it — the live RPU conversion to 8.1 is the
     /// next step.
     public var isDualLayer: Bool { profile == 7 }
+
+    /// Whether a stream **declared as this configuration** can be presented as
+    /// Dolby Vision by AVFoundation at all.
+    ///
+    /// The same three cases `MasterPlaylistBuilder` already decides between,
+    /// named once so the manifest and the sample entry cannot disagree about
+    /// them — the manifest reads it through `dolbyVisionBrand`, the muxer
+    /// through `HLSRemuxer.shouldStripDolbyVisionRecord`:
+    ///
+    /// - **5** — presentable, and the record is not an upgrade but the
+    ///   *description* of an IPT-PQc2 picture.
+    /// - **8.1 / 8.4**, and their AV1 siblings **10.1 / 10.4** — presentable:
+    ///   an HDR10 or HLG base the `dvvC` upgrades. Profile 10 is listed by
+    ///   Apple's HLS authoring appendices alongside 8; it cannot reach the HEVC
+    ///   remux path today, and it is named here so that when it can, a record
+    ///   the platform supports is not thrown away by this rule.
+    /// - **everything else** — 8.2's Rec.709 base, dual-layer 7, and any
+    ///   profile we don't recognise. No manifest claim is printed for these, so
+    ///   no record may be written for them either.
+    public var isPresentableAsDolbyVision: Bool {
+        if isSingleLayerDVOnly { return true }
+        guard profile == 8 || profile == 10 else { return false }
+        return baseLayerSignalCompatibilityID == 1 || baseLayerSignalCompatibilityID == 4
+    }
 }
 
 /// What the native (HLS-fMP4 + AVPlayer) path can do with a stream.
