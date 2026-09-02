@@ -8,6 +8,30 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-09-02
+
+### Dolby Vision
+
+- **A Profile 7 title no longer plays as a black picture with sound.** The
+  enhancement layer is `unspec63` — NAL **type** 63 — and it shares
+  `nuh_layer_id == 0` with the base layer and with the RPU. The converter
+  dropped it by `layerID != 0`, a test that therefore never matched: every NAL
+  in a real Profile 7 stream is layer 0. So the enhancement layer rode straight
+  through into an fMP4 whose `dvvC` declares `el_present = 0`, and AVPlayer was
+  handed a stream *declared* single-layer 8.1 that still *contained* the
+  enhancement layer. The base layer decoded — which is why the audio played and
+  why no decode error was ever reported — and the Dolby Vision path did not.
+  With Dolby Vision switched off nothing claims DV, AVPlayer ignores an unknown
+  NAL type, and the same file played: exactly the shape the report had.
+
+  `droppedEnhancementLayerNALs` reading zero on a real disc was the symptom, not
+  the expected result. It had been explained away in `RealMediaVerificationTests`
+  as Matroska keeping the EL in block additions the demuxer never hands over;
+  that note was wrong and is now an assertion, so the drop path cannot quietly
+  stop matching again. The predicate moved to
+  `DolbyVisionRPUConverter.isEnhancementLayer(type:layerID:)` — pure, and
+  provable without libdovi or a disc, because the whole bug lived in it.
+
 ## [2.0.0] — 2026-08-27
 
 A major bump, not a minor one, because the host-visible contract moved: `start()` returns on video-only readiness (renditions may still be pending), dialogue-boost renditions are produced lazily on first fetch, retention and producer lead now apply in the sequential shape too, and the software pipeline gained `load(probed:)` / `openSoftware(probed:)`. Everything below landed in PRs #68, #69, #71, #73, #75 (umbrella #65).

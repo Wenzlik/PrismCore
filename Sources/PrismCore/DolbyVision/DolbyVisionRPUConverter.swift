@@ -40,6 +40,12 @@ final class DolbyVisionRPUConverter {
     /// HDR10, which is what makes the fallback honest when DV isn't engaged.
     private static let convertToProfile81: UInt8 = 2
 
+    /// `unspec63` — how a muxed dual-layer HEVC stream carries the Dolby Vision
+    /// enhancement layer. The RPU is `unspec62`; the EL is this. Both sit on
+    /// `nuh_layer_id == 0`, which is why the layer id cannot be used to find
+    /// either of them.
+    private static let nalTypeEnhancementLayer: UInt8 = 63
+
     /// Whether conversion can run at all in this build.
     static var isAvailable: Bool {
         #if canImport(Libdovi)
@@ -88,7 +94,26 @@ final class DolbyVisionRPUConverter {
     private func dispose(_ unit: HEVCNALUnits.Unit) -> HEVCNALUnits.Disposition {
         // The enhancement layer goes first: it is the larger half of the
         // saving, and an EL NAL never carries an RPU we want.
-        if unit.layerID != 0 {
+        //
+        // It is identified by NAL TYPE 63 (`unspec63`), not by `nuh_layer_id`.
+        // That distinction was this converter's central bug: a muxed dual-layer
+        // stream carries its EL as unspec63 with `nuh_layer_id == 0` — every
+        // NAL in a real P7 stream is layer 0 — so the `layerID != 0` test below
+        // never fired and the EL rode straight through into an fMP4 whose
+        // `dvvC` declares `el_present = 0`. AVPlayer was handed a stream
+        // declared single-layer 8.1 that still contained the enhancement layer:
+        // the base layer decoded (which is why audio played and no decode error
+        // was ever reported), the Dolby Vision path did not, and the viewer got
+        // a black picture. With Dolby Vision off nothing claims DV, AVPlayer
+        // ignores an unknown NAL type, and the same file plays — which is
+        // exactly the shape the bug report had.
+        //
+        // The `layerID` test stays as well: a genuinely layered carriage would
+        // put the EL on a non-zero layer, and dropping it there is equally
+        // right. `droppedEnhancementLayerNALs` reading zero on a real P7 source
+        // was the symptom, not the expected result — see the note in
+        // `RealMediaVerificationTests`.
+        if Self.isEnhancementLayer(type: unit.type, layerID: unit.layerID) {
             droppedEnhancementLayerNALs += 1
             return .drop
         }
@@ -105,6 +130,16 @@ final class DolbyVisionRPUConverter {
         }
         convertedRPUs += 1
         return .replace(converted)
+    }
+
+    /// Whether this NAL is enhancement layer, and so must not reach a stream
+    /// declared single-layer 8.1.
+    ///
+    /// Pure and `internal` on purpose: the whole bug was in this one predicate,
+    /// and it must stay provable without libdovi or a real disc — the converter
+    /// itself cannot even be constructed in a build that has neither.
+    static func isEnhancementLayer(type: UInt8, layerID: UInt8) -> Bool {
+        type == nalTypeEnhancementLayer || layerID != 0
     }
 
     /// One RPU NAL (including its two-byte HEVC header) through libdovi.

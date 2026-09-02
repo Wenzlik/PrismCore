@@ -127,13 +127,18 @@ struct RealMediaVerificationTests {
             """
         )
         #expect(result.failedRPUs == 0, "libdovi refused \(result.failedRPUs) RPUs")
-        // Deliberately NOT asserting that enhancement-layer NALs were dropped.
-        // On a real P7 MKV the count is zero, and that is correct: Matroska
-        // carries the EL as block additions, and libavformat's matroska demuxer
-        // doesn't hand them to us at all — so the packets we rewrite are already
-        // base-layer-only. The drop path exists for single-track streams that do
-        // interleave layers; here there is simply nothing to drop.
-        print("(dropped EL NALs = \(result.droppedEnhancementLayerNALs); zero is expected for Matroska)")
+        // This count reading zero used to be explained away as "Matroska keeps
+        // the EL in block additions the demuxer never hands us". That was
+        // wrong, and it hid the converter's central bug: the EL is `unspec63`
+        // on `nuh_layer_id == 0`, so the old `layerID != 0` drop test never
+        // matched and the enhancement layer rode through into a stream whose
+        // `dvvC` declared `el_present = 0` — which is what made a P7 FEL title
+        // play as a black picture with sound.
+        //
+        // So it is asserted now: a dual-layer source reporting no dropped EL
+        // NALs means the drop path stopped matching again, and the only
+        // visible symptom of that is a viewer reporting a black screen.
+        #expect(result.droppedEnhancementLayerNALs > 0, "no enhancement-layer NAL was dropped from a Profile 7 source. The EL is unspec63 (NAL type 63) and shares nuh_layer_id == 0 with the base layer, so a layer-id test cannot find it - check DolbyVisionRPUConverter.isEnhancementLayer.")
     }
 
     /// Fetch the served init segment, waiting for the producer to mint it.
