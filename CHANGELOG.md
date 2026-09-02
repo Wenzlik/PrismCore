@@ -8,6 +8,39 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-09-02
+
+Follow-up to 2.0.1, from a review pass 2.0.1 itself did not get.
+
+### Dolby Vision
+
+- **The conversion stats can no longer claim work that was thrown away.**
+  `dispose` counted converted RPUs and dropped enhancement-layer NALs during
+  the disposition walk — which finishes *before* `HEVCNALUnits.rewrite` asks for
+  an output buffer. If the packet did not frame, or the allocation failed, the
+  rewrite was abandoned and the demuxer's ORIGINAL bytes were emitted: an
+  enhancement layer and an unconverted Profile 7 RPU, inside a stream declared
+  single-layer 8.1 — the same mismatch that made a P7 title play black, on a
+  rarer path. The tallies said otherwise. They are now committed only once the
+  rewrite has landed, and a new `staleUnconvertedPackets` counts the packets
+  that went out stale; anything there makes `isClean` false.
+- `failedRPUs`'s documentation still said refused RPUs are "left in the stream
+  unconverted". They have been dropped since 2.0.1.
+- **The fuzz target claimed to model the converter and did not.** It inlined
+  `layerID != 0`, so it never exercised the drop path that actually matters —
+  which is part of why the `unspec63` bug survived a fuzzer. It goes through
+  `DolbyVisionRPUConverter.isEnhancementLayer` now, as does the pointer-rewrite
+  test, which built a layer-1 unit and called it "the P7 shape".
+
+### Known limitation
+
+A refused RPU is dropped, which degrades that frame to its clean HDR10 base —
+but the published `dvvC` still says `rpu_present = 1` and the master still
+advertises Dolby Vision, so the declaration outlives the metadata it describes.
+Making a refusal fatal (and re-serving with DV signalling removed) is the
+correct answer and is a behavioural change, so it is not in a patch release.
+`failedRPUs` and `isClean` are how a host sees it in the meantime.
+
 ## [2.0.1] — 2026-09-02
 
 ### Dolby Vision
@@ -1241,7 +1274,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.0.1...main
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.0.2...main
+[2.0.2]: https://github.com/Wenzlik/PrismCore/compare/2.0.1...2.0.2
 [2.0.1]: https://github.com/Wenzlik/PrismCore/compare/2.0.0...2.0.1
 [2.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/2.0.0
 [1.10.1]: https://github.com/Wenzlik/PrismCore/releases/tag/1.10.1

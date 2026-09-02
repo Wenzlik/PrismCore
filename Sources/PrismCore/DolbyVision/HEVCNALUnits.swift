@@ -98,13 +98,31 @@ enum HEVCNALUnits {
         lengthSize: Int,
         transform: (Unit) -> Disposition
     ) -> [UInt8]? {
-        bytes.withUnsafeBufferPointer { buffer in
-            var output: [UInt8]?
-            let written = rewrite(buffer, lengthSize: lengthSize, transform: transform) { size in
-                output = [UInt8](repeating: 0, count: size)
-                return output!.withUnsafeMutableBufferPointer { $0.baseAddress }
+        bytes.withUnsafeBufferPointer { buffer -> [UInt8]? in
+            // The scratch buffer is owned here, not borrowed from an Array:
+            // this used to hand back `output.withUnsafeMutableBufferPointer {
+            // $0.baseAddress }`, a pointer that is only valid INSIDE that
+            // closure — the copy loop then wrote through it after the closure
+            // had returned. Undefined behaviour that happened to work.
+            //
+            // `max(size, 1)` because zero-length output is legitimate: a packet
+            // that was nothing but enhancement layer and RPU leaves nothing
+            // behind. An empty `Array`'s `baseAddress` may be nil, which the
+            // copy loop would read as "could not allocate" and report as a
+            // refusal — while the production allocator (`av_buffer_alloc` plus
+            // padding) succeeds. The two shapes have to agree, because the
+            // converter's stale accounting reads that refusal.
+            var scratch: UnsafeMutablePointer<UInt8>?
+            var writtenBytes = 0
+            defer { scratch?.deallocate() }
+            let didWrite = rewrite(buffer, lengthSize: lengthSize, transform: transform) { size in
+                let allocation = UnsafeMutablePointer<UInt8>.allocate(capacity: max(size, 1))
+                scratch = allocation
+                writtenBytes = size
+                return allocation
             }
-            return written ? output : nil
+            guard didWrite, let scratch else { return nil }
+            return [UInt8](UnsafeBufferPointer(start: scratch, count: writtenBytes))
         }
     }
 

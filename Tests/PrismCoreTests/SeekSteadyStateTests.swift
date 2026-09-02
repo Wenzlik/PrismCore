@@ -149,7 +149,10 @@ struct SeekSteadyStateTests {
 
     @Test("The pointer NAL rewrite produces byte-identical output to the array shape")
     func pointerRewriteMatchesArrayShape() throws {
-        // Three NALs: an SPS (33), a layer-1 EL unit, an RPU (62) — the P7 shape.
+        // Three NALs: an SPS (33), an `unspec63` EL unit on layer 0, an RPU (62)
+        // — the real P7 shape. This used to use a LAYER-1 unit and call that the
+        // P7 shape, which it is not: an interleaved P7 stream puts the EL, the RPU
+        // and the base layer all on layer 0.
         func nal(type: UInt8, layer: UInt8, payload: [UInt8]) -> [UInt8] {
             let header0 = (type << 1) | (layer >> 5)
             let header1 = (layer & 0x1F) << 3 | 1
@@ -158,20 +161,35 @@ struct SeekSteadyStateTests {
             return [UInt8(length >> 24 & 0xFF), UInt8(length >> 16 & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length & 0xFF)] + body
         }
         let packet = nal(type: 33, layer: 0, payload: [1, 2, 3, 4, 5])
-            + nal(type: 1, layer: 1, payload: Array(repeating: 9, count: 300))
+            + nal(type: 63, layer: 0, payload: Array(repeating: 9, count: 300))
             + nal(type: 62, layer: 0, payload: [7, 7, 7])
         let transform: (HEVCNALUnits.Unit) -> HEVCNALUnits.Disposition = { unit in
-            if unit.layerID != 0 { return .drop }
+            if DolbyVisionRPUConverter.isEnhancementLayer(type: unit.type, layerID: unit.layerID) {
+                return .drop
+            }
             if unit.type == 62 { return .replace([0x7C, 0x01, 0xAA, 0xBB, 0xCC, 0xDD]) }
             return .keep
         }
         let arrayShape = try #require(HEVCNALUnits.rewrite(packet, lengthSize: 4, transform: transform))
+        // Owns its scratch for the whole call: returning
+        // `pointerShape.withUnsafeMutableBufferPointer { $0.baseAddress }` hands
+        // back a pointer valid only inside that closure, and the copy loop
+        // writes through it afterwards — the same undefined behaviour the array
+        // overload itself was carrying.
         var pointerShape: [UInt8] = []
+        var scratch: UnsafeMutablePointer<UInt8>?
+        var scratchCount = 0
+        defer { scratch?.deallocate() }
         let written = packet.withUnsafeBufferPointer { buffer in
             HEVCNALUnits.rewrite(buffer, lengthSize: 4, transform: transform) { size in
-                pointerShape = [UInt8](repeating: 0, count: size)
-                return pointerShape.withUnsafeMutableBufferPointer { $0.baseAddress }
+                let allocation = UnsafeMutablePointer<UInt8>.allocate(capacity: max(size, 1))
+                scratch = allocation
+                scratchCount = size
+                return allocation
             }
+        }
+        if let scratch {
+            pointerShape = [UInt8](UnsafeBufferPointer(start: scratch, count: scratchCount))
         }
         #expect(written)
         #expect(pointerShape == arrayShape)

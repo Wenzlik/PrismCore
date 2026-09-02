@@ -320,7 +320,8 @@ final class HLSRemuxer: @unchecked Sendable {
         let stats = DolbyVisionConversionStats(
             convertedRPUs: converter.convertedRPUs,
             failedRPUs: converter.failedRPUs,
-            droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs
+            droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs,
+            staleUnconvertedPackets: converter.staleUnconvertedPackets
         )
         conversionStatsLock.withLock { storedConversionStats = stats }
     }
