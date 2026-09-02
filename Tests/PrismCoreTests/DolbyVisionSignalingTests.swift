@@ -277,6 +277,25 @@ struct DolbyVisionConversionDeclarationTests {
         )
     }
 
+    @Test("the enhancement layer is found by NAL type 63, not by layer id")
+    func enhancementLayerIsUnspec63() {
+        // The EL of a muxed dual-layer stream is `unspec63` and sits on
+        // `nuh_layer_id == 0`, exactly like the base layer and the RPU. A
+        // layer-id test therefore never finds it: that is how the EL used to
+        // ride through into a stream whose `dvvC` said `el_present = 0`, and
+        // how a Profile 7 FEL title came to play as a black picture with sound.
+        #expect(DolbyVisionRPUConverter.isEnhancementLayer(type: 63, layerID: 0))
+        // A layered carriage is still enhancement layer wherever it is.
+        #expect(DolbyVisionRPUConverter.isEnhancementLayer(type: 1, layerID: 1))
+        // What must survive: the base layer's pictures, its parameter sets and
+        // the RPU itself — the RPU is rewritten, never dropped.
+        #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 62, layerID: 0))
+        #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 1, layerID: 0))
+        #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 32, layerID: 0))
+        #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 33, layerID: 0))
+        #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 34, layerID: 0))
+    }
+
     @Test("the converted configuration is single-layer 8.1 at the same level")
     func convertedShape() {
         let converted = profile7().convertedToProfile81
