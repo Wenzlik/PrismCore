@@ -277,6 +277,34 @@ struct DolbyVisionConversionDeclarationTests {
         )
     }
 
+    @Test("the conversion tallies land per packet, and a packet that went out stale is counted")
+    func conversionAccounting() throws {
+        // The converter cannot be constructed without libdovi, which is the
+        // same gap that let the `unspec63` bug ship untested — so skip where
+        // the library isn't linked rather than fail. `isEnhancementLayer` above
+        // is the part that stays provable everywhere.
+        guard DolbyVisionRPUConverter.isAvailable else { return }
+        let converter = try #require(DolbyVisionRPUConverter(lengthSize: 4))
+
+        // A framed packet carrying an enhancement layer: dropped, counted once.
+        _ = converter.convert(packet: packet([nal(type: 1), nal(type: 63, payload: 0xEE)]))
+        #expect(converter.droppedEnhancementLayerNALs == 1)
+        #expect(converter.staleUnconvertedPackets == 0)
+
+        // A framed packet with nothing to change moves nothing and is not stale
+        // — `rewrite` reporting "no change" is the normal case, not a refusal.
+        _ = converter.convert(packet: packet([nal(type: 1)]))
+        #expect(converter.droppedEnhancementLayerNALs == 1)
+        #expect(converter.staleUnconvertedPackets == 0)
+
+        // A packet that does not frame goes to the muxer unexamined, and the
+        // tallies cannot see it: `rewrite` validates the whole packet before
+        // `dispose` runs, so nothing is ever decided. It is counted here.
+        _ = converter.convert(packet: [0xFF, 0xFF, 0xFF, 0xFF, 0x01])
+        #expect(converter.staleUnconvertedPackets == 1)
+        #expect(converter.droppedEnhancementLayerNALs == 1)
+    }
+
     @Test("the enhancement layer is found by NAL type 63, not by layer id")
     func enhancementLayerIsUnspec63() {
         // The EL of a muxed dual-layer stream is `unspec63` and sits on

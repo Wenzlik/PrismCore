@@ -106,7 +106,13 @@ final class DolbyVisionRPUConverter {
     func convert(packet bytes: [UInt8]) -> [UInt8]? {
         resetPending()
         let rewritten = HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose)
-        commitPending(rewrote: rewritten != nil)
+        commitPending(
+            rewrote: rewritten != nil,
+            // Only asked when the rewrite did not land — `||` short-circuits,
+            // so a normal packet never pays for the second walk.
+            framed: rewritten != nil
+                || HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) != nil
+        )
         return rewritten
     }
 
@@ -121,7 +127,10 @@ final class DolbyVisionRPUConverter {
         let rewrote = HEVCNALUnits.rewrite(
             bytes, lengthSize: lengthSize, transform: dispose, into: allocate
         )
-        commitPending(rewrote: rewrote)
+        commitPending(
+            rewrote: rewrote,
+            framed: rewrote || HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) != nil
+        )
         return rewrote
     }
 
@@ -136,10 +145,15 @@ final class DolbyVisionRPUConverter {
     /// every packet of every non-P7 source), or the rewrite was WANTED and
     /// refused. The pending tally tells them apart: work was decided, so the
     /// original bytes went out stale.
-    private func commitPending(rewrote: Bool) {
+    private func commitPending(rewrote: Bool, framed: Bool) {
         let decidedAChange = pendingConverted + pendingFailed + pendingDropped > 0
         guard rewrote else {
-            if decidedAChange { staleUnconvertedPackets += 1 }
+            // A packet that did not FRAME is stale too, and the pending tally
+            // cannot see it: `HEVCNALUnits.rewrite` validates the whole packet
+            // before it calls `dispose`, so nothing was ever decided and the
+            // original went to the muxer unexamined — enhancement layer and
+            // unconverted RPU included.
+            if decidedAChange || !framed { staleUnconvertedPackets += 1 }
             resetPending()
             return
         }
