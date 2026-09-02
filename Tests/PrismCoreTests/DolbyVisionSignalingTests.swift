@@ -287,8 +287,10 @@ struct DolbyVisionConversionDeclarationTests {
         #expect(DolbyVisionRPUConverter.isEnhancementLayer(type: 63, layerID: 0))
         // A layered carriage is still enhancement layer wherever it is.
         #expect(DolbyVisionRPUConverter.isEnhancementLayer(type: 1, layerID: 1))
-        // What must survive: the base layer's pictures, its parameter sets and
-        // the RPU itself — the RPU is rewritten, never dropped.
+        // What this predicate must never claim: the base layer's pictures, its
+        // parameter sets, or the RPU. The RPU is rewritten — or dropped when
+        // libdovi refuses it, which is a different decision made below this
+        // predicate, not enhancement-layer carriage.
         #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 62, layerID: 0))
         #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 1, layerID: 0))
         #expect(!DolbyVisionRPUConverter.isEnhancementLayer(type: 32, layerID: 0))

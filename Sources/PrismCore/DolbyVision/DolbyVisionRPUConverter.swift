@@ -70,6 +70,29 @@ final class DolbyVisionRPUConverter {
     private(set) var failedRPUs = 0
     private(set) var droppedEnhancementLayerNALs = 0
 
+    /// Packets this converter DECIDED to rewrite and then could not: the walk
+    /// found an RPU or an enhancement layer, but `HEVCNALUnits.rewrite` refused
+    /// — the packet did not frame, or the output buffer could not be allocated.
+    /// The demuxer's original bytes are emitted in that case, so such a packet
+    /// reaches the muxer with its enhancement layer and its unconverted
+    /// Profile 7 RPU intact, inside a stream declared single-layer 8.1. That is
+    /// the same mismatch that made a P7 title play black, so it is counted and
+    /// it makes `isClean` false rather than passing silently.
+    private(set) var staleUnconvertedPackets = 0
+
+    /// Per-packet tallies, committed to the counters above only once the
+    /// rewrite has actually landed.
+    ///
+    /// `dispose` runs during the disposition WALK, which finishes before
+    /// `rewrite` asks for a buffer — so counting there and stopping counted
+    /// work that was then thrown away by a framing or allocation failure, while
+    /// the stale original went out. The stats said the enhancement layer had
+    /// been dropped when it had not: exactly the reading that hid the
+    /// `unspec63` bug in the first place.
+    private var pendingConverted = 0
+    private var pendingFailed = 0
+    private var pendingDropped = 0
+
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
     ///   width the packet can't be walked at all.
@@ -81,7 +104,10 @@ final class DolbyVisionRPUConverter {
     /// Converted packet payload, or `nil` when this packet needed no change (the
     /// caller then writes the original buffer untouched).
     func convert(packet bytes: [UInt8]) -> [UInt8]? {
-        HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose)
+        resetPending()
+        let rewritten = HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose)
+        commitPending(rewrote: rewritten != nil)
+        return rewritten
     }
 
     /// The copy loop's shape: walk the packet's own buffer, and only when
@@ -91,7 +117,36 @@ final class DolbyVisionRPUConverter {
         packet bytes: UnsafeBufferPointer<UInt8>,
         into allocate: (Int) -> UnsafeMutablePointer<UInt8>?
     ) -> Bool {
-        HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose, into: allocate)
+        resetPending()
+        let rewrote = HEVCNALUnits.rewrite(
+            bytes, lengthSize: lengthSize, transform: dispose, into: allocate
+        )
+        commitPending(rewrote: rewrote)
+        return rewrote
+    }
+
+    private func resetPending() {
+        pendingConverted = 0
+        pendingFailed = 0
+        pendingDropped = 0
+    }
+
+    /// `rewrote == false` means one of two things, and only one of them is
+    /// harmless: either nothing needed changing (no RPU, no enhancement layer —
+    /// every packet of every non-P7 source), or the rewrite was WANTED and
+    /// refused. The pending tally tells them apart: work was decided, so the
+    /// original bytes went out stale.
+    private func commitPending(rewrote: Bool) {
+        let decidedAChange = pendingConverted + pendingFailed + pendingDropped > 0
+        guard rewrote else {
+            if decidedAChange { staleUnconvertedPackets += 1 }
+            resetPending()
+            return
+        }
+        convertedRPUs += pendingConverted
+        failedRPUs += pendingFailed
+        droppedEnhancementLayerNALs += pendingDropped
+        resetPending()
     }
 
     private func dispose(_ unit: HEVCNALUnits.Unit) -> HEVCNALUnits.Disposition {
@@ -117,12 +172,12 @@ final class DolbyVisionRPUConverter {
         // was the symptom, not the expected result — see the note in
         // `RealMediaVerificationTests`.
         if Self.isEnhancementLayer(type: unit.type, layerID: unit.layerID) {
-            droppedEnhancementLayerNALs += 1
+            pendingDropped += 1
             return .drop
         }
         guard unit.type == 62 else { return .keep }
         guard let converted = Self.convertRPU(Array(unit.bytes)) else {
-            failedRPUs += 1
+            pendingFailed += 1
             // Drop it. The old code kept the unconverted RPU, on the reasoning
             // that the 8.1 claim is only made when conversion succeeded — which
             // is not true: `HLSRemuxer` declares 8.1 because a converter EXISTS
@@ -139,7 +194,7 @@ final class DolbyVisionRPUConverter {
             // reports it to the host.
             return .drop
         }
-        convertedRPUs += 1
+        pendingConverted += 1
         return .replace(converted)
     }
 
@@ -182,18 +237,37 @@ final class DolbyVisionRPUConverter {
 public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// RPU NALs rewritten into single-layer 8.1 form.
     public let convertedRPUs: Int
-    /// RPU NALs libdovi refused. Left in the stream unconverted (see the
-    /// converter): a non-zero count here means the 8.1 declaration is not
+    /// RPU NALs libdovi refused. DROPPED, not left in place (which is what this
+    /// said, and did, before 2.0.1): a stale Profile 7 RPU inside a container
+    /// declaring `profile 8` is the same mismatch that made a P7 title play
+    /// black. A non-zero count here means the 8.1 declaration stopped
     /// describing every frame, which is worth a host's log line.
     public let failedRPUs: Int
     /// Enhancement-layer NALs dropped — the other half of making a dual-layer
     /// stream single-layer.
     public let droppedEnhancementLayerNALs: Int
+    /// Packets the converter decided to rewrite and could not — the packet did
+    /// not frame, or the output buffer could not be allocated — so the
+    /// demuxer's original bytes went out with their enhancement layer and their
+    /// unconverted RPU intact, inside a stream declared single-layer 8.1.
+    ///
+    /// Counted separately because the tallies above deliberately no longer
+    /// include that work: they are committed only once a rewrite has landed.
+    /// Anything here is the black-screen mismatch on a rarer path.
+    public let staleUnconvertedPackets: Int
 
-    public init(convertedRPUs: Int, failedRPUs: Int, droppedEnhancementLayerNALs: Int) {
+    /// `staleUnconvertedPackets` defaults so that 2.0.x stays source
+    /// compatible for anyone constructing this.
+    public init(
+        convertedRPUs: Int,
+        failedRPUs: Int,
+        droppedEnhancementLayerNALs: Int,
+        staleUnconvertedPackets: Int = 0
+    ) {
         self.convertedRPUs = convertedRPUs
         self.failedRPUs = failedRPUs
         self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
+        self.staleUnconvertedPackets = staleUnconvertedPackets
     }
 
     /// Every RPU converted, none refused, and the enhancement layer actually
@@ -206,7 +280,10 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// in that state again, nothing will report it but a viewer with a black
     /// screen.
     public var isClean: Bool {
-        failedRPUs == 0 && convertedRPUs > 0 && droppedEnhancementLayerNALs > 0
+        failedRPUs == 0
+            && convertedRPUs > 0
+            && droppedEnhancementLayerNALs > 0
+            && staleUnconvertedPackets == 0
     }
 }
 

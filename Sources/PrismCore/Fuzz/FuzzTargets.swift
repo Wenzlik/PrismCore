@@ -102,10 +102,18 @@ package enum FuzzTargets {
 
             // The Dolby Vision converter's exact shape: drop enhancement-layer
             // NALs, replace the RPU type.
+            //
+            // Through the converter's own predicate, deliberately. This used to
+            // inline `layerID != 0`, which is not what the converter does and
+            // not how a P7 stream carries its enhancement layer (`unspec63` on
+            // layer 0) — so the fuzzer claimed to model the converter while
+            // never once exercising the drop path that mattered.
             let replacement: [UInt8] = [0x7C, 0x01, 0xAA]
             guard let rewritten = HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: {
                 unit in
-                if unit.layerID != 0 { return .drop }
+                if DolbyVisionRPUConverter.isEnhancementLayer(
+                    type: unit.type, layerID: unit.layerID
+                ) { return .drop }
                 if unit.type == 62 { return .replace(replacement) }
                 return .keep
             }) else { continue }
