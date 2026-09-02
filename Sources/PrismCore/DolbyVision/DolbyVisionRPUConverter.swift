@@ -15,8 +15,11 @@ import Libdovi
 /// RPU — so the conversion is two edits and no re-encode:
 ///
 /// 1. rewrite each RPU (NAL type 62) into its 8.1 form, and
-/// 2. drop the enhancement layer, i.e. every NAL whose `nuh_layer_id` is
-///    non-zero.
+/// 2. drop the enhancement layer — every `unspec63` NAL (type 63). NOT "every
+///    non-zero `nuh_layer_id`", which is what this used to say and do: an
+///    interleaved P7 stream puts the EL, the RPU and the base layer all on
+///    layer 0, so that test never matched and the EL survived into a stream
+///    declared single-layer (see `isEnhancementLayer`).
 ///
 /// The base layer's picture NALs are untouched: the bits AVPlayer receives are
 /// still the source's own, which is the whole premise of the remux path. What the
@@ -120,13 +123,21 @@ final class DolbyVisionRPUConverter {
         guard unit.type == 62 else { return .keep }
         guard let converted = Self.convertRPU(Array(unit.bytes)) else {
             failedRPUs += 1
-            // Keep the unconverted RPU rather than dropping it. A P7 RPU in
-            // a stream declared 8.1 is wrong, but the declaration is what
-            // this session's master says — and `HLSRemuxer` only makes that
-            // claim when conversion succeeded (see `dolbyVisionForOutput`).
-            // Dropping RPUs here would instead corrupt the DV metadata of a
-            // stream we may still be serving as honest P7-to-Prism.
-            return .keep
+            // Drop it. The old code kept the unconverted RPU, on the reasoning
+            // that the 8.1 claim is only made when conversion succeeded — which
+            // is not true: `HLSRemuxer` declares 8.1 because a converter EXISTS
+            // (`outputDolbyVision`), before a single packet has been through it,
+            // and the master and init segment are published long before any
+            // failure could be known. Keeping the RPU therefore shipped a P7 RPU
+            // inside a container declaring `profile 8` and `el_present = 0` —
+            // the same class of lie as the enhancement layer riding through
+            // above, and the same black picture.
+            //
+            // Dropping degrades that frame to its clean HDR10 base, which the
+            // container already describes correctly. `failedRPUs` is what says
+            // the 8.1 declaration stopped covering every frame, and `isClean`
+            // reports it to the host.
+            return .drop
         }
         convertedRPUs += 1
         return .replace(converted)
@@ -185,8 +196,18 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
         self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
     }
 
-    /// Every RPU converted, none refused.
-    public var isClean: Bool { failedRPUs == 0 && convertedRPUs > 0 }
+    /// Every RPU converted, none refused, and the enhancement layer actually
+    /// gone.
+    ///
+    /// The EL clause is not belt-and-braces: a dual-layer source reporting zero
+    /// dropped EL NALs is precisely the state that hid the `unspec63` bug for
+    /// as long as it did — the conversion looked clean while the stream still
+    /// carried the layer its own `dvvC` said was absent. If this can read clean
+    /// in that state again, nothing will report it but a viewer with a black
+    /// screen.
+    public var isClean: Bool {
+        failedRPUs == 0 && convertedRPUs > 0 && droppedEnhancementLayerNALs > 0
+    }
 }
 
 extension DolbyVisionConfiguration {

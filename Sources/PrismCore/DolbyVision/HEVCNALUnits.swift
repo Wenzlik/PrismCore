@@ -14,8 +14,12 @@ enum HEVCNALUnits {
         /// `nal_unit_type`: 32 VPS, 33 SPS, 34 PPS, 39/40 SEI, 62 the
         /// unspecified type Dolby Vision carries its RPU in.
         let type: UInt8
-        /// `nuh_layer_id`. Non-zero is an enhancement layer — what makes a
-        /// Profile 7 stream dual-layer, and what no Apple decoder will take.
+        /// `nuh_layer_id`. Non-zero means a layered carriage, which no Apple
+        /// decoder will take — but it is NOT how an interleaved Profile 7
+        /// stream carries its enhancement layer: there the EL is `unspec63`
+        /// (see `type`) and sits on layer 0 like everything else. Reading the
+        /// dual layer off this field is the bug that shipped the EL inside a
+        /// stream declared single-layer 8.1.
         let layerID: UInt8
         /// The whole NAL unit including its two-byte header, without the length
         /// prefix. A view into the caller's buffer: valid for the duration of
