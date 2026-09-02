@@ -105,14 +105,15 @@ final class DolbyVisionRPUConverter {
     /// caller then writes the original buffer untouched).
     func convert(packet bytes: [UInt8]) -> [UInt8]? {
         resetPending()
-        let rewritten = HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize, transform: dispose)
-        commitPending(
-            rewrote: rewritten != nil,
-            // Only asked when the rewrite did not land — `||` short-circuits,
-            // so a normal packet never pays for the second walk.
-            framed: rewritten != nil
-                || HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) != nil
-        )
+        // `transform` runs only after `rewrite` has validated the whole packet,
+        // so having been called at all IS the proof that it framed — no second
+        // walk, on any path.
+        var framed = false
+        let rewritten = HEVCNALUnits.rewrite(bytes, lengthSize: lengthSize) { unit in
+            framed = true
+            return self.dispose(unit)
+        }
+        commitPending(rewrote: rewritten != nil, framed: framed)
         return rewritten
     }
 
@@ -124,13 +125,17 @@ final class DolbyVisionRPUConverter {
         into allocate: (Int) -> UnsafeMutablePointer<UInt8>?
     ) -> Bool {
         resetPending()
+        var framed = false
         let rewrote = HEVCNALUnits.rewrite(
-            bytes, lengthSize: lengthSize, transform: dispose, into: allocate
+            bytes,
+            lengthSize: lengthSize,
+            transform: { unit in
+                framed = true
+                return self.dispose(unit)
+            },
+            into: allocate
         )
-        commitPending(
-            rewrote: rewrote,
-            framed: rewrote || HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) != nil
-        )
+        commitPending(rewrote: rewrote, framed: framed)
         return rewrote
     }
 

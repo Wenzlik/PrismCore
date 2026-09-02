@@ -171,12 +171,25 @@ struct SeekSteadyStateTests {
             return .keep
         }
         let arrayShape = try #require(HEVCNALUnits.rewrite(packet, lengthSize: 4, transform: transform))
+        // Owns its scratch for the whole call: returning
+        // `pointerShape.withUnsafeMutableBufferPointer { $0.baseAddress }` hands
+        // back a pointer valid only inside that closure, and the copy loop
+        // writes through it afterwards — the same undefined behaviour the array
+        // overload itself was carrying.
         var pointerShape: [UInt8] = []
+        var scratch: UnsafeMutablePointer<UInt8>?
+        var scratchCount = 0
+        defer { scratch?.deallocate() }
         let written = packet.withUnsafeBufferPointer { buffer in
             HEVCNALUnits.rewrite(buffer, lengthSize: 4, transform: transform) { size in
-                pointerShape = [UInt8](repeating: 0, count: size)
-                return pointerShape.withUnsafeMutableBufferPointer { $0.baseAddress }
+                let allocation = UnsafeMutablePointer<UInt8>.allocate(capacity: max(size, 1))
+                scratch = allocation
+                scratchCount = size
+                return allocation
             }
+        }
+        if let scratch {
+            pointerShape = [UInt8](UnsafeBufferPointer(start: scratch, count: scratchCount))
         }
         #expect(written)
         #expect(pointerShape == arrayShape)
