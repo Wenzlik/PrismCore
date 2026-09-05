@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// One playback session: remux `sourceURL` into HLS-fMP4 on disk and serve it
 /// from the loopback. The host plays the returned playlist URL with its own
@@ -43,6 +44,26 @@ import Foundation
 /// above into a double handshake. `MasterRejection` remains the backstop for
 /// the panel states no read can prove (Match Content off on an HDR panel).
 public actor PrismCoreSession {
+    private let cachedPreview = CachedSegmentPreview()
+    private var stopped = false
+    public var audioDelaySeconds: Double { configuration.audioDelaySeconds }
+    /// Summary of usable base audio routes. Inspect audioTrackDeliveries when
+    /// multiple renditions have different outcomes; the host owns selection.
+    public nonisolated var audioDelivery: AudioDelivery { remuxer.audioDeliveryStore.summary }
+    public nonisolated var audioTrackDeliveries: [AudioTrackDelivery] { remuxer.audioDeliveryStore.snapshot }
+
+    /// Completed video intervals on the SOURCE timestamp axis, which may have
+    /// a nonzero origin. Not AVPlayer.loadedTimeRanges. Poll for timeline UI.
+    public nonisolated var residentRanges: [ResidentRange] { remuxer.residentSegments.ranges }
+
+    /// A segment-granularity still, or nil when that interval is not resident.
+    /// Never opens the source or asks the producer to seek. The requested time
+    /// uses the same source axis as residentRanges.
+    public func cachedThumbnail(at seconds: Double, maxDimension: Int = 320) async throws -> CGImage? {
+        guard !stopped, let snapshot = remuxer.residentSegments.snapshot(at: seconds, root: workDirectory) else { return nil }
+        let image = try await cachedPreview.image(index: snapshot.index, data: snapshot.data, maxDimension: maxDimension)
+        return stopped ? nil : image
+    }
 
     public enum SessionError: Error {
         /// The remux produced no playable playlist within the startup budget.
@@ -65,6 +86,8 @@ public actor PrismCoreSession {
         var forceMuxedShape: Bool
         var keyframeIndexCacheDirectory: URL?
         var dialogueBoost: [DialogueBoostLevel]
+        var audioDelaySeconds: Double
+        var coordinatedHTTP: Bool
     }
 
     private let configuration: Configuration
@@ -223,7 +246,9 @@ public actor PrismCoreSession {
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
-        dialogueBoost: [DialogueBoostLevel] = []
+        dialogueBoost: [DialogueBoostLevel] = [],
+        audioDelaySeconds: Double = 0,
+        coordinatedHTTP: Bool = false
     ) throws {
         try self.init(
             url: url,
@@ -235,7 +260,9 @@ public actor PrismCoreSession {
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
-            dialogueBoost: dialogueBoost
+            dialogueBoost: dialogueBoost,
+            audioDelaySeconds: audioDelaySeconds,
+            coordinatedHTTP: coordinatedHTTP
         )
     }
 
@@ -271,7 +298,9 @@ public actor PrismCoreSession {
         forceMuxedShape: Bool = false,
         probed: ProbedSource? = nil,
         keyframeIndexCacheDirectory: URL? = nil,
-        dialogueBoost: [DialogueBoostLevel] = []
+        dialogueBoost: [DialogueBoostLevel] = [],
+        audioDelaySeconds: Double = 0,
+        coordinatedHTTP: Bool = false
     ) throws {
         self.configuration = Configuration(
             url: url,
@@ -280,7 +309,9 @@ public actor PrismCoreSession {
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
-            dialogueBoost: dialogueBoost
+            dialogueBoost: dialogueBoost,
+            audioDelaySeconds: AudioDelay.normalized(audioDelaySeconds),
+            coordinatedHTTP: coordinatedHTTP || probed?.interruptGuard.usesCoordinatedHTTP == true
         )
 
         let directory = FileManager.default.temporaryDirectory
@@ -312,6 +343,8 @@ public actor PrismCoreSession {
             landed: landed
         )
         self.remuxer = remuxer
+        remuxer.audioDelaySeconds = AudioDelay.normalized(audioDelaySeconds)
+        remuxer.coordinatedHTTP = configuration.coordinatedHTTP
         var provider = PlanSegmentProvider(root: directory, coordinator: demand, landed: landed)
         // The demand seam for lazy OCR: a `.vtt` fetch is what arms a bitmap
         // rendition, so a 29-PGS-track disc pays for the one track someone
@@ -341,7 +374,9 @@ public actor PrismCoreSession {
         segmentCacheBytes: Int? = 1 << 30,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
-        dialogueBoost: [DialogueBoostLevel] = []
+        dialogueBoost: [DialogueBoostLevel] = [],
+        audioDelaySeconds: Double = 0,
+        coordinatedHTTP: Bool = false
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -350,7 +385,9 @@ public actor PrismCoreSession {
             segmentCacheBytes: segmentCacheBytes,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
-            dialogueBoost: dialogueBoost
+            dialogueBoost: dialogueBoost,
+            audioDelaySeconds: audioDelaySeconds,
+            coordinatedHTTP: coordinatedHTTP
         )
     }
 
@@ -394,7 +431,9 @@ public actor PrismCoreSession {
             keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory,
             // Carried for fidelity, though the muxed shape can't serve it:
             // boost renditions live in a master, and this shape has none.
-            dialogueBoost: configuration.dialogueBoost
+            dialogueBoost: configuration.dialogueBoost,
+            audioDelaySeconds: configuration.audioDelaySeconds,
+            coordinatedHTTP: configuration.coordinatedHTTP
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback
@@ -437,7 +476,9 @@ public actor PrismCoreSession {
             segmentCacheBytes: configuration.segmentCacheBytes,
             forceMuxedShape: false,
             keyframeIndexCacheDirectory: configuration.keyframeIndexCacheDirectory,
-            dialogueBoost: configuration.dialogueBoost
+            dialogueBoost: configuration.dialogueBoost,
+            audioDelaySeconds: configuration.audioDelaySeconds,
+            coordinatedHTTP: configuration.coordinatedHTTP
         )
         try await replayExternalSubtitles(onto: fallback)
         return fallback
@@ -598,11 +639,14 @@ public actor PrismCoreSession {
 
     /// Cancel the remux, stop serving, and remove the session's segments.
     public func stop() async {
+        stopped = true
         // `cancel()` is the only stop signal the producer has (it also wakes a
         // parked one); the join then waits for the thread to notice, exactly as
         // awaiting the task's value used to.
         remuxer.cancel()
         await producer?.join()
+        remuxer.residentSegments.clear()
+        await cachedPreview.clear()
         await server.stop()
         try? FileManager.default.removeItem(at: workDirectory)
     }

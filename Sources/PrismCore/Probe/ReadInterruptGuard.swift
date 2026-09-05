@@ -27,6 +27,19 @@ final class ReadInterruptGuard: @unchecked Sendable {
 
     private let lock = NSLock()
     private var deadline: ContinuousClock.Instant?
+    private var cancelled = false
+    func cancel() { lock.withLock { cancelled = true } }
+    private var httpInput: HTTPRangeInput?
+    var usesCoordinatedHTTP: Bool { httpInput != nil }
+
+    func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
+                          headers: [String: String]) throws {
+        let input = HTTPRangeInput(url: url, headers: headers, interrupted: { [weak self] in
+            self?.shouldInterrupt ?? true
+        })
+        try input.install(on: context)
+        httpInput = input
+    }
 
     /// Start enforcing: reads abort (`AVERROR_EXIT`) once `budget` has passed.
     func arm(budget: Duration) {
@@ -41,7 +54,7 @@ final class ReadInterruptGuard: @unchecked Sendable {
     }
 
     var shouldInterrupt: Bool {
-        lock.withLock { deadline.map { ContinuousClock.now >= $0 } ?? false }
+        lock.withLock { cancelled || (deadline.map { ContinuousClock.now >= $0 } ?? false) }
     }
 
     /// The C-visible callback. Static so its address is stable; it reaches the

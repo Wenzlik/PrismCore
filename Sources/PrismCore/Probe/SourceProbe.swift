@@ -694,13 +694,14 @@ public enum SourceProbe {
     public static func openDetached(
         url: URL,
         httpHeaders: [String: String] = [:],
-        budget: Duration = SourceOpenTuning.probeBudget
+        budget: Duration = SourceOpenTuning.probeBudget,
+        coordinatedHTTP: Bool = false
     ) async throws -> ProbedSource {
         try Task.checkCancellation()
         let outcome: Result<ProbedSource, any Error> = await withCheckedContinuation { continuation in
             let thread = ProducerThread(name: "cz.zmrhal.prismcore.probe") {
                 continuation.resume(returning: Result {
-                    try open(url: url, httpHeaders: httpHeaders, budget: budget)
+                    try open(url: url, httpHeaders: httpHeaders, budget: budget, coordinatedHTTP: coordinatedHTTP)
                 })
             }
             // Kept alive by its own closure until it exits; nothing to join.
@@ -717,7 +718,8 @@ public enum SourceProbe {
     public static func open(
         url: URL,
         httpHeaders: [String: String] = [:],
-        budget: Duration = SourceOpenTuning.probeBudget
+        budget: Duration = SourceOpenTuning.probeBudget,
+        coordinatedHTTP: Bool = false
     ) throws -> ProbedSource {
         // The interrupt guard has to exist BEFORE the open — the blocking
         // reads check the URLContext's copy of the callback, taken at
@@ -726,6 +728,10 @@ public enum SourceProbe {
         // inherits this very context (see `ReadInterruptGuard`).
         let interruptGuard = ReadInterruptGuard()
         var input: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
+        if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let input {
+            do { try interruptGuard.installHTTPInput(on: input, url: url, headers: httpHeaders) }
+            catch { avformat_free_context(input); throw error }
+        }
 
         // Armed across the whole probe, disarmed on every way out — the
         // adopting producer wants the permanent-but-disarmed resting state.

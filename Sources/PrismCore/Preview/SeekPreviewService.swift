@@ -52,6 +52,7 @@ public actor SeekPreviewService {
     private let maxDimension: Int
     private let url: URL
     private let httpHeaders: [String: String]
+    private let coordinatedHTTP: Bool
     /// The cross-session keyframe map, when the host gave the session one —
     /// same directory, same identity, so a file that played once resolves
     /// scrub positions without touching the demuxer.
@@ -88,10 +89,12 @@ public actor SeekPreviewService {
         url: URL,
         httpHeaders: [String: String] = [:],
         maxDimension: Int = 320,
-        keyframeIndexCacheDirectory: URL? = nil
+        keyframeIndexCacheDirectory: URL? = nil,
+        coordinatedHTTP: Bool = false
     ) {
         self.url = url
         self.httpHeaders = httpHeaders
+        self.coordinatedHTTP = coordinatedHTTP
         self.maxDimension = max(32, maxDimension)
         self.keyframeCacheDirectory = keyframeIndexCacheDirectory
     }
@@ -261,6 +264,12 @@ public actor SeekPreviewService {
         let interruptGuard = ReadInterruptGuard()
         self.interruptGuard = interruptGuard
         var context = interruptGuard.makeContext()
+        if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let context {
+            do { try interruptGuard.installHTTPInput(on: context, url: url, headers: httpHeaders) }
+            catch { avformat_free_context(context); throw error }
+        }
+        interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
+        defer { interruptGuard.disarm() }
         let sourceSpec = url.isFileURL ? url.path : url.absoluteString
         try FFmpegError.check(
             avformat_open_input(&context, sourceSpec, nil, &openOptions),

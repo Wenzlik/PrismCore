@@ -415,6 +415,63 @@ track is playing, and the video assertions show the switch never touched the pic
 What no headless test can assert is that a frame reached a display. Still open there:
 subtitles (rendering and, with it, subtitle track selection) and frame-accurate seek.
 
+## Cache, audio diagnostics and HTTP policy
+
+```swift
+let session = try PrismCoreSession(
+    url: sourceURL,
+    display: .current(),
+    audioDelaySeconds: 0.150,       // present audio 150 ms later
+    coordinatedHTTP: true          // optional; finite HTTP(S) Range files only
+)
+let playlist = try await session.start()
+let ranges = session.residentRanges
+let routes = session.audioTrackDeliveries
+let preview = try await session.cachedThumbnail(at: sourceSeconds)
+```
+
+`residentRanges` and `cachedThumbnail` use **source timestamps**, including a
+nonzero source origin where present. A host must map these onto its player
+timeline. These are video-cache ranges, not AVPlayer's loaded ranges or a
+promise that a seek has no latency. Cache misses return `nil` without asking
+the source for data; previews show the segment's opening picture. Fragments
+above 64 MiB also return `nil`. The image cache holds at most 16 MiB / 32 images.
+
+`audioDelivery` summarizes available base routes, while `audioTrackDeliveries`
+lists each source track, including an unavailable one. The host owns actual
+AVPlayer track selection. A `.bridged` route describes its constructed pipeline;
+its `bridge` counters show whether output has actually been produced. Zero
+output during priming is normal. A terminal, completely drained silent bridge
+raises `AudioBridgeFailure.producedNoAudio` through the session error path.
+The software pipeline exposes `.decoded` only after its decoder opens.
+
+Audio delay is fixed at construction and preserved by fallback factories.
+Changing it during playback requires a replacement session and a host-managed
+handover at the current position. Both positive and negative offsets are bounded
+to two seconds; this does not add an AVPlayer transport controller to PrismCore.
+
+`coordinatedHTTP` is also available on `PrismCoreEngine.open`,
+`SourceProbe.open/openDetached`, `SeekPreviewService` and software `load(url:)`.
+Enable it consistently for the readers that should share a server's request
+budget. The default remains native FFmpeg I/O. The optional reader uses bounded
+1 MiB Range requests and requires valid `206`/`Content-Range` replies; it is not
+for live streams, nested HLS playlists or Range-less servers. A redirected
+request gets its destination's budget, drops caller headers on a cross-origin
+redirect, and refuses HTTPS-to-HTTP downgrade. Thus an authenticated redirect
+requiring forwarded custom headers should use the default transport or a final
+URL supplied by the host. CDN performance has not been benchmarked.
+
+To run the picture-based seek check on a Mac with AVFoundation rendering:
+
+```sh
+PRISMCORE_RENDERED_SEEK=1 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --filter pictureMatchesPlayerClockAfterSeeks
+```
+
+The committed `seek_clock.mkv` has a reproducible generator beside it and runs
+through a throttled, Range-capable test origin. The check reads actual decoded
+frame numbers after seeks; it does not infer success from muxer timestamps.
+
 ## Support
 
 Questions, integration help and bug reports:

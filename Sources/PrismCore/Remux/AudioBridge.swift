@@ -55,6 +55,8 @@ import Libswresample
 /// `isEncoderAvailable` reports that honestly and `HLSRemuxer` keeps its v0
 /// fallback when the answer is no — see the notes on that property.
 final class AudioBridge {
+    private(set) var progress = AudioBridgeProgress()
+    var onProgress: ((AudioBridgeProgress) -> Void)?
 
     enum Failure: Error, CustomStringConvertible {
         /// FFmpeg was built without the `eac3` encoder (stock MPVKit). Nothing
@@ -388,6 +390,9 @@ final class AudioBridge {
     var isDrained: Bool { drained }
 
     func reset() {
+        progress = AudioBridgeProgress()
+        progress.encoderFrameSamples = Int(encoderCtx?.pointee.frame_size ?? 0)
+        onProgress?(progress)
         if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
         if let fifo { av_audio_fifo_reset(fifo) }
         // The resampler's delay line belongs to the old position; dropping
@@ -447,6 +452,9 @@ final class AudioBridge {
     /// input and output framing don't line up).
     func feed(_ packet: UnsafeMutablePointer<AVPacket>, emit: Emit) throws {
         guard !drained, let decoderCtx else { return }
+        progress.inputPackets += 1
+        progress.encoderFrameSamples = Int(encoderCtx?.pointee.frame_size ?? 0)
+        defer { onProgress?(progress) }
         let sendResult = avcodec_send_packet(decoderCtx, packet)
         if sendResult < 0, sendResult != swift_AVERROR(EAGAIN) {
             throw FFmpegError(code: sendResult, operation: "avcodec_send_packet(audio)")
@@ -467,6 +475,7 @@ final class AudioBridge {
     /// After this the bridge is spent (see `drained`).
     func flush(emit: Emit) throws {
         guard !drained, let decoderCtx, let encoderCtx else { return }
+        defer { onProgress?(progress) }
 
         try FFmpegError.check(
             avcodec_send_packet(decoderCtx, nil),
@@ -491,6 +500,9 @@ final class AudioBridge {
         drained = true
         try FFmpegError.check(avcodec_send_frame(encoderCtx, nil), "avcodec_send_frame(flush)")
         try drainEncoder(emit: emit)
+        if progress.inputPackets > 0 && progress.outputPackets == 0 {
+            throw AudioBridgeFailure.producedNoAudio(progress)
+        }
     }
 
     private func drainDecoder(emit: Emit) throws {
@@ -499,6 +511,7 @@ final class AudioBridge {
             let result = avcodec_receive_frame(decoderCtx, frame)
             if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
             try FFmpegError.check(result, "avcodec_receive_frame(audio)")
+            progress.decodedFrames += 1
             defer { av_frame_unref(frame) }
 
             if let boostFilter {
@@ -601,6 +614,7 @@ final class AudioBridge {
             "av_audio_fifo_write"
         )
         chunker.appended(Int(produced))
+        progress.resampledSamples += Int(produced)
     }
 
     private func growConvertedBuffer(to samples: Int32) throws {
@@ -702,6 +716,7 @@ final class AudioBridge {
             }
             packet.pointee.pos = -1
             try emit(packet)
+            progress.outputPackets += 1
         }
     }
 
