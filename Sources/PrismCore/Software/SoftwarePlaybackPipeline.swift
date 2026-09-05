@@ -214,6 +214,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// call back on. That is the whole concurrency story: no locks around
     /// libav* state, because there is only ever one thread in it.
     private let feedQueue = DispatchQueue(label: "cz.aether.prismcore.software.feed", qos: .userInitiated)
+    /// Fixed for this pipeline; create a replacement to change already queued
+    /// audio. Positive values present audio later. Range: -2...2 seconds.
+    public private(set) var audioDelaySeconds: Double = 0
 
     private let stateLock = NSLock()
     private var storedState: State = .idle
@@ -222,6 +225,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private var storedSelectableAudioTracks: [AudioTrackInfo] = []
     /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
     private var storedSelectedAudioStreamIndex: Int32 = -1
+    public var audioDelivery: AudioDelivery {
+        stateLock.withLock {
+            guard let info = storedSourceInfo else { return .pending }
+            if info.audioTracks.isEmpty { return .noAudioInSource }
+            return storedSelectedAudioStreamIndex >= 0 ? .decoded : .unavailable
+        }
+    }
 
     // MARK: - Feed-queue state
 
@@ -315,14 +325,15 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     /// The shipping configuration: a real display layer, audio renderer and
     /// synchronizer.
-    public convenience init(allowHardwareDecode: Bool = true) {
+    public convenience init(allowHardwareDecode: Bool = true, audioDelaySeconds: Double = 0) {
         let video = DisplayLayerVideoSink()
         let audio = AudioRendererSink()
         self.init(
             videoSink: video,
             audioSink: audio,
             timeline: SynchronizerTimeline(),
-            allowHardwareDecode: allowHardwareDecode
+            allowHardwareDecode: allowHardwareDecode,
+            audioDelaySeconds: audioDelaySeconds
         )
     }
 
@@ -333,13 +344,15 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         audioSink: AudioSampleSink,
         timeline: RenderTimeline,
         pacing: Pacing = Pacing(),
-        allowHardwareDecode: Bool = true
+        allowHardwareDecode: Bool = true,
+        audioDelaySeconds: Double = 0
     ) {
         self.videoSink = videoSink
         self.audioSink = audioSink
         self.timeline = timeline
         self.pacing = pacing
         self.allowHardwareDecode = allowHardwareDecode
+        self.audioDelaySeconds = AudioDelay.normalized(audioDelaySeconds)
     }
 
     deinit {
@@ -364,9 +377,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     ///   the head and then seeks pays for a keyframe's worth of decode it
     ///   throws straight away, and shows the wrong picture for that long.
     ///   `nil` (or zero) starts at the head.
-    public func load(url: URL, httpHeaders: [String: String] = [:], startAt: CMTime? = nil) throws {
+    public func load(url: URL, httpHeaders: [String: String] = [:], startAt: CMTime? = nil, coordinatedHTTP: Bool = false) throws {
         try load(startAt: startAt) {
-            try openInput(url: url, httpHeaders: httpHeaders)
+            try openInput(url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP)
         }
     }
 
@@ -386,7 +399,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             if let adopted = probed.consumeContext() {
                 try adoptInput(adopted, from: probed)
             } else {
-                try openInput(url: probed.url, httpHeaders: probed.httpHeaders)
+                try openInput(url: probed.url, httpHeaders: probed.httpHeaders,
+                              coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP)
             }
         }
     }
@@ -760,7 +774,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// ride the demux connection, dropped HTTP connections reconnect, and the
     /// analysis runs under the shared read caps (`SourceOpenTuning`) — over a
     /// network this open IS the wait the user sees.
-    private func openInput(url: URL, httpHeaders: [String: String]) throws {
+    private func openInput(url: URL, httpHeaders: [String: String], coordinatedHTTP: Bool = false) throws {
         var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
         defer { av_dict_free(&openOptions) }
 
@@ -771,6 +785,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         let readGuard = ReadInterruptGuard()
         stateLock.withLock { interruptGuard = readGuard }
         var context = readGuard.makeContext()
+        if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let context {
+            do { try readGuard.installHTTPInput(on: context, url: url, headers: httpHeaders) }
+            catch { avformat_free_context(context); throw error }
+        }
         readGuard.arm(budget: SourceOpenTuning.probeBudget)
         defer { readGuard.disarm() }
 
@@ -813,7 +831,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             // open costs the round trip this path was meant to save, and is
             // the only way to start at the head there.
             teardownInput()
-            try openInput(url: probed.url, httpHeaders: probed.httpHeaders)
+            try openInput(url: probed.url, httpHeaders: probed.httpHeaders,
+                          coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP)
             return
         }
         try describeInput(using: probed.info)
@@ -1000,9 +1019,12 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             }
         }
         while let next = pendingAudio.first, audioSink.isReadyForMoreSamples {
-            audioSink.enqueue(next)
+            let delivered: CMSampleBuffer
+            do { delivered = try AudioDelay.shifted(next, seconds: audioDelaySeconds) }
+            catch { fail(error); return }
+            audioSink.enqueue(delivered)
             pendingAudio.removeFirst()
-            let end = Self.presentationEnd(of: next)
+            let end = Self.presentationEnd(of: delivered)
             if end.isValid, !lastEnqueuedAudioEnd.isValid || end > lastEnqueuedAudioEnd {
                 lastEnqueuedAudioEnd = end
             }
@@ -1066,7 +1088,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             setState(.ended)
             return
         }
-        endObserver = timeline.observeBoundary(end, on: feedQueue) { [weak self] in
+        endObserver = timeline.observeBoundary(end, on: feedQueue) { [weak self, end] in
             guard let self, !self.stopped else { return }
             self.endObserver = nil
             // A seek in between cancelled the observer, so reaching here

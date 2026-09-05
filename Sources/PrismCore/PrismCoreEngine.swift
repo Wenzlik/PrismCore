@@ -181,7 +181,9 @@ public enum PrismCoreEngine {
         url: URL,
         httpHeaders: [String: String] = [:],
         display: DisplayCapabilities = .conservative,
-        segmentCacheBytes: Int? = 1 << 30
+        segmentCacheBytes: Int? = 1 << 30,
+        audioDelaySeconds: Double = 0,
+        coordinatedHTTP: Bool = false
     ) async throws -> Playback {
         // Keep the probe's CONTEXT, not just its answer: whichever engine
         // takes the source adopts it and skips a second open — and releases
@@ -189,7 +191,7 @@ public enum PrismCoreEngine {
         // would otherwise count against the producer's.
         let probed: ProbedSource
         do {
-            probed = try SourceProbe.open(url: url, httpHeaders: httpHeaders)
+            probed = try SourceProbe.open(url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP)
         } catch {
             throw RoutingFailure.probeFailed(underlying: error)
         }
@@ -205,7 +207,9 @@ public enum PrismCoreEngine {
                     httpHeaders: httpHeaders,
                     display: display,
                     segmentCacheBytes: segmentCacheBytes,
-                    probed: probed
+                    probed: probed,
+                    audioDelaySeconds: audioDelaySeconds,
+                    coordinatedHTTP: coordinatedHTTP
                 )
                 return .remux(session: session, playlist: try await session.start())
             } catch {
@@ -213,7 +217,7 @@ public enum PrismCoreEngine {
             }
 
         case .software:
-            return .software(pipeline: try await openSoftware(probed: probed))
+            return .software(pipeline: try await openSoftware(probed: probed, audioDelaySeconds: audioDelaySeconds))
         }
     }
 
@@ -224,9 +228,9 @@ public enum PrismCoreEngine {
     /// elsewhere makes it open `probed.url` afresh instead.
     ///
     /// Returned loaded and paused, like `open(url:)`'s software case.
-    public static func openSoftware(probed: ProbedSource) async throws -> SoftwarePlaybackPipeline {
+    public static func openSoftware(probed: ProbedSource, audioDelaySeconds: Double = 0) async throws -> SoftwarePlaybackPipeline {
         do {
-            let pipeline = SoftwarePlaybackPipeline()
+            let pipeline = SoftwarePlaybackPipeline(audioDelaySeconds: audioDelaySeconds)
             // `load` is synchronous and blocking (it rewinds the container and
             // opens both decoders), so it runs off whatever actor called us.
             try await Task.detached(priority: .userInitiated) {

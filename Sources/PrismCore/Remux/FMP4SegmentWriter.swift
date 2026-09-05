@@ -31,6 +31,7 @@ final class FMP4SegmentWriter {
     private var output: UnsafeMutablePointer<AVFormatContext>?
     private var avio: UnsafeMutablePointer<AVIOContext>?
     private let sink = Sink()
+    var audioDelaySeconds: Double = 0
     private var ioBuffer: UnsafeMutableRawPointer?
 
     /// input stream index → output stream index
@@ -206,6 +207,14 @@ final class FMP4SegmentWriter {
 
     func write(_ packet: UnsafeMutablePointer<AVPacket>) throws {
         guard let output else { return }
+        let index = Int(packet.pointee.stream_index)
+        if audioDelaySeconds != 0, index >= 0, index < Int(output.pointee.nb_streams),
+           let stream = output.pointee.streams[index],
+           stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
+            let ticks = Int64((AudioDelay.normalized(audioDelaySeconds) / av_q2d(stream.pointee.time_base)).rounded())
+            if packet.pointee.pts != swift_AV_NOPTS_VALUE() { packet.pointee.pts += ticks }
+            if packet.pointee.dts != swift_AV_NOPTS_VALUE() { packet.pointee.dts += ticks }
+        }
         try FFmpegError.check(
             av_interleaved_write_frame(output, packet),
             "av_interleaved_write_frame"

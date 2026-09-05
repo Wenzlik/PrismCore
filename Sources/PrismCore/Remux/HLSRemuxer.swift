@@ -56,6 +56,12 @@ import Libavutil
 ///   enhancement layer dropped (`DolbyVisionRPUConverter`), so a dual-layer file
 ///   Apple can't decode arrives as a single-layer one it can.
 final class HLSRemuxer: @unchecked Sendable {
+    let residentSegments = ResidentSegmentStore()
+    let audioDeliveryStore = AudioDeliveryStore()
+    var audioDelaySeconds: Double = 0
+    var coordinatedHTTP = false
+    private let activeGuardLock = NSLock()
+    private var activeGuard: ReadInterruptGuard?
 
     /// How a selected audio stream reaches the output.
     enum AudioRouteMode: Equatable {
@@ -363,6 +369,7 @@ final class HLSRemuxer: @unchecked Sendable {
 
     func cancel() {
         cancelled.set()
+        activeGuardLock.withLock { activeGuard?.cancel() }
         // A producer parked at EOF is asleep on the coordinator, not spinning —
         // setting the flag is not enough to get its thread back.
         demand?.wake()
@@ -383,6 +390,8 @@ final class HLSRemuxer: @unchecked Sendable {
         // that skipped it produces a right-looking manifest and a failing
         // `av_interleaved_write_frame`. That is the whole reason this is a
         // handover and not a cache.
+        let probed = try self.probed ?? (coordinatedHTTP
+            ? SourceProbe.open(url: sourceURL, httpHeaders: httpHeaders, coordinatedHTTP: true) : nil)
         let adoptedInfo: SourceInfo?
         // Whichever branch opens (or adopts) the context, the guard is the one
         // its blocking reads were CREATED with — a callback cannot be added to
@@ -411,6 +420,10 @@ final class HLSRemuxer: @unchecked Sendable {
 
             interruptGuard = ReadInterruptGuard()
             input = interruptGuard.makeContext()
+            if coordinatedHTTP, ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? ""), let input {
+                do { try interruptGuard.installHTTPInput(on: input, url: sourceURL, headers: httpHeaders) }
+                catch { avformat_free_context(input); throw error }
+            }
             // Bounded like the probe's open, and for the same reason: a
             // server that accepts and then starves the reads would otherwise
             // pin this producer forever — the session's startup timeout fires,
@@ -429,11 +442,16 @@ final class HLSRemuxer: @unchecked Sendable {
             interruptGuard.disarm()
             adoptedInfo = nil
         }
+        activeGuardLock.withLock {
+            activeGuard = interruptGuard
+            if cancelled.isSet { interruptGuard.cancel() }
+        }
         // Ours to close either way now: a consumed `ProbedSource` has given up
         // ownership, and an unconsumed one never had this context. The guard
         // outlives the close — its callback runs on the teardown reads too.
         defer {
             avformat_close_input(&input)
+            activeGuardLock.withLock { activeGuard = nil }
             withExtendedLifetime(interruptGuard) {}
         }
         guard let input else { throw Failure.noVideoStream }
@@ -445,6 +463,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // decoded frames and must not be paid twice); otherwise derive it here
         // from our own context.
         let info = adoptedInfo ?? SourceProbe.describe(input: input)
+        audioDeliveryStore.prepare(indexes: info.audioTracks.map(\.streamIndex))
         // Chapters can't ride the served HLS (the format has no way to carry
         // them), so the session surfaces them as API instead — publish before
         // any packet work so they are readable the moment `start()` returns.
@@ -642,6 +661,9 @@ final class HLSRemuxer: @unchecked Sendable {
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
                 }
+                rendition.onBridgeProgress = { [audioDeliveryStore, index = Int(route.index)] progress in
+                    audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
+                }
                 // One track that can't be set up (a channel layout the EAC3
                 // encoder can't express, say) costs that rendition, not the
                 // session: the other tracks and the picture still play, which
@@ -657,8 +679,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     }
                 }
                 do {
+                    rendition.audioDelaySeconds = audioDelaySeconds
                     try rendition.open(input: input)
                     renditions.append(rendition)
+                    audioDeliveryStore.update(index: Int(route.index),
+                        delivery: route.mode == .streamCopy ? .streamCopy : .bridged)
                 } catch {
                     rendition.close()
                 }
@@ -708,6 +733,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     }
                 }
                 do {
+                    rendition.audioDelaySeconds = audioDelaySeconds
                     try rendition.open(input: input)
                     renditions.append(rendition)
                 } catch {
@@ -770,11 +796,16 @@ final class HLSRemuxer: @unchecked Sendable {
                         globalHeader: true
                     )
                     muxedBridge = bridge
+                    bridge.onProgress = { [audioDeliveryStore, index = Int(audio.index)] progress in
+                        audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
+                    }
+                    audioDeliveryStore.update(index: Int(audio.index), delivery: .bridged)
                     plan.append(.init(inputIndex: audio.index) { outStream in
                         try bridge.configure(outputStream: outStream)
                     })
                 } else {
                     plan.append(.init(inputIndex: audio.index))
+                    audioDeliveryStore.update(index: Int(audio.index), delivery: .streamCopy)
                 }
             }
         }
@@ -791,6 +822,7 @@ final class HLSRemuxer: @unchecked Sendable {
         )
 
         var writer = FMP4SegmentWriter()
+        writer.audioDelaySeconds = audioDelaySeconds
         _ = try writer.open(input: input, plan: plan)   // delay_moov: header emits nothing
         var streamMap = writer.streamMap
         let playlist = MediaPlaylistWriter(directory: outputDirectory)
@@ -878,15 +910,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 index: index, bytes: videoBytes + renditionBytes, producing: index, protected: protected
             )
             guard !victims.isEmpty else { return }
+            residentSegments.retire(victims)
             let directories = [outputDirectory] + renditions.map {
                 outputDirectory.appendingPathComponent($0.directoryName)
             }
-            unlinkQueue.async {
+            unlinkQueue.async { [residentSegments] in
                 for victim in victims {
-                    let victimName = String(format: "seg%05d.m4s", victim)
-                    for directory in directories {
-                        try? FileManager.default.removeItem(at: directory.appendingPathComponent(victimName))
-                    }
+                    residentSegments.unlinkRetired(index: victim, directories: directories)
                 }
             }
         }
@@ -981,7 +1011,8 @@ final class HLSRemuxer: @unchecked Sendable {
             guard !media.isEmpty, let start = segmentStartPTS else { return }
             let duration = max(0.001, Double(endPTS - start) * tickSeconds)
             let file = String(format: "seg%05d.m4s", segmentIndex)
-            try media.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
+            try residentSegments.publish(index: segmentIndex, start: Double(start) * tickSeconds,
+                end: Double(endPTS) * tickSeconds, data: media, root: outputDirectory)
             if plannedPlan == nil {
                 try playlist.appendSegment(duration: duration, file: file)
             }
@@ -1021,6 +1052,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 "av_seek_frame"
             )
             writer = FMP4SegmentWriter()
+            writer.audioDelaySeconds = audioDelaySeconds
             _ = try writer.open(input: input, plan: plan, restart: true)
             streamMap = writer.streamMap
             for rendition in renditions {
@@ -1285,7 +1317,9 @@ final class HLSRemuxer: @unchecked Sendable {
             let finalDuration = max(0.001, Double(closingPTS - (segmentStartPTS ?? closingPTS)) * tickSeconds)
             if !finalSegment.isEmpty, segmentStartPTS != nil {
                 let file = String(format: "seg%05d.m4s", segmentIndex)
-                try finalSegment.write(to: outputDirectory.appendingPathComponent(file), options: .atomic)
+                try residentSegments.publish(index: segmentIndex,
+                    start: Double(segmentStartPTS!) * tickSeconds, end: Double(closingPTS) * tickSeconds,
+                    data: finalSegment, root: outputDirectory)
                 if plannedPlan == nil {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }

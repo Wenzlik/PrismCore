@@ -8,6 +8,46 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- `PrismCoreSession.residentRanges` reports completed video intervals on the
+  source timestamp axis. `cachedThumbnail(at:maxDimension:)` decodes a local
+  snapshot of a resident segment without opening the source or requesting
+  production. Images are bounded to 16 MiB / 32 entries; fragments above
+  64 MiB return no preview. Publication and retirement share a lock so delayed
+  eviction cannot delete a newly reproduced video segment.
+- `audioDelivery` and per-track `audioTrackDeliveries` distinguish missing
+  audio from unavailable routes and expose bridge packet/frame/sample counts.
+  Counts reset on re-anchor. A fully drained bridge that received packets but
+  emitted nothing throws `AudioBridgeFailure.producedNoAudio`; priming is not
+  diagnosed as failure merely because its input packet count is large.
+- `audioDelaySeconds` on session/engine and software-pipeline construction:
+  positive delays audio, negative advances it, clamped to +/-2 s (non-finite
+  values become zero). Applied at the muxer or renderer boundary; video,
+  subtitles and source clocks are unchanged. Fixed for the session: changing
+  already-buffered media requires the host to replace its session. Fallback
+  sessions preserve the value.
+- Opt-in `coordinatedHTTP` for finite HTTP(S) files with Range support. Probe,
+  playback and standalone-preview readers share a two-request per-origin
+  limit. HTTP 429/503/509 impose a shared quiet period (`Retry-After` or
+  exponential backoff), then paced admission; dropped transfers retry within
+  a bounded read budget. Buffers are 1 MiB per reader. Redirects are admitted
+  at their destination, caller headers do not cross origins, and HTTPS never
+  downgrades to HTTP. Size and available entity validators must stay stable.
+  Native FFmpeg I/O remains the default. Live streams, servers ignoring Range,
+  and nested HLS resources are outside this optional file transport's contract.
+- A reproducible binary-frame-clock fixture and Range origin with shared
+  bandwidth/first-byte delay. `PRISMCORE_RENDERED_SEEK=1` enables an AVPlayer
+  test comparing decoded picture timestamps after forward/backward seeks
+  against the item's presentation time, with a two-frame tolerance.
+
+### Validation scope
+
+Synthetic macOS tests cover output MP4 timestamps (muxed and alternate audio),
+software enqueue timestamps, cache retirement, offline previews, HTTP refusal
+and interruption, and rendered seeks. These are not device measurements of
+Atmos, Dolby Vision, CDN throughput, or HDMI lip-sync.
+
 ## [2.0.2] — 2026-09-02
 
 Follow-up to 2.0.1, from a review pass 2.0.1 itself did not get.

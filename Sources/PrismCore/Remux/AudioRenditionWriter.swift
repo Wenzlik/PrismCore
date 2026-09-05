@@ -33,11 +33,13 @@ final class AudioRenditionWriter {
     private let directory: URL
 
     private var writer = FMP4SegmentWriter()
+    var audioDelaySeconds: Double = 0
     /// Planned (demand-driven) mode: the playlist was written complete
     /// upfront from the segment plan — cuts write FILES only.
     private var plannedMode = false
     private let playlist: MediaPlaylistWriter
     private var bridge: AudioBridge?
+    var onBridgeProgress: ((AudioBridgeProgress) -> Void)?
     private var outputIndex: Int32 = 0
     private var segmentIndex = 0
     /// Boundary time that had no audio bytes to carry (see `cut`). Rolled into
@@ -176,6 +178,7 @@ final class AudioRenditionWriter {
                 // the centre-favouring filter between decode and re-encode.
                 dialogueBoost: route.mode.dialogueBoostLevel
             )
+            bridge?.onProgress = onBridgeProgress
         }
         try openMuxer(input: input, restart: restart)
     }
@@ -185,6 +188,7 @@ final class AudioRenditionWriter {
     /// The muxer alone, described from the bridge when there is one — the
     /// part of `open` a re-anchor repeats.
     private func openMuxer(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool) throws {
+        writer.audioDelaySeconds = audioDelaySeconds
         let index = Int32(track.streamIndex)
         let plan: FMP4SegmentWriter.StreamPlan
         if let bridge {

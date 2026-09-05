@@ -368,6 +368,10 @@ struct AudioBridgePipelineTests {
         }
 
         #expect(!timestamps.isEmpty, "the bridge produced no packets")
+        #expect(bridge.progress.inputPackets == 20)
+        #expect(bridge.progress.decodedFrames > 0)
+        #expect(bridge.progress.resampledSamples == 20_000)
+        #expect(bridge.progress.outputPackets == timestamps.count)
         #expect(timestamps.first == startPTS)
         #expect(timestamps == timestamps.sorted(), "timestamps must be monotonic")
         // 20 000 input samples went in and the flush leaves nothing behind, so
