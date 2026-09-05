@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-09-05
+
+Playback observability for hosts: what is resident on disk, how each audio
+track is actually delivered, a fixed audio delay, and an opt-in coordinated
+HTTP transport — plus the Dolby Vision record rule from #77.
+
 ### Added
 
 - `PrismCoreSession.residentRanges` reports completed video intervals on the
@@ -41,7 +47,7 @@ source-compatible.)
   test comparing decoded picture timestamps after forward/backward seeks
   against the item's presentation time, with a two-frame tolerance.
 
-### Review fixes (before release)
+### Fixed (review pass before release)
 
 - A negative `audioDelaySeconds` never writes a packet below the timeline's
   origin: `avoid_negative_ts` is disabled so tfdt can carry absolute time on
