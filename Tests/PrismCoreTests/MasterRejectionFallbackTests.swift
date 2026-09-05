@@ -40,6 +40,23 @@ struct MasterRejectionFallbackTests {
         )
     }
 
+    private func profile7() -> DolbyVisionConfiguration {
+        DolbyVisionConfiguration(
+            versionMajor: 1, versionMinor: 0, profile: 7, level: 6,
+            rpuPresent: true, enhancementLayerPresent: true,
+            baseLayerPresent: true, baseLayerSignalCompatibilityID: 0
+        )
+    }
+
+    /// 8.2 — a Rec.709 base, which no Apple platform presents as DV.
+    private func profile82() -> DolbyVisionConfiguration {
+        DolbyVisionConfiguration(
+            versionMajor: 1, versionMinor: 0, profile: 8, level: 6,
+            rpuPresent: true, enhancementLayerPresent: false,
+            baseLayerPresent: true, baseLayerSignalCompatibilityID: 2
+        )
+    }
+
     private func profile5() -> DolbyVisionConfiguration {
         DolbyVisionConfiguration(
             versionMajor: 1, versionMinor: 0, profile: 5, level: 6,
@@ -106,6 +123,43 @@ struct MasterRejectionFallbackTests {
     func profile5NeverStripped() {
         #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
             declared: profile5(), displayIsDolbyVisionCapable: false
+        ))
+    }
+
+    /// The case a DV-capable display used to fall straight through. A P7
+    /// source that is NOT being converted (no libdovi in this build, an `hvcC`
+    /// we couldn't read, no RPUs) keeps the record `avcodec_parameters_copy`
+    /// brought across — so the served `hvc1` entry carried a `dvcC` announcing
+    /// a dual-layer stream Apple has no decoder for, while the manifest printed
+    /// no DV claim at all, because `dolbyVisionBrand` returns nil for 7. A
+    /// sample entry claiming what the manifest doesn't is the same mismatch
+    /// `retryStripsTheRecord` exists for.
+    @Test("profile 7 is stripped even on a Dolby Vision display")
+    func profile7StrippedOnCapableDisplay() {
+        #expect(HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile7(), displayIsDolbyVisionCapable: true
+        ))
+        #expect(HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile7(), displayIsDolbyVisionCapable: false
+        ))
+    }
+
+    /// 8.2's base is Rec.709 — plain SDR `hvc1` is the honest signaling, and
+    /// the manifest already prints no claim for it. The record has to go the
+    /// same way for the same reason.
+    @Test("profile 8.2 is stripped even on a Dolby Vision display")
+    func profile82StrippedOnCapableDisplay() {
+        #expect(HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile82(), displayIsDolbyVisionCapable: true
+        ))
+    }
+
+    /// A converted P7 is declared 8.1 by then, so it takes the 8.1 path and
+    /// keeps its record — the conversion is not undone by this rule.
+    @Test("a converted P7 is 8.1 by the time it gets here, and keeps its record")
+    func convertedProfile7KeepsItsRecord() {
+        #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
+            declared: profile7().convertedToProfile81, displayIsDolbyVisionCapable: true
         ))
     }
 

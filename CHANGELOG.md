@@ -55,6 +55,28 @@ source-compatible.)
 - `HLSRemuxer.run` no longer opens an extra probe just to get coordinated HTTP
   when no `ProbedSource` was handed over; its own open installs the reader.
 
+### Fixed
+
+- **A Dolby Vision record no longer survives onto a sample entry the manifest
+  doesn't claim as DV.** `shouldStripDolbyVisionRecord` let a DV-capable
+  display keep whatever record `avcodec_parameters_copy` brought across,
+  unconditionally. For a Profile 7 source that is **not** being converted — no
+  libdovi in the host's build, an `hvcC` we couldn't read, no RPUs — that meant
+  serving an `hvc1` entry carrying a `dvcC` that announces a dual-layer stream
+  Apple has no decoder for, while the master printed no DV claim at all
+  (`dolbyVisionBrand` returns nil for 7). A sample entry that claims what the
+  manifest doesn't is the exact mismatch the DV-less fallback tier was built to
+  avoid, and the failure it produces is the bad kind: the item goes
+  `.readyToPlay` and then shows a black picture with the audio running.
+
+  The rule is now named once, on the configuration itself
+  (`DolbyVisionConfiguration.isPresentableAsDolbyVision`): profile 5, and
+  profile 8 with an HDR10 or HLG base. Everything else — dual-layer 7, 8.2's
+  Rec.709 base, any profile we don't recognise — is stripped on **any** display,
+  so the entry and the manifest agree. A converted P7 is declared 8.1 by the
+  time it reaches this rule and keeps its record, so the conversion is
+  untouched.
+
 ### Validation scope
 
 Synthetic macOS tests cover output MP4 timestamps (muxed and alternate audio),
