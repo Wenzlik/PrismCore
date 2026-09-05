@@ -390,8 +390,6 @@ final class HLSRemuxer: @unchecked Sendable {
         // that skipped it produces a right-looking manifest and a failing
         // `av_interleaved_write_frame`. That is the whole reason this is a
         // handover and not a cache.
-        let probed = try self.probed ?? (coordinatedHTTP
-            ? SourceProbe.open(url: sourceURL, httpHeaders: httpHeaders, coordinatedHTTP: true) : nil)
         let adoptedInfo: SourceInfo?
         // Whichever branch opens (or adopts) the context, the guard is the one
         // its blocking reads were CREATED with — a callback cannot be added to

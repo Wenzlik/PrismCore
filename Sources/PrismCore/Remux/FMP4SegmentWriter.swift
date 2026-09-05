@@ -212,8 +212,21 @@ final class FMP4SegmentWriter {
            let stream = output.pointee.streams[index],
            stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
             let ticks = Int64((AudioDelay.normalized(audioDelaySeconds) / av_q2d(stream.pointee.time_base)).rounded())
-            if packet.pointee.pts != swift_AV_NOPTS_VALUE() { packet.pointee.pts += ticks }
-            if packet.pointee.dts != swift_AV_NOPTS_VALUE() { packet.pointee.dts += ticks }
+            // `avoid_negative_ts` is disabled (tfdt must carry absolute time
+            // on restart), so a negative delay must not push a packet below
+            // zero: movenc writes tfdt as an UNSIGNED 64-bit field and a
+            // negative dts would wrap. Audio that would present before the
+            // timeline's origin is inaudible anyway (a priming packet
+            // included) — dropped only when it is the shift that put it there;
+            // a zero or positive delay leaves a source's own timestamps alone.
+            let pts = packet.pointee.pts, dts = packet.pointee.dts
+            if ticks < 0,
+               (pts != swift_AV_NOPTS_VALUE() && pts + ticks < 0)
+                || (dts != swift_AV_NOPTS_VALUE() && dts + ticks < 0) {
+                return
+            }
+            if pts != swift_AV_NOPTS_VALUE() { packet.pointee.pts = pts + ticks }
+            if dts != swift_AV_NOPTS_VALUE() { packet.pointee.dts = dts + ticks }
         }
         try FFmpegError.check(
             av_interleaved_write_frame(output, packet),

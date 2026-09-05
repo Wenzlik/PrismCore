@@ -49,42 +49,62 @@ struct PlaybackObservabilityTests {
     }
     @Test(arguments: [true, false]) func muxedDelaySurvivesContainerWriting(muxed: Bool) async throws {
         let fixture = try #require(Bundle.module.url(forResource: "h264_aac_30s", withExtension: "mkv", subdirectory: "Fixtures"))
-        func timestamps(delay: Double) async throws -> [Libavutil.AVMediaType: Double] {
+        /// Every packet timestamp in the first PRODUCED segment of each output,
+        /// per media type — the first segment, not `seg00000` by name: a
+        /// rendition whose audio all moved past the head boundary skips that
+        /// slot (see `AudioRenditionWriter.cut`).
+        func timestamps(delay: Double) async throws -> [Libavutil.AVMediaType: [Double]] {
             let session = try PrismCoreSession(url: fixture, forceMuxedShape: muxed, audioDelaySeconds: delay)
             do {
                 _ = try await session.start()
                 let root = await session.workDirectory
-                var result: [Libavutil.AVMediaType: Double] = [:]
+                var result: [Libavutil.AVMediaType: [Double]] = [:]
                 for directory in muxed ? [root] : [root, root.appendingPathComponent("audio0")] {
-                let data = try Data(contentsOf: directory.appendingPathComponent("init.mp4"))
-                    + Data(contentsOf: directory.appendingPathComponent("seg00000.m4s"))
-                let file = root.appendingPathComponent("delay-test.mp4")
-                try data.write(to: file)
-                var input: UnsafeMutablePointer<AVFormatContext>?
-                try FFmpegError.check(avformat_open_input(&input, file.path, nil, nil), "delay-test open")
-                defer { avformat_close_input(&input) }
-                let context = try #require(input)
-                var packet = av_packet_alloc()
-                defer { av_packet_free(&packet) }
-                let pkt = try #require(packet)
-                while av_read_frame(context, pkt) >= 0 {
-                    let stream = context.pointee.streams[Int(pkt.pointee.stream_index)]!
-                    let type = stream.pointee.codecpar.pointee.codec_type
-                    if result[type] == nil { result[type] = Double(pkt.pointee.pts) * av_q2d(stream.pointee.time_base) }
-                    av_packet_unref(pkt)
-                }
+                    let segments = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                        .filter { $0.hasPrefix("seg") && $0.hasSuffix(".m4s") }.sorted()
+                    let first = try #require(segments.first)
+                    let data = try Data(contentsOf: directory.appendingPathComponent("init.mp4"))
+                        + Data(contentsOf: directory.appendingPathComponent(first))
+                    let file = root.appendingPathComponent("delay-test.mp4")
+                    try data.write(to: file)
+                    var input: UnsafeMutablePointer<AVFormatContext>?
+                    try FFmpegError.check(avformat_open_input(&input, file.path, nil, nil), "delay-test open")
+                    defer { avformat_close_input(&input) }
+                    let context = try #require(input)
+                    var packet = av_packet_alloc()
+                    defer { av_packet_free(&packet) }
+                    let pkt = try #require(packet)
+                    while av_read_frame(context, pkt) >= 0 {
+                        let stream = context.pointee.streams[Int(pkt.pointee.stream_index)]!
+                        let type = stream.pointee.codecpar.pointee.codec_type
+                        result[type, default: []].append(Double(pkt.pointee.pts) * av_q2d(stream.pointee.time_base))
+                        av_packet_unref(pkt)
+                    }
                 }
                 await session.stop()
                 return result
             } catch { await session.stop(); throw error }
         }
         let baseline = try await timestamps(delay: 0)
+        let baselineAudio = try #require(baseline[AVMEDIA_TYPE_AUDIO])
+        // The fixture's audio starts BEFORE zero (an AAC priming packet), so a
+        // negative delay exercises the drop rule even at -0.15 s. (A delay
+        // that moves the whole head segment's audio out of it cannot be read
+        // off segment 0 — the muxer interleaves by SOURCE time, so that audio
+        // is cut into the next segment — hence no -2 s case here.)
+        #expect(baselineAudio.first! < 0)
         for delay in [-0.15, 0.2] {
             let shifted = try await timestamps(delay: delay)
-            let video = try #require(shifted[AVMEDIA_TYPE_VIDEO])
+            #expect(shifted[AVMEDIA_TYPE_VIDEO] == baseline[AVMEDIA_TYPE_VIDEO])
             let audio = try #require(shifted[AVMEDIA_TYPE_AUDIO])
-            #expect(abs(video - baseline[AVMEDIA_TYPE_VIDEO]!) < 0.001)
-            #expect(abs(audio - baseline[AVMEDIA_TYPE_AUDIO]! - delay) < 0.002)
+            // The audio is the baseline moved by the delay, minus whatever the
+            // move took below the origin — dropped, never wrapped or clamped.
+            let expected = baselineAudio.map { $0 + delay }.filter { delay >= 0 || $0 >= 0 }
+            #expect(audio.count == expected.count)
+            if delay < 0 { #expect(audio.allSatisfy { $0 >= 0 }) }
+            for (actual, wanted) in zip(audio, expected) {
+                #expect(abs(actual - wanted) < 0.002, "delay \(delay): \(actual) vs \(wanted)")
+            }
         }
     }
     @Test func residentIslandsAndRetirement() {

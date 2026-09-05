@@ -7,8 +7,9 @@ public struct ResidentRange: Sendable, Equatable {
     public let endSeconds: Double
 }
 
-/// Serializes snapshots with retirement so a preview never borrows files
-/// that an eviction can remove halfway through its read.
+/// Serializes snapshot LOOKUPS (and the opens) with retirement, so a preview
+/// never borrows a file an eviction has already unlinked — the read itself
+/// runs outside the lock on descriptors an unlink cannot invalidate.
 final class ResidentSegmentStore: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Int: ResidentRange] = [:]
@@ -67,7 +68,10 @@ final class ResidentSegmentStore: @unchecked Sendable {
 
     func snapshot(at seconds: Double, root: URL) -> (index: Int, data: Data)? {
         guard seconds.isFinite else { return nil }
-        return lock.withLock {
+        // Only the lookup and the opens happen under the lock: an open
+        // descriptor survives a later unlink, so the (up to 64 MiB) read can
+        // run outside it without stalling the producer's next `publish`.
+        guard let opened: (index: Int, initial: FileHandle, media: FileHandle) = lock.withLock({
             guard !stopped, let entry = entries.first(where: {
                 seconds >= $0.value.startSeconds && seconds < $0.value.endSeconds
             }) else { return nil }
@@ -76,10 +80,13 @@ final class ResidentSegmentStore: @unchecked Sendable {
             // must not allocate an unbounded second copy beside playback.
             guard let size = try? mediaURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                   size <= 64 << 20,
-                  let initial = try? Data(contentsOf: root.appendingPathComponent("init.mp4")),
-                  let media = try? Data(contentsOf: mediaURL)
+                  let initial = try? FileHandle(forReadingFrom: root.appendingPathComponent("init.mp4")),
+                  let media = try? FileHandle(forReadingFrom: mediaURL)
             else { return nil }
-            return (entry.key, initial + media)
-        }
+            return (entry.key, initial, media)
+        }) else { return nil }
+        defer { try? opened.initial.close(); try? opened.media.close() }
+        guard let initial = try? opened.initial.readToEnd(), let media = try? opened.media.readToEnd() else { return nil }
+        return (opened.index, initial + media)
     }
 }

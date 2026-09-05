@@ -41,6 +41,20 @@ source-compatible.)
   test comparing decoded picture timestamps after forward/backward seeks
   against the item's presentation time, with a two-frame tolerance.
 
+### Review fixes (before release)
+
+- A negative `audioDelaySeconds` never writes a packet below the timeline's
+  origin: `avoid_negative_ts` is disabled so tfdt can carry absolute time on
+  restart, and movenc writes tfdt as an unsigned field — a negative dts would
+  wrap. Packets the shift takes below zero (a priming packet included) are
+  dropped; a zero or positive delay leaves a source's own timestamps alone.
+- `cachedThumbnail` reads the resident segment OUTSIDE the publication lock
+  (only the lookup and the opens are serialized with retirement — an open
+  descriptor survives an unlink), so a 64 MiB preview no longer stalls the
+  producer's next segment write.
+- `HLSRemuxer.run` no longer opens an extra probe just to get coordinated HTTP
+  when no `ProbedSource` was handed over; its own open installs the reader.
+
 ### Validation scope
 
 Synthetic macOS tests cover output MP4 timestamps (muxed and alternate audio),
