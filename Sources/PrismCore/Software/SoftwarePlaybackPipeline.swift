@@ -375,6 +375,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         )
     }
 
+    // Injecting the FFmpeg call lets tests refuse a seek without network timing.
+    private let demuxSeek: (UnsafeMutablePointer<AVFormatContext>, Int64) -> Int32
+
     /// Injected seam — the constructor tests use. See `SampleBufferSinks.swift`
     /// for why the boundary sits here.
     init(
@@ -383,8 +386,12 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         timeline: RenderTimeline,
         pacing: Pacing = Pacing(),
         allowHardwareDecode: Bool = true,
-        audioDelaySeconds: Double = 0
+        audioDelaySeconds: Double = 0,
+        demuxSeek: @escaping (UnsafeMutablePointer<AVFormatContext>, Int64) -> Int32 = { input, target in
+            avformat_seek_file(input, -1, Int64.min, target, target, AVSEEK_FLAG_BACKWARD)
+        }
     ) {
+        self.demuxSeek = demuxSeek
         self.videoSink = videoSink
         self.audioSink = audioSink
         self.timeline = timeline
@@ -605,7 +612,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         let target = Int64(max(0, seconds) * Double(AV_TIME_BASE))
         let readGuard = stateLock.withLock { interruptGuard }
         readGuard?.arm(budget: Self.seekBudget)
-        let result = avformat_seek_file(input, -1, Int64.min, target, target, AVSEEK_FLAG_BACKWARD)
+        let result = demuxSeek(input, target)
         // Cancellation is permanent: disarming a seek must not undo a stop
         // that arrived while FFmpeg was blocked inside it.
         readGuard?.disarm()
@@ -732,11 +739,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             stateLock.withLock { storedSelectedAudioStreamIndex = Int32(streamIndex) }
             pendingAudio.removeAll()
             audioSink.flush()
-            lastEnqueuedAudioEnd = .invalid
             cancelEndObserver()
             discardAudioBefore = audioTarget
 
             if rewound {
+                // A refused rewind at EOF cannot enqueue a new audio boundary;
+                // keep the old horizon so audio-only playback does not end now.
+                lastEnqueuedAudioEnd = .invalid
                 // The rewind re-reads video the renderer already holds: flush
                 // the decoder (its reference chain broke with the seek) and
                 // drop re-decoded frames up to the renderer's horizon, so the

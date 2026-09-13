@@ -207,6 +207,10 @@ struct SoftwareTrackSwitchingTests {
                 CMSampleBufferGetPresentationTimeStamp($0) + CMSampleBufferGetDuration($0)
                     > timeline.currentTime
             })
+            let firstPTS = CMSampleBufferGetPresentationTimeStamp(audio.enqueued[0])
+            // AAC/AC-3 frame rounding may straddle the playhead, but a positive
+            // delay must not introduce an extra half-second hole after switching.
+            #expect(firstPTS <= timeline.currentTime + CMTime(seconds: 0.04, preferredTimescale: 1_000))
             #expect(audio.enqueued.allSatisfy { channelCount(of: $0) == (index == 2 ? 6 : 2) })
         }
         #expect(timeline.rateChanges.count == changes)
@@ -234,6 +238,44 @@ struct SoftwareTrackSwitchingTests {
         #expect(CMTimeGetSeconds(pipeline.currentTime) == 2)
     }
 
+    @Test("A refused audio rewind at EOF preserves the audio-only end boundary")
+    func refusedRewindPreservesAudioOnlyEndBoundary() throws {
+        let audio = RecordingAudioSink()
+        let timeline = RecordingTimeline()
+        let seekRefused = LockedResult()
+        let pipeline = SoftwarePlaybackPipeline(
+            videoSink: RecordingVideoSink(), audioSink: audio, timeline: timeline,
+            allowHardwareDecode: false, demuxSeek: { _, _ in
+                seekRefused.set(true)
+                return -1
+            })
+        try pipeline.load(url: fixture("audio_only_multi.mka"))
+        defer { pipeline.stop() }
+        pipeline.waitForFeedQueue()
+        for _ in 0..<100 where timeline.pendingBoundary == nil { audio.playOut() }
+        let oldBoundary = try #require(timeline.pendingBoundary)
+        #expect(oldBoundary.time > timeline.currentTime)
+        #expect(!audio.queued.isEmpty)
+        seekRefused.set(false)
+
+        let gate = DispatchSemaphore(value: 0)
+        pipeline.blockFeedQueueForTesting(until: gate)
+        pipeline.selectAudioTrack(streamIndex: 1)
+        oldBoundary.fire()
+        gate.signal()
+        pipeline.waitForFeedQueue()
+
+        #expect(seekRefused.get() == true)
+        #expect(pipeline.selectedAudioStreamIndex == 1)
+        #expect(pipeline.state == .paused)
+        let replacementBoundary = try #require(timeline.pendingBoundary)
+        #expect(replacementBoundary.time == oldBoundary.time)
+        timeline.reachBoundary()
+        pipeline.waitForFeedQueue()
+        #expect(pipeline.state == .ended)
+        #expect(timeline.currentTime == oldBoundary.time)
+    }
+
     @Test("Selection is refused before load and after stop")
     func refusesSelectionOutsidePlayback() throws {
         let (pipeline, _, _, _) = makePipeline()
@@ -245,7 +287,7 @@ struct SoftwareTrackSwitchingTests {
     }
 
     @Test("Stopping an adopted pipeline permanently cancels its seek/read guard")
-    func stopCancellationSurvivesSeekDisarm() throws {
+    func stopPermanentlyCancelsAdoptedReadGuard() throws {
         let probed = try SourceProbe.open(url: fixture("h264_multi_audio.mkv"))
         let (pipeline, _, _, _) = makePipeline()
         try pipeline.load(probed: probed)

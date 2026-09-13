@@ -28,15 +28,18 @@ source-compatible.)
   only the audio renderer is flushed. Stop permanently cancels the read guard
   so a finishing seek cannot disarm cancellation and resume blocked reads.
 - Extreme audio stream indices are refused without a narrowing-conversion
-  trap. Switching resets the old audio end time and invalidates its EOF
-  boundary, including callbacks already queued, so the old track cannot stop
-  the replacement. Completion reports failure if refeeding fails.
+  trap. A successful rewind resets the old audio end time; a refused rewind
+  at EOF preserves it so audio-only playback does not end immediately. Both
+  invalidate queued EOF callbacks so the old callback cannot stop the
+  replacement. Completion reports failure if refeeding fails.
 
 ### Validation and limits
 
 - Synthetic macOS tests cover metadata, stereo/5.1 switches in both directions,
   nonzero playheads with positive/negative audio delay, paused selection,
-  invalid indices, EOF cancellation, and subtitle selection/Off/expiry/seek.
+  invalid indices, EOF cancellation and refused rewind on an audio-only source,
+  and subtitle selection/Off/expiry/seek. The adopted-guard stop test checks
+  permanent cancellation directly; it does not simulate a concurrent seek.
   Renderer stand-ins verify enqueued media; audible gap and device rendering
   still require host/device validation.
 - Text cache: 1,024 cues / 1 MiB of UTF-8 payload across tracks; excess incoming
@@ -1412,7 +1415,6 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.1.1...main
 [2.2.0]: https://github.com/Wenzlik/PrismCore/compare/2.1.1...main
 [2.1.1]: https://github.com/Wenzlik/PrismCore/compare/2.1.0...2.1.1
 [2.1.0]: https://github.com/Wenzlik/PrismCore/compare/2.0.2...2.1.0
