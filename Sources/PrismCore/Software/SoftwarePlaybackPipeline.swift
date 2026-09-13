@@ -267,6 +267,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// The synchronizer boundary that turns "last buffer enqueued" into
     /// "last buffer played" — `.ended` fires from it, not from the enqueue.
     private var endObserver: Any?
+    private var endGeneration: UInt64 = 0
     /// End (PTS + duration) of the newest audio buffer handed to the sink,
     /// and of the newest video frame — the later of the two is where the
     /// presentation actually ends.
@@ -561,14 +562,15 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// expiry the seek fails like a refused one, and the latched
     /// `AVERROR_EXIT` is cleared so the context can read again.
     private func seekDemuxer(_ input: UnsafeMutablePointer<AVFormatContext>, to time: CMTime) -> Bool {
-        let target = max(0, Int64(CMTimeGetSeconds(time) * Double(AV_TIME_BASE)))
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite, seconds < Double(Int64.max) / Double(AV_TIME_BASE) else { return false }
+        let target = Int64(max(0, seconds) * Double(AV_TIME_BASE))
         let readGuard = stateLock.withLock { interruptGuard }
         readGuard?.arm(budget: Self.seekBudget)
         let result = avformat_seek_file(input, -1, Int64.min, target, target, AVSEEK_FLAG_BACKWARD)
-        // `stop()` arms the guard with a zero budget to break a blocked read;
-        // disarming here would re-open that window, so only a seek that was
-        // not stopped disarms.
-        if !stopped { readGuard?.disarm() }
+        // Cancellation is permanent: disarming a seek must not undo a stop
+        // that arrived while FFmpeg was blocked inside it.
+        readGuard?.disarm()
         if let pb = input.pointee.pb, pb.pointee.error < 0 {
             pb.pointee.error = 0
         }
@@ -633,9 +635,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// playing, because the old decoder is only torn down *after* the new one
     /// stands.
     ///
-    /// The audible gap is the seek + decode-to-playhead time, tens of
-    /// milliseconds on a local source; the clock never stops, so A/V sync and
-    /// the picture are unaffected. Works identically while paused — the new
+    /// The audible gap depends on transport and decode-to-playhead time. The
+    /// clock continues running and the video renderer keeps its queued frames.
+    /// Works identically while paused — the new
     /// track is primed at the paused position and plays on `play()`.
     ///
     /// - Parameter completion: called on the feed queue with whether the
@@ -650,7 +652,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 completion?(false)
                 return
             }
-            guard Int32(streamIndex) != audioStreamIndex else {
+            if audioStreamIndex >= 0, streamIndex == Int(audioStreamIndex) {
                 completion?(true)
                 return
             }
@@ -680,14 +682,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             // ahead to. `.invalid` clock (never anchored) means nothing has
             // played yet — the read position IS the present, skip the seek.
             let now = timeline.currentTime
-            var rewound = false
-            if now.isValid {
-                let target = max(0, Int64(CMTimeGetSeconds(now) * Double(AV_TIME_BASE)))
-                rewound = av_seek_frame(input, -1, target, AVSEEK_FLAG_BACKWARD) >= 0
-                // A source with no index can refuse — the new track then joins
-                // at the read position, a gap of the queue's look-ahead. Worse
-                // than seamless, better than refusing the switch.
-            }
+            // Positive output delay means the source audio we need is earlier
+            // than the playhead; negative delay needs later source samples.
+            let audioTarget = now - CMTime(seconds: audioDelaySeconds, preferredTimescale: 1_000_000)
+            let rewound = now.isNumeric && seekDemuxer(input, to: min(now, audioTarget))
 
             let hadAudio = audioDecoder != nil
             audioDecoder?.close()
@@ -696,6 +694,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             stateLock.withLock { storedSelectedAudioStreamIndex = Int32(streamIndex) }
             pendingAudio.removeAll()
             audioSink.flush()
+            lastEnqueuedAudioEnd = .invalid
+            cancelEndObserver()
+            discardAudioBefore = audioTarget
 
             if rewound {
                 // The rewind re-reads video the renderer already holds: flush
@@ -709,7 +710,6 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 // The rewind lands on a keyframe before the present; audio
                 // from that gap is late (playing) or a stale burst on resume
                 // (paused) — drop it here rather than trusting the renderer.
-                discardAudioBefore = now
                 reachedEOF = false
                 videoTailPending = false
             }
@@ -725,7 +725,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             }
 
             pump()
-            completion?(true)
+            completion?(state != .failed)
         }
     }
 
@@ -735,10 +735,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         // may be blocked inside `av_read_frame` against a server that stopped
         // answering, and `feedQueue.sync` would wait on exactly that read.
         // With the guard tripped the read aborts (`AVERROR_EXIT`), the loop
-        // fails out, and the sync below gets its turn. A zero budget is
-        // "interrupt now"; the context is closed right after, so the latch
-        // never has to be cleared.
-        stateLock.withLock { interruptGuard }?.arm(budget: .zero)
+        // fails out, and the sync below gets its turn. Permanent cancellation
+        // survives a concurrently finishing seek disarming its deadline.
+        stateLock.withLock { interruptGuard }?.cancel()
         feedQueue.sync {
             guard !stopped else { return }
             stopped = true
@@ -1088,8 +1087,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             setState(.ended)
             return
         }
+        let generation = endGeneration
         endObserver = timeline.observeBoundary(end, on: feedQueue) { [weak self, end] in
-            guard let self, !self.stopped else { return }
+            guard let self, !self.stopped, self.endGeneration == generation else { return }
             self.endObserver = nil
             // A seek in between cancelled the observer, so reaching here
             // means the same run reached its end.
@@ -1099,6 +1099,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     }
 
     private func cancelEndObserver() {
+        endGeneration &+= 1
         if let endObserver {
             timeline.cancelBoundaryObserver(endObserver)
         }
