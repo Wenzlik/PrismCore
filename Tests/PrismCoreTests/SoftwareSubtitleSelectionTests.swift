@@ -63,7 +63,24 @@ struct SoftwareSubtitleSelectionTests {
         // No new packet is needed to clear the overlay at the cue's end.
         timeline.setRate(1, time: CMTime(seconds: 4, preferredTimescale: 1_000))
         #expect(pipeline.activeSubtitleCues.isEmpty)
+        let beforeAnchor = DispatchSemaphore(value: 0)
+        let resumeAnchor = DispatchSemaphore(value: 0)
+        timeline.beforeSetRate = { _, time in
+            guard CMTimeGetSeconds(time) < 4 else { return }
+            timeline.beforeSetRate = nil
+            // Hold the old playhead after the landing GOP has been decoded,
+            // so host polling cannot accidentally miss the vulnerable window.
+            beforeAnchor.signal()
+            #expect(resumeAnchor.wait(timeout: .now() + 5) == .success)
+        }
         pipeline.seek(to: CMTime(seconds: 1, preferredTimescale: 1_000))
+        let reachedAnchor = beforeAnchor.wait(timeout: .now() + 5)
+        #expect(reachedAnchor == .success)
+        if reachedAnchor == .success {
+            #expect(CMTimeGetSeconds(pipeline.currentTime) == 4)
+            #expect(pipeline.activeSubtitleCues.isEmpty)
+        }
+        resumeAnchor.signal()
         pipeline.waitForFeedQueue()
         for _ in 0..<3 { video.playOut(); audio.playOut() }
         #expect(pipeline.selectedSubtitleStreamIndex == 2)

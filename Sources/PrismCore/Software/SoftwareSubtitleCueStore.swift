@@ -52,7 +52,8 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
     func active(streamIndex: Int, at time: Double) -> [TimedTextCue] {
         lock.withLock {
             guard time.isFinite else { return [] }
-            prune(at: time)
+            // During a backward seek the host still sees the old clock while
+            // the feed queue repopulates cues. Only insertion may prune them.
             return cues.filter { Int($0.streamIndex) == streamIndex && $0.start <= time && time < $0.end }
                 .sorted { $0.start < $1.start }
         }

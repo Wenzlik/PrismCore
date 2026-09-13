@@ -32,14 +32,19 @@ source-compatible.)
   at EOF preserves it so audio-only playback does not end immediately. Both
   invalidate queued EOF callbacks so the old callback cannot stop the
   replacement. Completion reports failure if refeeding fails.
+- Host subtitle polling no longer prunes the cache: during a backward seek,
+  the frozen pre-seek clock could permanently erase newly read landing cues.
+  Snapshots only filter; insertion prunes once the feed clock is anchored.
+  Expired overlays still clear without another packet, including at EOF.
 
 ### Validation and limits
 
 - Synthetic macOS tests cover metadata, stereo/5.1 switches in both directions,
   nonzero playheads with positive/negative audio delay, paused selection,
   invalid indices, EOF cancellation and refused rewind on an audio-only source,
-  and subtitle selection/Off/expiry/seek. The adopted-guard stop test checks
-  permanent cancellation directly; it does not simulate a concurrent seek.
+  and subtitle selection/Off/expiry/seek, including host polling while a
+  backward seek is held just before the timeline re-anchors. The adopted-guard
+  stop test checks permanent cancellation directly; it does not simulate a concurrent seek.
   Renderer stand-ins verify enqueued media; audible gap and device rendering
   still require host/device validation.
 - Text cache: 1,024 cues / 1 MiB of UTF-8 payload across tracks; excess incoming
@@ -47,7 +52,9 @@ source-compatible.)
   cue may be missed. Bitmap/OCR, sidecars and advanced ASS styling are not
   added to the software surface. The initial seek implementation pruned cues
   against the old clock before re-anchoring; the backward-seek test caught it,
-  and pruning now waits for the new clock anchor.
+  and feed-path pruning now waits for the new clock anchor. Second-pass review
+  found that polling still pruned against the old clock; the regression now
+  polls during seek, and snapshots no longer mutate the cache.
 
 ## [2.1.1] — 2026-09-07
 
