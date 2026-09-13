@@ -57,10 +57,9 @@ import Libavutil
 ///
 /// ## Not here yet
 ///
-/// Integration with `PrismCoreSession` and the loopback (deliberately out of
-/// scope for this skeleton), deinterlacing for interlaced H.264, subtitle
-/// rendering, subtitle track selection (nothing renders them here yet — see
-/// `sourceInfo` for what exists to select). `.ended` fires from a synchronizer
+/// Subtitle rendering belongs to the host: poll `activeSubtitleCues` for an
+/// overlay. Bitmap subtitles and external subtitle files are not selected here.
+/// `.ended` fires from a synchronizer
 /// boundary at the last presentation end — when the speaker has finished the
 /// last buffer, not when it was enqueued.
 public final class SoftwarePlaybackPipeline: @unchecked Sendable {
@@ -201,6 +200,42 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         }
     }
 
+    /// Embedded text tracks supported by the same converter as HLS. Bitmap
+    /// tracks remain in `sourceInfo` but are not selectable on this surface.
+    public var selectableSubtitleTracks: [SubtitleTrackInfo] {
+        stateLock.withLock { storedSourceInfo?.textSubtitleTracks ?? [] }
+    }
+
+    /// `nil` means Off, including initially. Stream indices belong to the source.
+    public var selectedSubtitleStreamIndex: Int? {
+        stateLock.withLock { storedSelectedSubtitleStreamIndex }
+    }
+
+    /// Poll alongside `currentTime` to draw (or clear) a host subtitle overlay.
+    /// Times use the source axis, like this pipeline's clock. Text is WebVTT
+    /// payload with optional inline tags, not an attributed string. Reading this
+    /// never waits for demux I/O. Cues expire even when no more packets arrive.
+    public var activeSubtitleCues: [TimedTextCue] {
+        guard let index = selectedSubtitleStreamIndex else { return [] }
+        return subtitleCues.active(streamIndex: index, at: CMTimeGetSeconds(currentTime))
+    }
+
+    /// Select embedded text or `nil` for Off. Conversion runs as packets arrive
+    /// for every supported text track, so switching needs no A/V flush or seek,
+    /// including while paused. Completion runs on the feed queue; dispatch to
+    /// the main queue for UI work and do not call synchronous load/stop from it.
+    public func selectSubtitleTrack(
+        streamIndex: Int?, completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        feedQueue.async { [self] in
+            guard !stopped, storedStateIsResumable,
+                  streamIndex == nil || selectableSubtitleTracks.contains(where: { $0.streamIndex == streamIndex })
+            else { completion?(false); return }
+            stateLock.withLock { storedSelectedSubtitleStreamIndex = streamIndex }
+            completion?(true)
+        }
+    }
+
     // MARK: - Collaborators
 
     private let videoSink: VideoSampleSink
@@ -222,6 +257,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private var storedState: State = .idle
     private var storedDurationSeconds: Double?
     private var storedSourceInfo: SourceInfo?
+    private let subtitleCues = SoftwareSubtitleCueStore()
+    private var storedSelectedSubtitleStreamIndex: Int?
     private var storedSelectableAudioTracks: [AudioTrackInfo] = []
     /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
     private var storedSelectedAudioStreamIndex: Int32 = -1
@@ -523,6 +560,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             lastEnqueuedVideoPTS = .invalid
             lastEnqueuedVideoEnd = .invalid
             lastEnqueuedAudioEnd = .invalid
+            subtitleCues.reset()
             beginDiscarding(upTo: time)
 
             do {
@@ -1203,6 +1241,12 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             }
         }
 
+        if let stream = input.pointee.streams[Int(packet.pointee.stream_index)],
+           let kind = SubtitleRenditionSet.kind(for: stream.pointee.codecpar.pointee.codec_id) {
+            subtitleCues.ingest(packet, timeBase: stream.pointee.time_base, kind: kind,
+                                currentTime: clockAnchored ? CMTimeGetSeconds(timeline.currentTime) : .nan)
+        }
+
         switch Int32(packet.pointee.stream_index) {
         case videoStreamIndex:
             try videoDecoder?.decode(packet, emit: acceptVideo)
@@ -1301,6 +1345,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     private func teardown() {
         cancelEndObserver()
+        subtitleCues.reset()
+        stateLock.withLock { storedSelectedSubtitleStreamIndex = nil }
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         videoDecoder?.close()
