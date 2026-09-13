@@ -6,7 +6,45 @@ All notable changes to PrismCore. The format follows
 usual pre-1.0 caveat: **minor** bumps could break API, **patch** bumps stayed
 source-compatible.)
 
-## [Unreleased]
+## [2.2.0] — Unreleased
+
+### Added
+
+- **Software text subtitle selection (#35).** `selectableSubtitleTracks`,
+  `selectedSubtitleStreamIndex`, `selectSubtitleTrack(streamIndex:completion:)`
+  (`nil` for Off), and `activeSubtitleCues` let a host populate a menu and draw
+  captions on the software clock. The existing HLS text converter processes
+  all embedded text tracks into a bounded cache, so changing language while
+  paused can show the current cue without disturbing A/V. Cue times use the
+  source axis, matching `currentTime`; remux callbacks retain their rebased
+  clock. Selection starts Off and survives seeks; stop clears it.
+
+### Fixed
+
+- **Software audio switching uses the bounded `avformat_seek_file` path**
+  instead of unbounded `av_seek_frame` (which can assert on nested Matroska
+  elements). The rewind and discard threshold account for fixed audio delay.
+  A replacement decoder still opens before the old decoder is closed, and
+  only the audio renderer is flushed. Stop permanently cancels the read guard
+  so a finishing seek cannot disarm cancellation and resume blocked reads.
+- Extreme audio stream indices are refused without a narrowing-conversion
+  trap. Switching resets the old audio end time and invalidates its EOF
+  boundary, including callbacks already queued, so the old track cannot stop
+  the replacement. Completion reports failure if refeeding fails.
+
+### Validation and limits
+
+- Synthetic macOS tests cover metadata, stereo/5.1 switches in both directions,
+  nonzero playheads with positive/negative audio delay, paused selection,
+  invalid indices, EOF cancellation, and subtitle selection/Off/expiry/seek.
+  Renderer stand-ins verify enqueued media; audible gap and device rendering
+  still require host/device validation.
+- Text cache: 1,024 cues / 1 MiB of UTF-8 payload across tracks; excess incoming
+  cues are dropped. A seek repopulates from its keyframe, so an earlier long
+  cue may be missed. Bitmap/OCR, sidecars and advanced ASS styling are not
+  added to the software surface. The initial seek implementation pruned cues
+  against the old clock before re-anchoring; the backward-seek test caught it,
+  and pruning now waits for the new clock anchor.
 
 ## [2.1.1] — 2026-09-07
 
@@ -1374,7 +1412,10 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.0.2...main
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/2.1.1...main
+[2.2.0]: https://github.com/Wenzlik/PrismCore/compare/2.1.1...main
+[2.1.1]: https://github.com/Wenzlik/PrismCore/compare/2.1.0...2.1.1
+[2.1.0]: https://github.com/Wenzlik/PrismCore/compare/2.0.2...2.1.0
 [2.0.2]: https://github.com/Wenzlik/PrismCore/compare/2.0.1...2.0.2
 [2.0.1]: https://github.com/Wenzlik/PrismCore/compare/2.0.0...2.0.1
 [2.0.0]: https://github.com/Wenzlik/PrismCore/releases/tag/2.0.0
