@@ -8,6 +8,42 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.2.2] — 2026-09-24
+
+A memory fix for every host that plays over the coordinated HTTP reader.
+
+### Fixed
+
+- **The coordinated HTTP reader leaked about one megabyte per megabyte
+  played, until Jetsam killed the host.** `HTTPRangeInput` built a new
+  ephemeral `URLSession` for every 1 MiB fill, and it runs on the producer's
+  plain `Thread`, which never drains an autorelease pool. Each fill therefore
+  kept roughly its own payload: ~1.13 MB per fill, linear in bytes read, never
+  returned. In the field an Apple TV playing a 4K remux through the host's
+  localhost range proxy grew to 1.56 GB of anonymous memory in under nine
+  minutes and was killed (`vm-pageshortage`). The same code runs on iOS,
+  macOS and visionOS, so every platform leaked; tvOS just ran out first.
+
+  The reader now issues every fetch as a task on **one shared session** with
+  a per-task delegate. That session keeps no cookies, cache or credentials,
+  so no state passes between fills, the same as with a session per fill.
+  Each fill also runs inside its own autorelease pool, and so does each
+  `av_read_frame` in the remux loop, so a host `PrismCoreInput` that
+  autoreleases is covered too. Admission, redirects, timeouts and retry
+  behaviour are unchanged.
+
+  Measured with `HTTPRangeMemoryTests`: 256 fills of 1 MiB on a pool-less
+  `Thread` against a loopback Range origin, `phys_footprint` delta after a
+  16-fill warm-up, macOS 26:
+
+  | Build | Growth over 256 fills |
+  |---|---|
+  | 3.2.1 (session per fill, no pool) | 303 MB |
+  | shared session, no pool | 8.8–9.6 MB |
+  | 3.2.2 (shared session + pool) | 6.0–7.1 MB |
+
+  The test fails above 64 MB, which is still well below the leak.
+
 ## [3.2.1] — 2026-09-22
 
 A housekeeping release: no engine behaviour changes. Two build warnings are
@@ -2240,7 +2276,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.1...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...HEAD
+[3.2.2]: https://github.com/Wenzlik/PrismCore/compare/3.2.1...3.2.2
 [3.2.1]: https://github.com/Wenzlik/PrismCore/compare/3.2.0...3.2.1
 [3.2.0]: https://github.com/Wenzlik/PrismCore/compare/3.1.1...3.2.0
 [3.1.1]: https://github.com/Wenzlik/PrismCore/compare/3.1.0...3.1.1

@@ -1457,7 +1457,13 @@ final class HLSRemuxer: @unchecked Sendable {
         produce: while true {
             reachedEOF = false
             while !cancelled.isSet {
-                let readResult = av_read_frame(input, packet)
+                // Drained per packet: this loop runs on a plain `Thread` for
+                // the whole session and the thread never drains a pool of its
+                // own, so anything a read callback autoreleases — the
+                // coordinated reader's URL loading, a host's
+                // `PrismCoreInput` — would otherwise live until the film ends.
+                // That is how 3.2.1 reached Jetsam on an Apple TV.
+                let readResult = autoreleasepool { av_read_frame(input, packet) }
                 if readResult == swift_AVERROR_EOF() {
                     reachedEOF = true
                     break

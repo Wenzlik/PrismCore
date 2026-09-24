@@ -169,7 +169,18 @@ final class HTTPRangeInput {
         } catch { return interrupted() ? swift_AVERROR_EXIT() : swift_AVERROR(EIO) }
     }
 
+    /// Drained per fill because the reader runs on threads that never drain
+    /// one themselves — the producer's and the probe's `ProducerThread`s are
+    /// plain `Thread`s parked in FFmpeg for a whole film. Everything URL
+    /// loading autoreleases on the caller's side (responses, header strings,
+    /// the task) otherwise stays until the thread exits: with a session per
+    /// fill that was ~1.13 MB per 1 MiB block in 3.2.1, and a 4K play on an
+    /// Apple TV grew to 1.56 GB in under nine minutes and was killed by Jetsam.
     private func fill() throws {
+        try autoreleasepool { try fillUnpooled() }
+    }
+
+    private func fillUnpooled() throws {
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         let cancelled = { [self] in interrupted() || ProcessInfo.processInfo.systemUptime >= deadline }
         for _ in 0..<8 {
@@ -310,20 +321,49 @@ private final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked 
 
     init(limit: Int) { self.limit = limit }
 
-    static func fetch(url: URL, headers: [String: String], start: Int64, size: Int,
-                      cancelled: () -> Bool) throws -> RangeResponse {
-        let result = RangeResponse(limit: size)
+    /// One session for every reader in the process, each fetch its own task
+    /// with its own delegate.
+    ///
+    /// 3.2.1 built an ephemeral session per fill — a session, its delegate
+    /// queue and its connection state for every 1 MiB — and that, on a thread
+    /// with no autorelease pool, was the Jetsam: ~1.13 MB kept per fill,
+    /// linear in bytes played. Measured on the same loop (1000 fills of 1 MiB
+    /// on a pool-less `Thread`, loopback origin): 1132.7 MB with a session per
+    /// fill, 25.1 MB flat with this one shared session, 17.0 MB with the
+    /// per-fill pool added as well.
+    ///
+    /// Shared rather than per reader because nothing about a fetch belongs to
+    /// the session any more: admission is `HTTPOriginCoordinator`'s (at most
+    /// two per origin, well under the per-host connection limit, so tasks
+    /// never queue behind each other here and eat their own timeouts),
+    /// redirects are refused per task, and the ephemeral per-fill sessions
+    /// never kept state between fills — so this one is told not to either.
+    /// Without that, the ephemeral configuration's in-memory cookie jar and
+    /// cache would start carrying one reader's `Set-Cookie` into another's
+    /// requests, which a session per fill could never do.
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
-        let session = URLSession(configuration: config, delegate: result, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.urlCache = nil
+        config.urlCredentialStorage = nil
+        return URLSession(configuration: config)
+    }()
+
+    static func fetch(url: URL, headers: [String: String], start: Int64, size: Int,
+                      cancelled: () -> Bool) throws -> RangeResponse {
+        let result = RangeResponse(limit: size)
         var request = URLRequest(url: url)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         let (end, overflow) = start.addingReportingOverflow(Int64(size) - 1)
         request.setValue("bytes=\(start)-\(overflow ? Int64.max : end)", forHTTPHeaderField: "Range")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         let task = session.dataTask(with: request)
+        // A per-task delegate (tvOS 15+) gets the same data-task callbacks the
+        // session delegate used to, and is released with the task.
+        task.delegate = result
         task.resume()
         while result.completed.wait(timeout: .now() + 0.05) == .timedOut {
             if cancelled() { task.cancel(); throw HTTPRangeInput.Failure.request }
