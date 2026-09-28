@@ -764,8 +764,29 @@ final class AudioBridge {
         let query = avcodec_get_supported_config(
             nil, encoder, AV_CODEC_CONFIG_CHANNEL_LAYOUT, 0, &raw, &count
         )
-        // No list means "anything goes" — keep the source layout.
+        // No list means "anything goes" — keep the source layout. This is the
+        // branch FFmpeg's `aac` encoder actually takes (it publishes no
+        // supported-layout list), so the standardization below — not the
+        // list-driven cap after the guard — is what an AAC target sees.
         guard query >= 0, let raw, count > 0 else {
+            // A source like "5.1(side)" (surround at the side positions,
+            // rather than the standard "5.1(back)") has no match in the
+            // implicit MPEG-4 channel-configuration table, so FFmpeg's aac
+            // encoder falls back to an explicit Program Config Element to
+            // describe it — and Apple's AudioToolbox AAC decoder does not
+            // reliably parse PCE-only channel configs, which silently fails
+            // AVPlayer's asset validation for the whole HLS master (no
+            // errorLog/accessLog detail).
+            // `av_channel_layout_default` builds the standard "back"-surround
+            // layout for a channel count instead, which always has a plain
+            // implicit channelConfiguration and decodes normally — trading
+            // side/back positional fidelity AVPlayer couldn't render anyway
+            // for a rendition that actually plays.
+            let encoderName = avcodec_get_name(encoder.pointee.id).map { String(cString: $0) } ?? "?"
+            if encoderName == "aac", source.nb_channels > 0 {
+                av_channel_layout_default(&result, min(source.nb_channels, 6))
+                return result
+            }
             try FFmpegError.check(
                 av_channel_layout_copy(&result, &source),
                 "av_channel_layout_copy(any-layout encoder)"
@@ -792,6 +813,14 @@ final class AudioBridge {
         }
         guard var chosen = exact ?? widestFit else {
             throw Failure.channelLayoutUnsupported(source.nb_channels)
+        }
+        // Same reasoning as the any-layout branch above, for a build whose
+        // aac encoder does publish a supported-layout list: don't hand it a
+        // positional (e.g. side-surround) layout it would need a PCE to
+        // describe.
+        let encoderName = avcodec_get_name(encoder.pointee.id).map { String(cString: $0) } ?? "?"
+        if encoderName == "aac" {
+            av_channel_layout_default(&chosen, min(chosen.nb_channels, 6))
         }
         try FFmpegError.check(
             av_channel_layout_copy(&result, &chosen),
