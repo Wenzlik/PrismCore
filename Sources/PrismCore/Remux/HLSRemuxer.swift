@@ -777,15 +777,17 @@ final class HLSRemuxer: @unchecked Sendable {
         // Demand-driven mode needs a trustworthy upfront segmentation. Only a
         // keyframe-based plan qualifies — uniform-plan boundaries are time
         // targets, and a playlist that promises durations the producer can't
-        // hit at keyframes would drift against what AVPlayer fetched. The one
-        // shape excluded is muxed-with-bridge: re-anchoring would mean
-        // resetting an encoder mid-fragment, and that combination only occurs
-        // when a master was refused anyway.
-        let demandEligible: Bool = {
-            guard demand != nil else { return false }
-            if case .muxed(let audio) = shape, audio?.mode == .bridge { return false }
-            return true
-        }()
+        // hit at keyframes would drift against what AVPlayer fetched.
+        //
+        // Muxed-with-bridge used to be excluded here on the assumption that
+        // re-anchoring meant resetting an encoder mid-fragment — but
+        // `AudioBridge.reset()` already exists precisely to survive a
+        // demand-driven seek without rebuilding (decoder/encoder/resampler
+        // contexts live on, only their buffered state is stale), and
+        // `AudioRenditionWriter.reanchor` already uses it for a bridged
+        // *rendition*. `reanchor(to:)` below now does the equivalent for the
+        // muxed shape's single bridge, so this exclusion no longer applies.
+        let demandEligible: Bool = demand != nil
 
         // The source's identity for the keyframe cache — from the opened
         // context, so the size is the transport's own answer (HTTP and file
@@ -1407,6 +1409,42 @@ final class HLSRemuxer: @unchecked Sendable {
                 // segment AVPlayer counts as failed. Cleared with the rest of
                 // the old verdicts, for the same reason they are.
                 demand?.clearUnproducible()
+            }
+            // The muxed shape's single bridge, mirroring what
+            // AudioRenditionWriter.reanchor already does per-rendition: reset
+            // (not rebuild) whenever possible, since the decoder/encoder/
+            // resampler survive a demand-driven seek and only their buffered
+            // state is stale. Must happen before `writer.open` below — the
+            // bridge's encoder parameters have to be on the output stream
+            // before `avformat_write_header`, same as the initial build.
+            if let bridge = muxedBridge {
+                if bridge.isDrained {
+                    // Flushed at EOF: the encoder is in its terminal state
+                    // and cannot be revived (see AudioBridge.reset's own
+                    // doc) — rebuild it fresh, same fallback
+                    // AudioRenditionWriter.reanchor takes for a drained
+                    // per-rendition bridge.
+                    bridge.close()
+                    if let index = muxedBridgeIndex {
+                        let inStream = input.pointee.streams[Int(index)]!
+                        let fresh = try AudioBridge(
+                            codecpar: inStream.pointee.codecpar,
+                            timeBase: inStream.pointee.time_base,
+                            globalHeader: true
+                        )
+                        muxedBridge = fresh
+                        fresh.onProgress = { [audioDeliveryStore, index = Int(index)] progress in
+                            audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
+                        }
+                        if let planIndex = plan.firstIndex(where: { $0.inputIndex == index }) {
+                            plan[planIndex] = .init(inputIndex: index, language: plan[planIndex].language) { outStream in
+                                try fresh.configure(outputStream: outStream)
+                            }
+                        }
+                    }
+                } else {
+                    bridge.reset()
+                }
             }
             writer = FMP4SegmentWriter()
             writer.audioDelaySeconds = audioDelaySeconds
