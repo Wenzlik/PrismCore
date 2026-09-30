@@ -10,6 +10,59 @@ source-compatible.)
 
 ### Added
 
+- **`PrismCoreEngine.prewarm(url:httpHeaders:byteBudget:)` — fetch a
+  source's first bytes before the host plays it.** A host that knows what is
+  likely next (the following episode, the item under the cursor) can prewarm
+  it: the first megabyte and, when the container names a tail index, a
+  window ending at the end of the file that covers it (a Matroska's Cues and
+  the last cluster before them, which is where the segment plan's index load
+  lands; or a trailing `moov` for MP4) go into an in-memory store. That is at
+  most two bounded range requests. When a later open reads the same URL with the same
+  headers over the coordinated HTTP reader (`coordinatedHTTP: true`), the
+  reader takes those blocks into its cache instead of fetching them.
+  `ProbedSource.prewarm` reports what happened (`adopted`, `stale`,
+  `unverified`, `none`).
+
+  The rules, and why:
+  - **Validator check before the first delivered byte.** The reader asks the
+    origin for one byte first, and takes the blocks only if the strong
+    `ETag`, the length and that byte all still match. Otherwise it drops the
+    entry and reads the network as usual. An origin that reports no strong
+    `ETag` cannot be prewarmed at all: stale bytes would give the demuxer a
+    wrong parse, not just a slow one. That includes an origin that reports
+    only `Last-Modified` — at one-second resolution it cannot tell apart two
+    versions of a file written within the same second, and when the length
+    and first byte survive the rewrite every other check passes. A host
+    range proxy that forwards no `ETag` therefore has to forward its
+    origin's (or synthesise one from the file's size and a sub-second mtime,
+    or a content hash) before a prewarm through it can do anything. This is the
+    3.2.0 hints rule, and that confirming response is also what the hints'
+    `expectedValidator` is judged on.
+  - **Hard memory bounds.** Each prewarm is capped at 2 MB, half the
+    reader's 4 MB retention, so taking it over never makes the reader evict
+    the header it will come back to. The process-wide store is capped at 16 MB (least recently used goes
+    first), and everything is dropped on the first memory-pressure warning.
+  - **Origin capacity comes first.** Prewarm requests go through
+    `HTTPOriginCoordinator` at lower priority. They are admitted only while
+    no other request to that origin is in flight, so one of the two slots
+    always stays free for playback. They are declined outright within a
+    minute of a refusal. A 429 / 503 / 509 is recorded for everyone and not
+    retried.
+  - Only the coordinated reader consults the store. FFmpeg's native HTTP and
+    host-supplied inputs behave exactly as before.
+
+  `ContainerLayoutScanner` now also reports where the index element starts
+  (`indexOffset`), which the prewarm uses to aim its tail fetch; the
+  outcome's `indexPrewarmed` is `true` only when the stored bytes at that
+  offset really are the index (the Cues element ID, or a `moov` box after
+  `mdat`), and `requests` counts only requests the origin was sent.
+  `Scripts/proxy-model-server.py` gains `VALIDATOR=1` to model a host proxy
+  that forwards its origin's validator, and `StartupCheckpointBenchmark`
+  gains `PRISMCORE_BENCH_PREWARM=1` (via `StartupCheckpointRun.measure(prewarm:)`,
+  which prints the prewarm on its own line ahead of the probe line and appends
+  `prewarm-use` to it). No performance claim is made here; the
+  measurement belongs with the PR.
+
 - **`prismcore-cli`: reproduce a field report from a terminal.** A new macOS
   executable product with five subcommands, each answering one question a
   report usually asks:

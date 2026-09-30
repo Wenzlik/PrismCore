@@ -20,11 +20,29 @@ package struct StartupCheckpointRun: Sendable {
     /// `start()`'s error, when it threw. The probe line is still worth
     /// printing then: a startup that fails is usually the one being chased.
     package let failure: String?
+    /// The prewarm run ahead of the probe, when the caller asked for one.
+    /// Timed on its own and kept off the probe line's total: it is work a
+    /// host does while the user is still choosing, so folding it into the
+    /// startup it is meant to shorten would hide what it bought.
+    package let prewarm: SourcePrewarmOutcome?
+    /// What the probe's reader made of that prewarm (`nil` when none ran).
+    package let prewarmUse: SourcePrewarmUse?
 
-    /// The three-line block both callers print.
+    /// `prewarm Nms (status, N req, N B, index Bool)`, when a prewarm ran.
+    package var prewarmLine: String? {
+        prewarm.map {
+            "prewarm \(Self.ms($0.duration))ms (\($0.status), \($0.requests) req, "
+                + "\($0.storedBytes) B, index \($0.indexPrewarmed))"
+        }
+    }
+
+    /// The three-line block both callers print — four with a prewarm, whose
+    /// line comes first and whose use is appended to the probe line. Without
+    /// one the block is unchanged, so a run without a prewarm still compares
+    /// term by term with a device report.
     package var rendered: String {
         """
-        \(probeLine)
+        \(prewarmLine.map { $0 + "\n" } ?? "")\(probeLine)\(prewarmUse.map { " prewarm-use \($0)" } ?? "")
         startup \(checkpoints.joined(separator: " -> "))
         start() returned in \(Self.ms(startDuration))ms\(failure.map { " — FAILED: \($0)" } ?? "")
         """
@@ -37,14 +55,23 @@ package struct StartupCheckpointRun: Sendable {
     /// a second open would add a network round trip the host never pays and
     /// the line would stop describing the host. Throws only when the probe
     /// itself fails — a failed `start()` is a result, recorded in `failure`.
+    ///
+    /// `prewarm: true` calls `PrismCoreEngine.prewarm` with the same URL and
+    /// headers before the probe, as a host would ahead of the play. Only the
+    /// coordinated reader consults the prewarm store, so without
+    /// `coordinatedHTTP` the use reads `none`.
     package static func measure(
         url: URL,
         httpHeaders: [String: String] = [:],
         budget: Duration,
         coordinatedHTTP: Bool,
         display: DisplayCapabilities = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
-        keyframeIndexCacheDirectory: URL? = nil
+        keyframeIndexCacheDirectory: URL? = nil,
+        prewarm: Bool = false
     ) async throws -> StartupCheckpointRun {
+        let prewarmOutcome: SourcePrewarmOutcome? = prewarm
+            ? await PrismCoreEngine.prewarm(url: url, httpHeaders: httpHeaders)
+            : nil
         let probed = try SourceProbe.open(
             url: url, httpHeaders: httpHeaders, budget: budget, coordinatedHTTP: coordinatedHTTP
         )
@@ -75,7 +102,9 @@ package struct StartupCheckpointRun: Sendable {
             probeTiming: probed.timing,
             checkpoints: collected.marks,
             startDuration: elapsed,
-            failure: failure
+            failure: failure,
+            prewarm: prewarmOutcome,
+            prewarmUse: prewarmOutcome == nil ? nil : probed.prewarm
         )
     }
 

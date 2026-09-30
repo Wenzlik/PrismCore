@@ -40,6 +40,11 @@ struct StartupCheckpointBenchmark {
         // for bounded blocks.
         let coordinatedHTTP =
             ProcessInfo.processInfo.environment["PRISMCORE_BENCH_COORDINATED_HTTP"] == "1"
+        // A prewarm ahead of the probe, timed on its own line: it is work a
+        // host does while the user is still choosing, so it must not be
+        // folded into the startup it is meant to shorten. Only the
+        // coordinated reader consults the prewarm store.
+        let prewarm = ProcessInfo.processInfo.environment["PRISMCORE_BENCH_PREWARM"] == "1"
         // The measurement and the line live in `StartupCheckpointRun` so that
         // `prismcore-cli bench` prints exactly this, not a lookalike.
         let run = try await StartupCheckpointRun.measure(
@@ -47,7 +52,8 @@ struct StartupCheckpointBenchmark {
             budget: .seconds(budget),
             coordinatedHTTP: coordinatedHTTP,
             keyframeIndexCacheDirectory: ProcessInfo.processInfo
-                .environment["PRISMCORE_BENCH_KEYFRAME_CACHE"].map(URL.init(fileURLWithPath:))
+                .environment["PRISMCORE_BENCH_KEYFRAME_CACHE"].map(URL.init(fileURLWithPath:)),
+            prewarm: prewarm
         )
         print("\n\(run.rendered)\n")
     }
