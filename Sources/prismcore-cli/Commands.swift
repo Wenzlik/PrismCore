@@ -117,9 +117,10 @@ enum ServeCommand {
         }
         // Armed before the probe: a Ctrl-C during a slow open should still
         // reach `stop()` rather than the default handler.
-        // Ctrl-C is how a serve is *meant* to end, so it exits 0 here.
+        // Once the URL is out, Ctrl-C is how a serve is *meant* to end, so it
+        // exits 0; before that it interrupted a startup, and exits 130.
         let stop = StopSignal(watchStdin: true)
-        return try await withServedSession(reader.options) { playlist in
+        return try await withServedSession(reader.options, stop: stop) { playlist in
             print("serving: \(playlist.absoluteString)")
             print("open it in Safari or QuickTime Player; Enter or Ctrl-C stops the session")
             // Timed stops count from the URL being out, not from launch.
@@ -207,17 +208,23 @@ enum SegVerifyCommand {
         }
         let options = reader.options
         let stop = StopSignal(watchStdin: false)
+        // `-H` belongs to whatever the source URL is: the origin under a
+        // remux, the HLS presentation itself under --hls. The playlist a
+        // remux serves is PrismCore's own loopback, which wants none.
+        let hlsHeaders = alreadyHLS ? options.headers : [:]
         let verify: @Sendable (URL) async throws -> SegmentVerifier.Report = { [limit] playlist in
             print("verifying \(playlist.absoluteString)")
-            return try await interruptible(stop) {
-                try await SegmentVerifier.verify(playlist: playlist, limit: limit) { print("  \($0)") }
+            return try await untilStopped(stop) {
+                try await SegmentVerifier.verify(playlist: playlist, httpHeaders: hlsHeaders, limit: limit) {
+                    print("  \($0)")
+                }
             }
         }
         let report: SegmentVerifier.Report
         if alreadyHLS {
             report = try await verify(options.source!)
         } else {
-            report = try await withServedSession(options, verify)
+            report = try await withServedSession(options, stop: stop, verify)
         }
 
         print("")
@@ -226,13 +233,33 @@ enum SegVerifyCommand {
                 print("\(playlist.uri): skipped — \(skipped)")
             } else {
                 print("\(playlist.uri): \(playlist.segmentsChecked) segment(s), "
-                    + "\(playlist.videoFrames) video / \(playlist.audioFrames) audio frames decoded")
+                    + "\(playlist.videoFrames) video / \(playlist.audioFrames) audio frames decoded"
+                    + (playlist.undecodedStreams.isEmpty
+                        ? "" : "; NOT decoded: " + playlist.undecodedStreams.joined(separator: ", ")))
             }
         }
         for finding in report.findings { print(finding) }
+        return summarize(report)
+    }
+
+    /// The last line and the exit status. A problem found outranks a check
+    /// not made; a check not made is never `ok` — a missing decoder says
+    /// nothing is wrong with the media, and just as little that it is right.
+    static func summarize(_ report: SegmentVerifier.Report) -> ExitCode {
         let errors = report.findings.filter { $0.severity == .error }.count
-        print(errors == 0 ? "segverify: ok" : "segverify: \(errors) segment problem(s)")
-        return errors == 0 ? .ok : .checkFailed
+        let unverified = report.findings.filter { $0.severity == .unverified }.count
+        if errors > 0 {
+            print("segverify: \(errors) segment problem(s)"
+                + (unverified > 0 ? ", and \(unverified) check(s) not made" : ""))
+            return .checkFailed
+        }
+        if unverified > 0 {
+            print("segverify: unverified — \(unverified) check(s) could not be made; "
+                + "no problem found in what was checked")
+            return .unavailable
+        }
+        print("segverify: ok")
+        return .ok
     }
 }
 #endif

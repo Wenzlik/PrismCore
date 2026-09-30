@@ -50,7 +50,11 @@ struct PrismCoreCLI {
                                                    it directly instead of remuxing
 
         Exit status: 0 ok, 1 check failed, 2 source unreadable, 3 source routes away from
-        the remux path, 64 usage, 66 no such file, 69 required tool unavailable.
+        the remux path, 64 usage, 66 no such file, 69 a check could not be made (validator
+        missing under --require-validator; segverify: a stream with no decoder in this
+        build, a segment that left a live window, or encrypted segments), 130 interrupted
+        (Ctrl-C/SIGTERM) — except serve once its URL is printed, where Ctrl-C is the
+        intended end and exits 0.
         Media over HTTP, not a mounted share — see AGENTS.md "Measuring".
         """
 

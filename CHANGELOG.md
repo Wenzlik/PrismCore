@@ -26,9 +26,12 @@ source-compatible.)
   build. The shared options are HTTP headers (`-H`), `--coordinated-http`,
   `--budget`, `--display sdr|hdr|dv` and `-v`. Exit codes tell a failed check
   (1) from an unreadable source (2), a source that routes away from remux
-  (3), a usage error (64), a missing file (66), a required tool that is
-  missing (69) and an interrupt (130). There is no new dependency: arguments
-  are parsed by hand.
+  (3), a usage error (64), a missing file (66), a check that could not be
+  made (69: a missing validator under `--require-validator`, or a `segverify`
+  stream with no decoder in this build) and an interrupt (130). Ctrl-C
+  reaches the probe and `start()` too, not only the running check; `serve`
+  exits 0 on a Ctrl-C after its URL is out, since that is how it is meant to
+  end. There is no new dependency: arguments are parsed by hand.
 
   `validate` is **opt-in** on Apple's HTTP Live Streaming Tools, which CI does
   not have. A missing validator prints a notice and exits 0, unless
@@ -55,6 +58,14 @@ source-compatible.)
     - pictures lost to missing references
     - a segment that is listed but not served
     - an `#EXTINF` far from the media's length (warning)
+    - a check it could not make (`unverified`, never a pass): a stream with
+      no decoder in this build, a segment that left a sliding window before
+      it was fetched, encrypted segments
+
+    It honours `EXT-X-BYTERANGE` and `EXT-X-MAP` `BYTERANGE` (each segment is
+    its own range, with the map in force at it), follows a playlist that has
+    not ended by media sequence rather than position, and sends the caller's
+    HTTP headers on every request.
 
     An open GOP's leading pictures, which a decoder starting at a CRA skips,
     are a warning, not a failure: stream copy cannot change the source's GOP

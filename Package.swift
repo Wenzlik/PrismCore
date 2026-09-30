@@ -52,7 +52,10 @@ let package = Package(
         ),
         .testTarget(
             name: "PrismCoreTests",
-            dependencies: ["PrismCore"],
+            // The CLI too, so its stop handling is tested against the same
+            // fixtures and scripted origins as the library (`@testable
+            // import prismcore_cli`; SwiftPM links an executable into tests).
+            dependencies: ["PrismCore", "prismcore-cli"],
             resources: [
                 // Synthetic A/V fixtures (ffmpeg-generated testsrc2 + sine,
                 // seconds long) — enough to prove the remux round-trip and to

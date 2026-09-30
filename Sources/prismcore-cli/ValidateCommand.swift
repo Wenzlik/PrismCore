@@ -58,23 +58,23 @@ enum ValidateCommand {
         try? FileManager.default.removeItem(at: outDirectory.appendingPathComponent("validation_data.json"))
 
         let stop = StopSignal(watchStdin: false)
-        return try await withServedSession(options) { playlist in
+        return try await withServedSession(options, stop: stop) { playlist in
             print("serving: \(playlist.absoluteString)")
             print("running \(validator.path) (output in \(outDirectory.path))")
             // Run in the output directory: the validator writes its JSON
             // (validation_data.json) into the working directory by default,
             // and depending on that avoids guessing at flag spellings that
             // differ between tool releases.
-            let status = try await interruptible(stop) {
-                try runTool(validator, arguments: options.passthrough + [playlist.absoluteString],
+            let status = try await untilStopped(stop) {
+                try await runTool(validator, arguments: options.passthrough + [playlist.absoluteString],
                             in: outDirectory, stop: stop)
             }
             print("mediastreamvalidator exited \(status)")
 
             let json = outDirectory.appendingPathComponent("validation_data.json")
             if let hlsreport, FileManager.default.fileExists(atPath: json.path) {
-                let reportStatus = try await interruptible(stop) {
-                    try runTool(hlsreport, arguments: [json.lastPathComponent], in: outDirectory, stop: stop)
+                let reportStatus = try await untilStopped(stop) {
+                    try await runTool(hlsreport, arguments: [json.lastPathComponent], in: outDirectory, stop: stop)
                 }
                 // A report that could not be rendered does not change the
                 // validator's verdict, so it is a notice, not the exit code.
@@ -105,21 +105,33 @@ enum ValidateCommand {
     }
 
     /// Run a tool with inherited stdout/stderr and return its exit status.
-    /// Blocking by design — the caller runs it inside `interruptible`, and a
-    /// stop terminates the child so the session is not stopped under it.
-    private static func runTool(_ tool: URL, arguments: [String], in directory: URL, stop: StopSignal) throws -> Int32 {
+    ///
+    /// Awaited through the termination handler rather than
+    /// `waitUntilExit()`, which would park a cooperative-pool thread for the
+    /// validator's whole run — the thread the stop race may need to answer
+    /// on. A stop terminates the child, so the session is not stopped under
+    /// a validator still reading from it.
+    private static func runTool(
+        _ tool: URL, arguments: [String], in directory: URL, stop: StopSignal
+    ) async throws -> Int32 {
         let process = Process()
         process.executableURL = tool
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        try process.run()
         let watcher = Task {
             _ = await stop.wait()
             if process.isRunning { process.terminate() }
         }
-        process.waitUntilExit()
-        watcher.cancel()
-        return process.terminationStatus
+        defer { watcher.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            // Installed before `run()`: a tool that exits at once must not
+            // finish before anyone is listening.
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do { try process.run() } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
     }
 }
 #endif

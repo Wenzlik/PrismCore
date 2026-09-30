@@ -16,7 +16,12 @@ enum ExitCode: Int32 {
     case notRemuxable = 3
     case usage = 64          // EX_USAGE
     case noInput = 66        // EX_NOINPUT
-    case unavailable = 69    // EX_UNAVAILABLE
+    /// EX_UNAVAILABLE: a required check could not be made — the validator
+    /// is missing under `--require-validator`, or `segverify` met a stream
+    /// this build cannot decode (or a segment it could not fetch in time
+    /// from a live window). Distinct from 1 on purpose: nothing was found
+    /// wrong with the media, and nothing was shown right.
+    case unavailable = 69
     /// 128 + SIGINT, what a shell reports for a Ctrl-C'd command.
     case interrupted = 130
 }
@@ -28,7 +33,7 @@ struct CLIFailure: Error {
 
 /// The options every subcommand shares. Hand-parsed: one small tool does not
 /// justify a package dependency every host would then resolve.
-struct SourceOptions {
+struct SourceOptions: Sendable {
     var source: URL?
     var headers: [String: String] = [:]
     var coordinatedHTTP = false

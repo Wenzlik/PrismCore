@@ -248,7 +248,15 @@ A field report no longer needs a device build for the first questions.
   keyframe, fails to demux or decode, is listed but not served, or loses
   pictures. An open GOP's leading pictures and an `#EXTINF` far from the
   media's length are warnings. `--hls` verifies an existing playlist
-  without remuxing.
+  without remuxing, sending `-H` on every request (master, media playlists,
+  init, fragments). Byte-range segments (`EXT-X-BYTERANGE`, `EXT-X-MAP`
+  `BYTERANGE`) are fetched as ranges, each map applies to the segments after
+  it, and a playlist that has not ended is followed by **media sequence**,
+  not position — a sliding window re-indexed by position skips whatever
+  slid in. A check that could not be made — a stream this build has no
+  decoder for, a segment that left the window before it was fetched,
+  encrypted segments — is an `unverified` finding and **exit 69, never
+  `ok`**: nothing was found wrong, and nothing was shown right.
 - `validate`: serves, then runs Apple's `mediastreamvalidator` in `--out
   DIR`, and `hlsreport` over its JSON when that tool is present too. **Opt-in
   on Apple's HTTP Live Streaming Tools**, which CI and most machines do not
@@ -256,6 +264,12 @@ A field report no longer needs a device build for the first questions.
   `$PRISMCORE_HLSREPORT`, and a missing validator prints a notice and exits 0.
   `--require-validator` turns that into exit 69. The hermetic suite never
   runs it.
+
+Ctrl-C / SIGTERM reach every phase, the probe and `start()` included —
+neither observes task cancellation, so each is raced against the stop
+(`untilStopped`) and the session is stopped under a `start()` that lost.
+An interrupt exits 130, except `serve` once its URL is printed, where
+Ctrl-C is the intended end and exits 0.
 
 The shared options are `-H "Name: value"` (repeatable), `--coordinated-http`,
 `--budget SECONDS` and `--display sdr|hdr|dv`, and `-v` turns on libav*
