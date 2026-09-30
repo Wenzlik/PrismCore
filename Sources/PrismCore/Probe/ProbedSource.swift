@@ -91,6 +91,11 @@ public final class ProbedSource: @unchecked Sendable {
     /// argue about but intuition.
     public let timing: ProbeTiming
 
+    /// Whether this open started from prewarmed bytes (see
+    /// `PrismCoreEngine.prewarm`). Always `.none` off the coordinated HTTP
+    /// reader, which is the only transport that consults the prewarm store.
+    public var prewarm: SourcePrewarmUse { interruptGuard.prewarmUse }
+
     private let lock = NSLock()
     private var context: UnsafeMutablePointer<AVFormatContext>?
 
