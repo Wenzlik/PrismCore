@@ -8,6 +8,74 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **`prismcore-cli`: reproduce a field report from a terminal.** A new macOS
+  executable product with five subcommands, each answering one question a
+  report usually asks:
+
+  | Command | Answers |
+  |---|---|
+  | `probe` | What did the probe see, and where does the source route (`SourceInfo`, structure, phase timings, `decide` verdict with its reason)? |
+  | `serve` | Does the served HLS play? (prints a loopback playlist URL for Safari or QuickTime, stops cleanly on Enter, Ctrl-C or `--for`) |
+  | `bench` | Where did startup spend its time? (the host log's checkpoint line, `--runs N` for the spread) |
+  | `segverify` | Is every segment decodable on its own? (names each bad segment and says why) |
+  | `validate` | Does Apple's `mediastreamvalidator` accept the master? (plus `hlsreport` when installed) |
+
+  Until now the only ways to see these were opt-in test harnesses or a device
+  build. The shared options are HTTP headers (`-H`), `--coordinated-http`,
+  `--budget`, `--display sdr|hdr|dv` and `-v`. Exit codes tell a failed check
+  (1) from an unreadable source (2), a source that routes away from remux
+  (3), a usage error (64), a missing file (66), a check that could not be
+  made (69: a missing validator under `--require-validator`, or a `segverify`
+  stream with no decoder in this build) and an interrupt (130). Ctrl-C
+  reaches the probe and `start()` too, not only the running check; `serve`
+  exits 0 on a Ctrl-C after its URL is out, since that is how it is meant to
+  end. There is no new dependency: arguments are parsed by hand.
+
+  `validate` is **opt-in** on Apple's HTTP Live Streaming Tools, which CI does
+  not have. A missing validator prints a notice and exits 0, unless
+  `--require-validator` is passed. The tools are found through `PATH`,
+  `$PRISMCORE_MEDIASTREAMVALIDATOR` or `$PRISMCORE_HLSREPORT`. The hermetic
+  suite never runs them.
+
+  None of this replaces a device run. The tvOS display handshake, Dolby
+  Vision on a panel and Atmos passthrough are still decided on hardware.
+  See AGENTS.md *Measuring*.
+
+- **Shared diagnostics, `package` access.** The CLI and the tests share this
+  code instead of each keeping a copy that could drift:
+  - `StartupCheckpointRun` is the probe → session → checkpoints measurement
+    and its three-line rendering. `StartupCheckpointBenchmark` now prints
+    through it, and `DiagnosticsTests.checkpointLineShape` pins the line's
+    shape hermetically, where before only the opt-in harness exercised it.
+  - `SegmentVerifier` fetches each served segment over HTTP and decodes init
+    plus that one fragment with a fresh libavformat/libavcodec pair. It
+    reports:
+    - a non-key opening picture
+    - demux and decode errors
+    - frames flagged corrupt
+    - pictures lost to missing references
+    - a segment that is listed but not served
+    - an `#EXTINF` far from the media's length (warning)
+    - a check it could not make (`unverified`, never a pass): a stream with
+      no decoder in this build, a segment that left a sliding window before
+      it was fetched, encrypted segments
+
+    It honours `EXT-X-BYTERANGE` and `EXT-X-MAP` `BYTERANGE` (each segment is
+    its own range, with the map in force at it), follows a playlist that has
+    not ended by media sequence rather than position, and sends the caller's
+    HTTP headers on every request.
+
+    An open GOP's leading pictures, which a decoder starting at a CRA skips,
+    are a warning, not a failure: stream copy cannot change the source's GOP
+    structure. The `hevc_eac3.mkv` fixture carries one, and system `ffprobe`
+    also decodes 144 of that segment's 145 packets.
+  - `PrismCoreLog.observer` is now `package`, so `-v` can put engine notices
+    next to the output they explain.
+  - `LibraryLogLevel` quiets libav*'s per-session muxer warnings in the CLI.
+    It is never called from the library.
+
 ## [3.2.2] — 2026-09-24
 
 A memory fix for every host that plays over the coordinated HTTP reader.
