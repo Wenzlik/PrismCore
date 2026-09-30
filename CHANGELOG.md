@@ -8,6 +8,17 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **The SEI message loop no longer stops at payload type 128 or at an
+  extended payload type.** It took any message starting with `0x80` for
+  `rbsp_trailing_bits`, although `structure_of_pictures_info` is payload
+  type 128, and it bounded an extended payload *type* (`FF 05` = 260) by the
+  buffer size as if it were a length. Either one ended the walk, and any
+  A/53 caption or HDR10+ message behind it went unread. The stop bit is now
+  found by position (the last non-zero byte of the RBSP), and only the
+  payload *size* is checked against the buffer.
+
 ### Added
 
 - **HDR10+ (SMPTE ST 2094-40) detection, read from the bitstream.** Containers
@@ -30,13 +41,22 @@ source-compatible.)
   runs right after `describe`, so its first reads are the packets
   `avformat_find_stream_info` already buffered, and an adopted context is
   rewound by the producer as before (a test checks that the head segment
-  starts at `tfdt` 0 and still carries the SEI byte for byte).
+  starts at `tfdt` 0 and still carries the SEI byte for byte). When the
+  adopted context was scanned, the producer rewinds it **before** the
+  closed-caption scout as well: the scout reads packets from wherever the
+  context stands, and after a scan that ran to EOF it read none, so a source
+  captioned on every picture lost its CC1 rendition. That rewind is one
+  extra seek (a Range request over HTTP), paid only by hosts that opted in;
+  a test compares the master and the served caption cues with the scan off
+  and on.
 
   The NAL framing, the SEI message loop, emulation-prevention removal and
   the carriage choice now live in `HEVCNALUnits`, shared with the A/53
   caption reader. Only the T.35 header test belongs to the scout. There is a
-  new fuzz target, `hdr10plus-sei`, with a seed that puts an encoder banner
-  and an A/53 caption message ahead of the HDR10+ one. Its checks: a `seen`
+  new fuzz target, `hdr10plus-sei`, with a seed that puts a
+  `structure_of_pictures_info` (payload type 128), a message of an extended
+  payload type, an encoder banner and an A/53 caption message ahead of the
+  HDR10+ one. Its checks: a `seen`
   needs an SEI unit under it and a defined version, and in length-prefixed
   carriage, adding a slice on either side must not change the verdict.
 

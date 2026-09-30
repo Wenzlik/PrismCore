@@ -38,17 +38,26 @@ package enum FuzzSeeds {
     ]
 
     /// An HEVC access unit shaped like an encoder's: a prefix SEI NAL whose
-    /// message loop holds an unregistered encoder banner, an A/53 caption T.35
-    /// message and then the HDR10+ one, followed by a slice.
+    /// message loop holds a `structure_of_pictures_info`, a message of an
+    /// extended (two-byte) payload type, an unregistered encoder banner, an
+    /// A/53 caption T.35 message and then the HDR10+ one, followed by a slice.
     ///
-    /// The two decoys are the point. The banner makes the loop step over a
-    /// message it does not want, and the caption message shares the payload
-    /// type AND the country code with HDR10+ — so a mutation that blurs the
-    /// terminal-provider test lands on a branch that tells the two apart.
+    /// The decoys are the point. Payload type 128 opens with the same `0x80`
+    /// byte as `rbsp_trailing_bits`, and type 260 (`FF 05`) is a type number
+    /// larger than the whole message — each once ended the loop before HDR10+.
+    /// The banner makes the loop step over a message it does not want, and the
+    /// caption message shares the payload type AND the country code with
+    /// HDR10+ — so a mutation that blurs the terminal-provider test lands on a
+    /// branch that tells the two apart.
     package static func hdr10PlusAccessUnit(annexB: Bool) -> [UInt8] {
+        // SPS 0, one IDR picture (nal_unit_type 19), temporal id 0.
+        let structureOfPictures: [UInt8] = [0xD3, 0x10]
+        let extendedType: [UInt8] = [0xAA, 0xBB]
         let banner: [UInt8] = [UInt8](repeating: 0x2C, count: 16) + Array("x265".utf8)
         let caption: [UInt8] = [0xB5, 0x00, 0x31, 0x47, 0x41, 0x39, 0x34, 0x03, 0x40, 0xFF]
-        let rbsp: [UInt8] = [0x05, UInt8(banner.count)] + banner
+        let rbsp: [UInt8] = [0x80, UInt8(structureOfPictures.count)] + structureOfPictures
+            + [0xFF, 0x05, UInt8(extendedType.count)] + extendedType
+            + [0x05, UInt8(banner.count)] + banner
             + [0x04, UInt8(caption.count)] + caption
             + [0x04, UInt8(hdr10PlusT35Payload.count)] + hdr10PlusT35Payload
             + [0x80]

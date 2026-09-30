@@ -348,27 +348,42 @@ enum HEVCNALUnits {
         // sizes: a `00 00 03` inside a payload would otherwise be counted as
         // three payload bytes and shift every field after it.
         let rbsp = unescaped(payload)
+
+        // `more_rbsp_data()` is a question about POSITION, not about the next
+        // byte: messages run until the cursor reaches the `rbsp_trailing_bits`
+        // byte, which is the last non-zero byte of the RBSP (anything after it
+        // is `cabac_zero_words` or an Annex-B `trailing_zero_8bits`). Testing
+        // "the next byte is 0x80" instead ended the walk at any message of
+        // payload type 128 (`structure_of_pictures_info`), so an HDR10+ or
+        // caption message behind one was never read.
+        var lastNonZero = rbsp.count - 1
+        while lastNonZero >= 0, rbsp[lastNonZero] == 0 { lastNonZero -= 1 }
+        guard lastNonZero >= 0 else { return }
+        // An encoder that left the stop bit off gets its last byte read as
+        // data rather than silently dropped — the size check below still
+        // refuses a message that does not fit.
+        let messagesEnd = rbsp[lastNonZero] == 0x80 ? lastNonZero : lastNonZero + 1
         var cursor = 0
 
-        func readExtended() -> Int? {
+        // `payloadType` and `payloadSize` share the ff_byte coding but not a
+        // meaning: a type is a number (260 is `FF 05`, and legal), a size is a
+        // byte count. Only the size is bounded by the buffer, and it is — by
+        // the check after both are read. The sum cannot overflow: it grows by
+        // at most 255 per byte consumed.
+        func readFFCoded() -> Int? {
             var value = 0
-            while cursor < rbsp.count {
+            while cursor < messagesEnd {
                 let byte = rbsp[cursor]
                 cursor += 1
                 value += Int(byte)
                 if byte != 0xFF { return value }
-                // A run of 0xFF that never terminates is a malformed message,
-                // and the sum would otherwise grow past the buffer silently.
-                if value > rbsp.count { return nil }
             }
             return nil
         }
 
-        while cursor < rbsp.count {
-            // `rbsp_trailing_bits`: the stop bit ends the message loop.
-            if rbsp[cursor] == 0x80 { return }
-            guard let payloadType = readExtended(), let payloadSize = readExtended(),
-                  cursor + payloadSize <= rbsp.count
+        while cursor < messagesEnd {
+            guard let payloadType = readFFCoded(), let payloadSize = readFFCoded(),
+                  payloadSize <= rbsp.count - cursor
             else { return }
             let message = rbsp[cursor..<(cursor + payloadSize)]
             cursor += payloadSize

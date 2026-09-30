@@ -65,6 +65,16 @@ public struct HDR10PlusFinding: Sendable, Equatable {
     /// Whether the bitstream carries HDR10+ metadata, as far as this scan saw.
     public var isSeen: Bool { verdict == .seen }
 
+    /// Whether the scan moved the read position of the context it ran on.
+    /// Only the two refusals leave it untouched; everything else read at least
+    /// one packet. An adopting producer keys its early rewind on this.
+    var consumedPackets: Bool {
+        switch verdict {
+        case .unknown(.codecNotScanned), .unknown(.unseekableInput): return false
+        default: return true
+        }
+    }
+
     public init(
         streamIndex: Int,
         verdict: Verdict,

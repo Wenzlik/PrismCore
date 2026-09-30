@@ -94,6 +94,58 @@ struct HDR10PlusScoutTests {
         #expect(version(packet, .lengthPrefixed(4)) == 1)
     }
 
+    /// `rbsp_trailing_bits` is found by position — the last non-zero byte —
+    /// not by the next byte being `0x80`. Payload type 128
+    /// (`structure_of_pictures_info`) starts with that byte, and an extended
+    /// payload type is a number, not a length the buffer must hold; each used
+    /// to end the walk before the HDR10+ message behind it.
+    @Test("Payload type 128 and extended payload types before HDR10+ do not end the message loop")
+    func messagesBeforeHDR10PlusAreSteppedOver() {
+        let t35 = FuzzSeeds.hdr10PlusT35Payload
+        let hdr10Plus: [UInt8] = [0x04, UInt8(t35.count)] + t35
+        // SPS 0, one IDR picture, temporal id 0, payload aligned.
+        let structureOfPictures: [UInt8] = [0x80, 0x02, 0xD3, 0x10]
+        // Type 260 (255 + 5), two bytes of payload: a type larger than the
+        // whole RBSP, framed correctly.
+        let extendedType: [UInt8] = [0xFF, 0x05, 0x02, 0xAA, 0xBB]
+        func packets(_ messages: [UInt8], trailing: [UInt8] = [0x80]) -> (prefixed: [UInt8], annexB: [UInt8]) {
+            let nal: [UInt8] = [39 << 1, 0x01] + ClosedCaptionTests.CaptionFixture.escaped(messages + trailing)
+            let count = nal.count
+            let slice: [UInt8] = [0x02, 0x01, 0xAF, 0x09]
+            return (
+                [0, 0, UInt8(count >> 8), UInt8(count & 0xFF)] + nal + [0, 0, 0, UInt8(slice.count)] + slice,
+                [0, 0, 0, 1] + nal + [0, 0, 1] + slice
+            )
+        }
+        for messages in [
+            structureOfPictures + hdr10Plus,
+            extendedType + hdr10Plus,
+            structureOfPictures + extendedType + hdr10Plus,
+        ] {
+            let (prefixed, annexB) = packets(messages)
+            #expect(version(prefixed, .lengthPrefixed(4)) == 1)
+            #expect(version(annexB, .annexB) == 1)
+        }
+        // Zero bytes after the stop bit (`cabac_zero_words`, or an Annex-B
+        // `trailing_zero_8bits` the start-code search left on the unit) are
+        // not a message, and do not hide the stop bit either.
+        let (padded, paddedAnnexB) = packets(structureOfPictures + hdr10Plus, trailing: [0x80, 0x00, 0x00])
+        #expect(version(padded, .lengthPrefixed(4)) == 1)
+        #expect(version(paddedAnnexB, .annexB) == 1)
+        // A size that runs past the unit still ends the walk: only the TYPE
+        // stopped being bounded by the buffer.
+        let (overrun, _) = packets([0x05, 0xFF, 0x10, 0x01] + hdr10Plus)
+        #expect(version(overrun, .lengthPrefixed(4)) == nil)
+
+        // The captions share the loop, so they share the fix.
+        let captions = ClosedCaptionTests.CaptionFixture.t35Payload([ClosedCaptionTests.CaptionFixture.pair(0x14, 0x2F)])
+        let (captioned, _) = packets(structureOfPictures + extendedType + [0x04, UInt8(captions.count)] + captions)
+        let triplets = captioned.withUnsafeBufferPointer {
+            A53CaptionData.triplets(in: $0, framing: .lengthPrefixed(4), codec: .hevc)
+        }
+        #expect(triplets.count == 1)
+    }
+
     /// The caption reader moved onto the shared SEI loop; its answers must
     /// not have moved with it, and it must still ignore HDR10+'s message.
     @Test("The shared SEI loop still feeds captions, and never reads HDR10+ as one")
@@ -236,5 +288,51 @@ struct HDR10PlusScoutTests {
         let unscanned = try await master(scan: .off)
         #expect(scanned == unscanned)
         #expect(scanned.contains("VIDEO-RANGE=PQ"))
+    }
+
+    /// The scan reads packets from the context a session adopts, and the
+    /// session's caption scout reads packets from it next. With the scan
+    /// allowed to run to EOF, it left the scout nothing, and a source
+    /// captioned on every picture came up with no CC1 rendition and no cues —
+    /// a playlist change from a feature that promises to report only.
+    @Test("An adopted, scanned context still finds the captions an unscanned one finds")
+    func adoptedScannedContextKeepsItsCaptions() async throws {
+        let source = try fixture("hevc_captioned.mkv")
+        let display = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: false)
+
+        func served(scan: HDR10PlusScan) async throws -> (master: String, captions: String, finding: HDR10PlusFinding?) {
+            let probed = try SourceProbe.open(url: source, hdr10Plus: scan)
+            let session = try PrismCoreSession(url: source, display: display, probed: probed)
+            let playlist = try await session.start()
+            let master = try String(contentsOf: playlist, encoding: .utf8)
+            let base = playlist.deletingLastPathComponent()
+            var captions = ""
+            for line in master.split(separator: "\n") where line.contains("TYPE=SUBTITLES") {
+                let uri = try #require(line.split(separator: "URI=\"").last?.split(separator: "\"").first)
+                let mediaURL = base.appendingPathComponent(String(uri))
+                let (media, _) = try await URLSession.uncached.data(from: mediaURL)
+                let mediaText = String(decoding: media, as: UTF8.self)
+                captions += mediaText
+                for segment in mediaText.split(separator: "\n") where segment.hasSuffix(".vtt") {
+                    let (cues, _) = try await URLSession.uncached.data(
+                        from: mediaURL.deletingLastPathComponent().appendingPathComponent(String(segment))
+                    )
+                    captions += String(decoding: cues, as: UTF8.self)
+                }
+            }
+            await session.stop()
+            return (master, captions, probed.info.hdr10Plus)
+        }
+
+        let unscanned = try await served(scan: .off)
+        // A budget past the end of the 48-picture fixture: the scan reads to
+        // EOF, the worst case for whoever reads the context after it.
+        let scanned = try await served(scan: .scan(videoPackets: 10_000))
+        #expect(scanned.finding?.verdict == .notSeenWithinBudget)
+        #expect(scanned.finding?.videoPacketsScanned == 48)
+        #expect(unscanned.master.contains("TYPE=SUBTITLES"), "the fixture's CC1 was not found even unscanned")
+        #expect(unscanned.captions.contains("HI"), "the fixture's caption never became a cue")
+        #expect(scanned.master == unscanned.master)
+        #expect(scanned.captions == unscanned.captions)
     }
 }
