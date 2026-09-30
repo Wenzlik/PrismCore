@@ -8,6 +8,33 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bridged 5.1(side) or 7.1 track encoded to `aac` no longer fails the
+  whole master in AVPlayer.** FFmpeg's `aac` encoder describes a layout that
+  is not in the MPEG-4 channel-configuration table, such as 5.1 with side
+  surrounds or any 8-channel layout, with a Program Config Element (PCE).
+  AudioToolbox does not reliably decode PCE-only configs, so AVPlayer
+  rejected the asset and logged nothing about why. An `aac` target now gets
+  the standard layout for the channel count (`av_channel_layout_default`,
+  capped at 6 channels), which always has an implicit channelConfiguration.
+  The resampler maps the source onto it. Side/back position is lost and 7.1
+  is downmixed to 5.1, which AVPlayer could not have rendered anyway. EAC3
+  targets are unaffected. New hermetic tests
+  (`aacSideSurroundAvoidsPCE`, `aacSevenOneCapsAtFiveOne`,
+  `aacStereoUnchanged`) read the channelConfiguration from the encoder's
+  AudioSpecificConfig. They fail on 3.2.3 (PCE, config 0) and pass now.
+  (#104, thanks @jpokorny312)
+- **Seeking a muxed source with a bridged audio track no longer restarts
+  the remux from the beginning.** Demand-driven seeking skipped the muxed
+  shape when its audio went through the bridge. So Resume or a chapter jump
+  on, for example, a DTS source with two audio renditions that collide on
+  name (which forces muxed shape) silently fell back to sequential
+  production from 0:00. `HLSRemuxer.reanchor(to:)` now handles the muxed
+  bridge the way `AudioRenditionWriter.reanchor` already handles a bridged
+  rendition. It calls `AudioBridge.reset()` and rebuilds the bridge only
+  when it has already drained at EOF. (#104, thanks @jpokorny312)
+
 ## [3.2.3] — 2026-09-30
 
 Three landings: a command-line tool with diagnostics it shares with the tests
