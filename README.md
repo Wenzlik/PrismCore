@@ -604,6 +604,26 @@ PrismCore logs and reports that state but does not refuse to run on it.
 `FFmpegBuild.configuration` carries libavcodec's full `configure` line for the
 report.
 
+### Reproducing from a terminal
+
+`prismcore-cli` is a macOS tool in this package (not a product a host needs to
+link) that runs the engine on one source from the command line:
+
+```
+swift run prismcore-cli probe     <url-or-path>   # SourceInfo, structure, routing verdict + reason
+swift run prismcore-cli serve     <url-or-path>   # loopback playlist URL for Safari / QuickTime
+swift run prismcore-cli bench     <url-or-path>   # the startup checkpoint line a host logs
+swift run prismcore-cli segverify <url-or-path>   # decode every served segment on its own
+swift run prismcore-cli validate  <url-or-path>   # Apple's mediastreamvalidator, if installed
+```
+
+`validate` is opt-in. It needs Apple's HTTP Live Streaming Tools, and without
+them it prints a notice and exits 0 (unless you pass `--require-validator`).
+The CLI does not replace a device run. The tvOS display handshake, Dolby
+Vision on a real panel and Atmos passthrough can only be checked on hardware.
+`--help` lists the options, and AGENTS.md *Measuring* explains how to benchmark
+honestly.
+
 ## Stability and versioning
 
 PrismCore follows [Semantic Versioning](https://semver.org). Every `public`
