@@ -694,6 +694,21 @@ final class HLSRemuxer: @unchecked Sendable {
                codecID: input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee.codec_id,
                nalUnitLengthSize: videoTrack.nalUnitLengthSize
            ) {
+            // A host that opted into the HDR10+ scan hands over a context the
+            // scan has already walked — up to its whole budget, or to EOF on a
+            // short source. Scouting captions from there looks at the wrong
+            // stretch of the file (or at nothing), and a service found missing
+            // here is missing from the master for the whole session: with the
+            // scan on, a file captioned on every picture came up with no CC1.
+            // So this one case pays its rewind BEFORE the scout rather than
+            // after it — one extra seek (a Range request over HTTP), charged
+            // only to hosts that asked for the scan. The interlace
+            // verification's dozen frames are not rewound here: that is the
+            // window captions have always been scouted from.
+            if adoptedInfo?.hdr10Plus?.consumedPackets == true {
+                _ = av_seek_frame(input, -1, 0, AVSEEK_FLAG_BACKWARD)
+                avformat_flush(input)
+            }
             closedCaptions = ClosedCaptionScout.scan(
                 input: input, videoStreamIndex: videoIndex,
                 framing: carriage.framing, codec: carriage.codec

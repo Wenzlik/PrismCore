@@ -300,6 +300,8 @@ runs shorter. It does not replace them.
   - `PRISMCORE_MEDIA` — real-media probe/DV verification
   - `PRISMCORE_PGS_MEDIA` — the OCR subtitle pipeline (no FFmpeg build can
     *encode* PGS, so there is no committable fixture)
+  - `PRISMCORE_HDR10PLUS_MEDIA` — the HDR10+ scout on a real encode (the
+    fixtures' SEI is script-injected; see `generate_hdr10plus.sh`)
   - `PRISMCORE_BENCH` — startup cost
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
   and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
@@ -309,7 +311,8 @@ runs shorter. It does not replace them.
 ### Fuzzing
 
 Every hand-written bitstream parser (JOC walk, `dec3`, HEVC NAL framing,
-`hvcC` normalization, ISO-BMFF splice, text subtitles) is wired into
+`hvcC` normalization, ISO-BMFF splice, text subtitles, A/53 captions, the
+HDR10+ T.35 walk) is wired into
 `FuzzTargets` (`Sources/PrismCore/Fuzz/`) — uniform `bytes in → invariants
 checked` entry points, `package` access so the test target and the fuzzer
 executable share them. A target checks *wrong-answer* invariants, not just
