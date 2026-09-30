@@ -301,9 +301,20 @@ final class HTTPRangeInput {
     /// same bytes, and byte ranges from two "equivalent" versions do not make
     /// one file.
     static func validator(of response: HTTPURLResponse?) -> String? {
-        let tag = response?.value(forHTTPHeaderField: "ETag")
-        return tag.flatMap { $0.hasPrefix("W/") ? nil : $0 }
-            ?? response?.value(forHTTPHeaderField: "Last-Modified")
+        strongETag(of: response) ?? response?.value(forHTTPHeaderField: "Last-Modified")
+    }
+
+    /// The strong `ETag` alone — the only validator a prewarm binds bytes to.
+    ///
+    /// `Last-Modified` is enough for `If-Range` on a live read, where the
+    /// bytes arrive in the same response the date came with. It is not
+    /// enough to vouch for bytes fetched minutes earlier: it has one-second
+    /// resolution, so a file replaced within the second it was last written
+    /// keeps its date, and when the length and the first byte survive too
+    /// (a re-mux, a re-tag) every check the adoption makes passes on stale
+    /// bytes.
+    static func strongETag(of response: HTTPURLResponse?) -> String? {
+        response?.value(forHTTPHeaderField: "ETag").flatMap { $0.hasPrefix("W/") ? nil : $0 }
     }
 
     private func observeFirstResponse(reporting currentValidator: String?) {
@@ -327,7 +338,7 @@ final class HTTPRangeInput {
     /// The confirmation is one request for one byte. It is the same trust
     /// rule the 3.2.0 hints follow, applied where the stakes are higher: a
     /// stale sizing hint costs a read, stale *bytes* are a wrong parse. So
-    /// the validator and the length must both match, and the one byte must
+    /// the strong ETag and the length must both match, and the one byte must
     /// be the byte the prewarm stored at that offset. Against a host proxy
     /// that fetches each window whole, a one-byte window is a round trip and
     /// nothing more, which is the whole saving: the reads it replaces are a
@@ -377,7 +388,11 @@ final class HTTPRangeInput {
             observeFirstResponse(reporting: reported)
             validator = reported
             length = range.total
-            guard let reported, reported == entry.validator, range.total == entry.length,
+            // Judged on the strong ETag only, whatever the entry says: an
+            // origin that has since dropped its ETag in favour of a date can
+            // no longer vouch for these bytes (see `strongETag(of:)`).
+            guard let tag = Self.strongETag(of: response.response), tag == entry.validator,
+                  range.total == entry.length,
                   let head = entry.blocks.first, head.start == 0, head.data.first == response.data.first
             else {
                 store.remove(key)

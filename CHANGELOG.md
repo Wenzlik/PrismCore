@@ -25,14 +25,17 @@ source-compatible.)
 
   The rules, and why:
   - **Validator check before the first delivered byte.** The reader asks the
-    origin for one byte first, and takes the blocks only if the validator
-    (strong `ETag`, else `Last-Modified`), the length and that byte all still
-    match. Otherwise it drops the entry and reads the network as usual. An
-    origin that reports no validator cannot be prewarmed at all: stale bytes
-    would give the demuxer a wrong parse, not just a slow one. A host
-    range proxy that forwards no validator therefore has to forward its
-    origin's (or synthesise one from the file's size and mtime) before a
-    prewarm through it can do anything. This is the
+    origin for one byte first, and takes the blocks only if the strong
+    `ETag`, the length and that byte all still match. Otherwise it drops the
+    entry and reads the network as usual. An origin that reports no strong
+    `ETag` cannot be prewarmed at all: stale bytes would give the demuxer a
+    wrong parse, not just a slow one. That includes an origin that reports
+    only `Last-Modified` — at one-second resolution it cannot tell apart two
+    versions of a file written within the same second, and when the length
+    and first byte survive the rewrite every other check passes. A host
+    range proxy that forwards no `ETag` therefore has to forward its
+    origin's (or synthesise one from the file's size and a sub-second mtime,
+    or a content hash) before a prewarm through it can do anything. This is the
     3.2.0 hints rule, and that confirming response is also what the hints'
     `expectedValidator` is judged on.
   - **Hard memory bounds.** Each prewarm is capped at 2 MB, half the
@@ -49,7 +52,10 @@ source-compatible.)
     host-supplied inputs behave exactly as before.
 
   `ContainerLayoutScanner` now also reports where the index element starts
-  (`indexOffset`), which the prewarm uses to aim its tail fetch.
+  (`indexOffset`), which the prewarm uses to aim its tail fetch; the
+  outcome's `indexPrewarmed` is `true` only when the stored bytes at that
+  offset really are the index (the Cues element ID, or a `moov` box after
+  `mdat`), and `requests` counts only requests the origin was sent.
   `Scripts/proxy-model-server.py` gains `VALIDATOR=1` to model a host proxy
   that forwards its origin's validator, and `StartupCheckpointBenchmark`
   gains `PRISMCORE_BENCH_PREWARM=1`. No performance claim is made here; the

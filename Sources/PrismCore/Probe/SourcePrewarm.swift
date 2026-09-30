@@ -14,9 +14,11 @@ public struct SourcePrewarmOutcome: Sendable, Equatable {
         /// Not an `http`/`https` URL. File and host-supplied inputs have no
         /// round trips to save.
         case notApplicable
-        /// The origin reported no strong `ETag` and no `Last-Modified`, so
-        /// nothing could bind the bytes to a representation. Refused by rule:
-        /// stale bytes handed to a demuxer are a wrong parse, not a slow one.
+        /// The origin reported no strong `ETag`, so nothing could bind the
+        /// bytes to a representation. Refused by rule: stale bytes handed to a
+        /// demuxer are a wrong parse, not a slow one. A `Last-Modified` date
+        /// alone lands here too — at one-second resolution it cannot tell two
+        /// versions written within the same second apart.
         case validatorUnavailable
         /// The origin refused someone within the last minute, or never had a
         /// free slot while this prewarm was willing to wait. Optional work
@@ -41,15 +43,19 @@ public struct SourcePrewarmOutcome: Sendable, Equatable {
     public let status: Status
     /// Bytes held for this source after the prewarm; `0` unless `.stored`.
     public let storedBytes: Int
-    /// Requests the prewarm made — the number that costs time against a host
-    /// proxy that fetches each forwarded window whole.
+    /// Requests the prewarm sent to the origin — the number that costs time
+    /// against a host proxy that fetches each forwarded window whole. A
+    /// request the origin coordinator declined to admit was never sent and
+    /// is not counted, so `.originBusy` from a first request reports `0`.
     public let requests: Int
-    /// The validator the origin reported, when it reported one.
+    /// The strong `ETag` the origin reported, when it reported one.
     public let validator: String?
     /// Where the container's header ends, when the prewarmed head reached it.
     public let headerBytes: Int?
     /// Whether the container's tail index (Matroska Cues, a trailing `moov`)
-    /// is among the stored bytes.
+    /// is among the stored bytes — seen there, not inferred: the Cues
+    /// element ID at the SeekHead's offset, or a `moov` box header in the
+    /// boxes after `mdat`.
     public let indexPrewarmed: Bool
     public let duration: Duration
 }
@@ -91,9 +97,10 @@ extension PrismCoreEngine {
     ///
     /// **What makes it safe to use.** Before the first prewarmed byte is
     /// delivered, the reader asks the origin once more (a one-byte range) and
-    /// takes the blocks only if the validator (`ETag`, else `Last-Modified`)
-    /// and the length are what they were. An origin that reports no validator
-    /// cannot be prewarmed at all — see `SourcePrewarmOutcome.Status`.
+    /// takes the blocks only if the strong `ETag` and the length are what
+    /// they were. An origin that reports no strong `ETag` — including one
+    /// that reports only `Last-Modified` — cannot be prewarmed at all; see
+    /// `SourcePrewarmOutcome.Status.validatorUnavailable`.
     ///
     /// **What it costs the origin.** Every request goes through the same
     /// per-origin admission as playback, at lower priority: never while
@@ -192,9 +199,13 @@ enum SourcePrewarmFetcher {
         let origin = HTTPOriginCoordinator.origin(url)
 
         func fetch(start: Int64, size: Int, ifRange: String?) -> Fetched {
-            requests += 1
-            return Self.fetch(url: url, headers: headers, origin: origin, start: start,
-                              size: size, ifRange: ifRange, cancelled: cancelled)
+            let fetched = Self.fetch(url: url, headers: headers, origin: origin, start: start,
+                                     size: size, ifRange: ifRange, cancelled: cancelled)
+            // Only what reached the origin: a declined admission sent nothing,
+            // and counting it would report load on an origin the prewarm
+            // deliberately left alone.
+            if case .declined = fetched {} else { requests += 1 }
+            return fetched
         }
         func failure(_ fetched: Fetched) -> SourcePrewarmOutcome.Status {
             switch fetched {
@@ -244,12 +255,55 @@ enum SourcePrewarmFetcher {
         guard store.insert(entry, for: .init(url: url, headers: headers)) else {
             return finish(.exceedsCapacity, validator: validator)
         }
-        let indexStored = layout.indexOffset.map { offset in
-            blocks.contains { offset >= $0.start && offset < $0.start + Int64($0.data.count) }
-        } ?? false
         return finish(.stored, validator: validator, stored: entry.bytes,
                       headerBytes: layout.headerBytes.flatMap { $0 <= head.count ? $0 : nil },
-                      index: indexStored)
+                      index: indexLocated(at: layout.indexOffset, in: blocks))
+    }
+
+    /// Whether the index really starts inside the stored bytes.
+    ///
+    /// The layout's `indexOffset` is where the framing says to look, not
+    /// proof of what is there: for an MP4 it is merely the first byte after
+    /// a declared-length `mdat`, which may be a `free` box, a second `mdat`,
+    /// or nothing the demuxer wants. Reporting the index cached on that alone
+    /// would tell a host its tail was covered when the demuxer is about to
+    /// fetch it. So this looks: the Cues element ID for a Matroska, a `moov`
+    /// box header — walking past the boxes in front of it — for an MP4.
+    static func indexLocated(at offset: Int64?, in blocks: [SourcePrewarmStore.Block]) -> Bool {
+        guard let offset, let head = blocks.first else { return false }
+        func bytes(_ at: Int64, _ count: Int) -> [UInt8]? {
+            guard at >= 0, count > 0 else { return nil }
+            for block in blocks where at >= block.start {
+                let (end, overflow) = at.addingReportingOverflow(Int64(count))
+                guard !overflow, end <= block.start + Int64(block.data.count) else { continue }
+                let from = block.data.startIndex + Int(at - block.start)
+                return [UInt8](block.data[from..<(from + count)])
+            }
+            return nil
+        }
+        let magic = [UInt8](head.data.prefix(8))
+        if magic.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) {
+            return bytes(offset, 4) == [0x1C, 0x53, 0xBB, 0x6B]
+        }
+        guard magic.count == 8, String(decoding: magic[4..<8], as: UTF8.self) == "ftyp" else { return false }
+        var cursor = offset
+        // A handful of boxes: what sits between `mdat` and a trailing `moov`
+        // in practice is a `free` or a `uuid`, not a directory of them.
+        for _ in 0..<8 {
+            guard let header = bytes(cursor, 8) else { return false }
+            if String(decoding: header[4..<8], as: UTF8.self) == "moov" { return true }
+            var size = header[0..<4].reduce(Int64(0)) { ($0 << 8) | Int64($1) }
+            if size == 1 {
+                guard let extended = bytes(cursor + 8, 8) else { return false }
+                size = extended.reduce(Int64(0)) { ($0 << 8) | Int64($1) }
+            }
+            // Size 0 is "to the end of the file" — nothing after it to find.
+            guard size >= 8 else { return false }
+            let (next, overflow) = cursor.addingReportingOverflow(size)
+            guard !overflow else { return false }
+            cursor = next
+        }
+        return false
     }
 
     /// The container's own framing, read from the prewarmed head only — a
@@ -309,7 +363,7 @@ enum SourcePrewarmFetcher {
                   response.data.count <= size
             else { return .unusable(status: status == 0 ? nil : status) }
             return .ok(data: response.data, length: range.total,
-                       validator: HTTPRangeInput.validator(of: response.response))
+                       validator: HTTPRangeInput.strongETag(of: response.response))
         }
     }
 

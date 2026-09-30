@@ -39,7 +39,9 @@ RATE  = float(os.environ.get("RATE_BPS", 800_000))   # origin bytes/second
 RTT   = float(os.environ.get("RTT_MS", "40")) / 1000.0
 LOG   = os.environ.get("REQLOG", "/dev/null")
 SIZE  = os.path.getsize(PATH)
-ETAG  = ('"%x-%x"' % (SIZE, int(os.path.getmtime(PATH)))) if os.environ.get("VALIDATOR") == "1" else None
+# Nanosecond mtime, not seconds: an ETag with one-second resolution has the
+# same blind spot as Last-Modified, which the prewarm refuses to trust.
+ETAG  = ('"%x-%x"' % (SIZE, os.stat(PATH).st_mtime_ns)) if os.environ.get("VALIDATOR") == "1" else None
 lock  = threading.Lock()
 
 class H(BaseHTTPRequestHandler):

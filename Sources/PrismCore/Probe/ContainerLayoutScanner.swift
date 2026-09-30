@@ -119,7 +119,7 @@ enum ContainerLayoutScanner {
                 layout.headerBytes = Int(exactly: child.start)
                 if let cuesOffset {
                     layout.indexLocation = cuesOffset < child.start ? .head : .tail
-                    layout.indexOffset = cuesOffset
+                    layout.indexOffset = withinFile(cuesOffset, byteSize)
                 }
                 return layout
             case cuesID:
@@ -145,8 +145,14 @@ enum ContainerLayoutScanner {
         }
         // No Cluster reached — a header longer than what the reader could see.
         // The SeekHead's word on where the Cues are still stands on its own.
-        layout.indexOffset = cuesOffset
+        layout.indexOffset = cuesOffset.flatMap { withinFile($0, byteSize) }
         return layout
+    }
+
+    /// A SeekHead can name any position; only one inside the file is a place
+    /// a range request can be aimed at.
+    private static func withinFile(_ offset: Int64, _ byteSize: Int64?) -> Int64? {
+        offset < (byteSize ?? Int64.max) ? offset : nil
     }
 
     /// The Cues position a SeekHead points at, in absolute coordinates.
@@ -190,7 +196,13 @@ enum ContainerLayoutScanner {
                     }
                     inner = fieldEnd
                 }
-                if isCues, let position { return segmentDataStart + position }
+                // Eight mutated bytes make a negative or huge position; an
+                // unchecked add would trap on exactly the input a fuzzer (or a
+                // damaged file) hands it.
+                if isCues, let position, position >= 0 {
+                    let (offset, overflow) = segmentDataStart.addingReportingOverflow(position)
+                    return overflow ? nil : offset
+                }
             }
             cursor = entryEnd
         }

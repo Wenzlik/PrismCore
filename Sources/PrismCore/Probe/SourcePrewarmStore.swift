@@ -1,7 +1,12 @@
 import Foundation
 
-/// Source bytes fetched ahead of a play, held in memory until a reader takes
-/// them over or they are evicted.
+/// Source bytes fetched ahead of a play, held in memory until they are
+/// evicted or discarded.
+///
+/// A reader that adopts an entry copies its blocks and leaves it here, so a
+/// second open of the same source (a retry, a reopen after a failed start)
+/// adopts it too, after its own confirmation. That costs the copy's worth of
+/// memory while both are alive; the capacity below is what bounds it.
 ///
 /// Process-wide on purpose: the host prewarms from its browsing UI and plays
 /// from a session built seconds later, and nothing but the URL and headers
@@ -45,9 +50,10 @@ final class SourcePrewarmStore: @unchecked Sendable {
     }
 
     struct Entry {
-        /// The strong `ETag`, else `Last-Modified`, the origin reported on
-        /// every response the blocks came from. Never optional: bytes that
-        /// cannot be bound to a representation are not stored at all.
+        /// The strong `ETag` the origin reported on every response the blocks
+        /// came from. Never optional, and never a `Last-Modified` date: bytes
+        /// that cannot be bound to one representation are not stored at all
+        /// (see `HTTPRangeInput.strongETag(of:)`).
         let validator: String
         let length: Int64
         /// Disjoint ranges, head first. The head always starts at byte 0.
@@ -58,7 +64,7 @@ final class SourcePrewarmStore: @unchecked Sendable {
     let capacity: Int
     private let lock = NSLock()
     private var entries: [Key: Entry] = [:]
-    /// Least recently stored or taken first.
+    /// Least recently stored or looked up first.
     private var order: [Key] = []
     private var pressureSource: DispatchSourceMemoryPressure?
 

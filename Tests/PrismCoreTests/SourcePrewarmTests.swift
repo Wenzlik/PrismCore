@@ -11,6 +11,11 @@ import Foundation
 @Suite("Source prewarm", .serialized)
 struct SourcePrewarmTests {
 
+    /// The suite uses the process-wide store, as hosts do. Emptied up front
+    /// so no test's outcome depends on what an earlier one left behind — the
+    /// ports make collisions unlikely, this makes them impossible.
+    init() { PrismCoreEngine.discardPrewarmedSources() }
+
     private func fixture(_ name: String = "h264_aac_30s") throws -> Data {
         let url = try #require(Bundle.module.url(forResource: name, withExtension: "mkv", subdirectory: "Fixtures"))
         return try Data(contentsOf: url)
@@ -73,6 +78,21 @@ struct SourcePrewarmTests {
         #expect([UInt8](media[Int(cues)..<Int(cues) + 4]) == [0x1C, 0x53, 0xBB, 0x6B])
     }
 
+    /// An MP4 box: 32-bit size, four-character type, payload.
+    private func box(_ type: String, _ payloadCount: Int, fill: UInt8 = 0) -> Data {
+        let total = payloadCount + 8
+        return Data([UInt8((total >> 24) & 0xFF), UInt8((total >> 16) & 0xFF),
+                     UInt8((total >> 8) & 0xFF), UInt8(total & 0xFF)] + Array(type.utf8)
+                    + [UInt8](repeating: fill, count: payloadCount))
+    }
+
+    /// A non-faststart MP4 whose `mdat` outruns the prewarm head, so the
+    /// tail window is fetched from where the framing points — past `mdat`.
+    private func tailIndexedMP4(moov: Bool) -> Data {
+        box("ftyp", 16, fill: 1) + box("mdat", 1_200_000, fill: 3) + box("free", 64)
+            + (moov ? box("moov", 256, fill: 2) : box("uuid", 256, fill: 4))
+    }
+
     // MARK: - Fetch and handoff
 
     @Test func aPrewarmedOpenReadsOneByteFromTheOrigin() async throws {
@@ -123,6 +143,74 @@ struct SourcePrewarmTests {
         #expect(SourcePrewarmStore.shared.entry(for: .init(url: url, headers: [:])) == nil)
     }
 
+    /// `indexOffset` for an MP4 is only "the first byte after `mdat`"; the
+    /// report has to be about what the bytes there are.
+    @Test func anMP4IndexIsReportedOnlyWhenItsMoovWasFetched() async throws {
+        for hasMoov in [true, false] {
+            let media = tailIndexedMP4(moov: hasMoov)
+            let server = try RangeFixtureServer(media: media, bytesPerSecond: 50_000_000, etag: "\"v1\"")
+            let url = try await server.start()
+            defer { server.stop() }
+
+            let outcome = await PrismCoreEngine.prewarm(url: url)
+            #expect(outcome.status == .stored)
+            #expect(outcome.requests == 2, "the tail past mdat should have been fetched")
+            #expect(outcome.indexPrewarmed == hasMoov,
+                    "moov \(hasMoov ? "present" : "absent") but indexPrewarmed is \(outcome.indexPrewarmed)")
+        }
+    }
+
+    @Test func discardingPrewarmedSourcesEmptiesTheStore() async throws {
+        let server = try RangeFixtureServer(media: try fixture(), etag: "\"v1\"")
+        let url = try await server.start()
+        defer { server.stop() }
+
+        #expect(await PrismCoreEngine.prewarm(url: url).status == .stored)
+        PrismCoreEngine.discardPrewarmedSources()
+        #expect(SourcePrewarmStore.shared.entry(for: .init(url: url, headers: [:])) == nil)
+        let probed = try await SourceProbe.openDetached(url: url, coordinatedHTTP: true)
+        #expect(probed.prewarm == .none)
+    }
+
+    /// `Last-Modified` has one-second resolution. An origin that reports
+    /// nothing better cannot tell a prewarm whether the file was rewritten
+    /// in the second its date names, so nothing is stored.
+    @Test func aLastModifiedDateAloneIsNotAValidator() async throws {
+        let server = try RangeFixtureServer(media: try fixture(), lastModified: "Wed, 30 Sep 2026 10:00:00 GMT")
+        let url = try await server.start()
+        defer { server.stop() }
+
+        let outcome = await PrismCoreEngine.prewarm(url: url)
+        #expect(outcome.status == .validatorUnavailable)
+        #expect(SourcePrewarmStore.shared.entry(for: .init(url: url, headers: [:])) == nil)
+    }
+
+    /// The reproduction behind the rule, on the adopt side: an entry bound to
+    /// a date (as a pre-fix prewarm stored it), and a file rewritten under
+    /// the same date, length and first byte. Every check but the validator's
+    /// kind passes; the bytes must still not be used.
+    @Test func sameDateLengthAndFirstByteWithDifferentBytesIsNotAdopted() async throws {
+        let original = try fixture()
+        var rewritten = original
+        let changed = rewritten.startIndex + rewritten.count / 2
+        rewritten[changed] ^= 0xFF
+        #expect(rewritten.first == original.first && rewritten.count == original.count)
+
+        let date = "Wed, 30 Sep 2026 10:00:00 GMT"
+        let server = try RangeFixtureServer(media: rewritten, lastModified: date)
+        let url = try await server.start()
+        defer { server.stop() }
+        let key = SourcePrewarmStore.Key(url: url, headers: [:])
+        SourcePrewarmStore.shared.insert(
+            .init(validator: date, length: Int64(original.count), blocks: [.init(start: 0, data: original)]),
+            for: key)
+
+        let probed = try await SourceProbe.openDetached(url: url, coordinatedHTTP: true)
+        #expect(probed.prewarm == .stale)
+        #expect(!probed.info.audioTracks.isEmpty)
+        #expect(SourcePrewarmStore.shared.entry(for: key) == nil)
+    }
+
     @Test func anOriginWithoutAValidatorIsNeverPrewarmed() async throws {
         let server = try RangeFixtureServer(media: try fixture())
         let url = try await server.start()
@@ -169,10 +257,13 @@ struct SourcePrewarmTests {
 
         let refused = await PrismCoreEngine.prewarm(url: url)
         #expect(refused.status == .originRefused(status: 429))
+        #expect(refused.requests == 1)
         #expect(server.requests.count == 1)
-        // The origin said no a moment ago: a second prewarm does not even ask.
+        // The origin said no a moment ago: a second prewarm does not even ask
+        // — and says so, rather than reporting a request it never sent.
         let declined = await PrismCoreEngine.prewarm(url: url)
         #expect(declined.status == .originBusy)
+        #expect(declined.requests == 0)
         #expect(server.requests.count == 1)
     }
 

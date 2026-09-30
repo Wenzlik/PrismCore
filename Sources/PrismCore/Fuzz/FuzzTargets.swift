@@ -69,6 +69,11 @@ package enum FuzzTargets {
             if let offset = layout.firstMediaOffset, offset < 0 || offset > size {
                 fatalError("\(format): media offset \(offset) is outside a \(size)-byte source")
             }
+            // It aims the prewarm's tail request, so an offset past the file
+            // would be a range no origin can answer.
+            if let offset = layout.indexOffset, offset < 0 || offset >= size {
+                fatalError("\(format): index offset \(offset) is outside a \(size)-byte source")
+            }
             if let header = layout.headerBytes, header < 0 || Int64(header) > size {
                 fatalError("\(format): header length \(header) is outside a \(size)-byte source")
             }
