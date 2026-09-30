@@ -8,6 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.2.3] — 2026-09-30
+
+Three landings: a command-line tool with diagnostics it shares with the tests
+(#105, `prismcore-cli`), a way for a host to fetch a source's first bytes
+before it plays it (#106, `PrismCoreEngine.prewarm`), and HDR10+
+(ST 2094-40) detection from the bitstream, which is opt-in and reporting only
+(#107). Shipped as a patch although it adds API, per the host pin
+discipline: a release a host takes is always a patch bump.
+
 ### Added
 
 - **`prismcore-cli`: reproduce a field report from a terminal.** A new macOS
@@ -2465,7 +2474,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.3...HEAD
+[3.2.3]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...3.2.3
 [3.2.2]: https://github.com/Wenzlik/PrismCore/compare/3.2.1...3.2.2
 [3.2.1]: https://github.com/Wenzlik/PrismCore/compare/3.2.0...3.2.1
 [3.2.0]: https://github.com/Wenzlik/PrismCore/compare/3.1.1...3.2.0
