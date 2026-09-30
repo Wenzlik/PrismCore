@@ -53,9 +53,56 @@ struct DiagnosticsTests {
             """
         let media = SegmentVerifier.parseMediaPlaylist(text)
         #expect(media.initURI == "init.mp4")
-        #expect(media.segments == [.init(uri: "seg00000.m4s", duration: 6), .init(uri: "seg00001.m4s", duration: 2.5)])
+        #expect(media.segments.map(\.uri) == ["seg00000.m4s", "seg00001.m4s"])
+        #expect(media.segments.map(\.duration) == [6, 2.5])
+        #expect(media.segments.map(\.sequence) == [0, 1])
+        #expect(media.segments.allSatisfy { $0.initSection == .init(uri: "init.mp4") && $0.resource.range == nil })
         #expect(media.isEnded)
+        #expect(media.issues.isEmpty && media.encryption == nil)
         #expect(!SegmentVerifier.parseMediaPlaylist("#EXTM3U\n#EXTINF:6,\na.m4s\n").isEnded)
+    }
+
+    /// RFC 8216 §4.3.2.2 / §4.3.2.5: a range without `@offset` continues the
+    /// previous sub-range of the same resource, a map applies until the next
+    /// one, and `EXT-X-MEDIA-SEQUENCE` numbers the first segment. Getting any
+    /// of these wrong fetches the wrong bytes and reports on them.
+    @Test("Byte ranges, per-segment maps and the media sequence are honoured")
+    func parsesByteRangesAndMaps() {
+        let text = """
+            #EXTM3U
+            #EXT-X-MEDIA-SEQUENCE:40
+            #EXT-X-MAP:URI="all.mp4",BYTERANGE="700@0"
+            #EXTINF:6,
+            #EXT-X-BYTERANGE:1000@700
+            all.mp4
+            #EXTINF:6,
+            #EXT-X-BYTERANGE:500
+            all.mp4
+            #EXT-X-DISCONTINUITY
+            #EXT-X-MAP:URI="other-init.mp4"
+            #EXTINF:4,
+            other.m4s
+            """
+        let media = SegmentVerifier.parseMediaPlaylist(text)
+        #expect(media.issues.isEmpty, "\(media.issues)")
+        #expect(media.segments.map(\.sequence) == [40, 41, 42])
+        #expect(media.segments.map(\.resource) == [
+            .init(uri: "all.mp4", range: .init(length: 1000, offset: 700)),
+            .init(uri: "all.mp4", range: .init(length: 500, offset: 1700)),
+            .init(uri: "other.m4s"),
+        ])
+        #expect(media.segments.map(\.initSection) == [
+            .init(uri: "all.mp4", range: .init(length: 700, offset: 0)),
+            .init(uri: "all.mp4", range: .init(length: 700, offset: 0)),
+            .init(uri: "other-init.mp4"),
+        ])
+
+        // An offset-less range with nothing to continue is refused, not
+        // guessed at.
+        let orphan = SegmentVerifier.parseMediaPlaylist("#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\"\n#EXT-X-BYTERANGE:10\na.mp4\n")
+        #expect(!orphan.issues.isEmpty)
+        let encrypted = SegmentVerifier.parseMediaPlaylist("#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n#EXTINF:6,\na.m4s\n")
+        #expect(encrypted.encryption == "SAMPLE-AES")
     }
 
     // MARK: SegmentVerifier — over a served session
@@ -142,4 +189,219 @@ struct DiagnosticsTests {
         #expect(!check.hasErrors)
         #expect(check.problems.contains { $0.0 == .warning && $0.1.contains("#EXTINF") })
     }
+
+    // MARK: SegmentVerifier — presentations the engine does not produce
+
+    /// The video rendition of a served H.264 remux, as bytes: its init
+    /// section and every fragment with its `#EXTINF`. The presentations
+    /// below re-serve these from a scripted origin in layouts PrismCore
+    /// itself never writes but `segverify --hls` must read.
+    private func servedVideoRendition() async throws -> (initSegment: Data, segments: [(duration: Double, data: Data)]) {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_30s.mkv"))
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        let base = playlist.deletingLastPathComponent()
+        let (master, _) = try await URLSession.uncached.data(from: playlist)
+        for variant in PrismCoreSession.playlistURIs(inMaster: String(decoding: master, as: UTF8.self)) {
+            let mediaURL = base.appendingPathComponent(variant)
+            let (text, _) = try await URLSession.uncached.data(from: mediaURL)
+            let media = SegmentVerifier.parseMediaPlaylist(String(decoding: text, as: UTF8.self))
+            guard let initURI = media.initURI else { continue }
+            let directory = mediaURL.deletingLastPathComponent()
+            let (initSegment, _) = try await URLSession.uncached.data(from: directory.appendingPathComponent(initURI))
+            var segments: [(Double, Data)] = []
+            for segment in media.segments {
+                let (data, _) = try await URLSession.uncached.data(from: directory.appendingPathComponent(segment.uri))
+                segments.append((segment.duration ?? 0, data))
+            }
+            guard let first = segments.first,
+                  SegmentVerifier.verify(initSegment: initSegment, mediaSegment: first.1).videoFrames > 0
+            else { continue }
+            return (initSegment, segments)
+        }
+        throw CocoaError(.fileNoSuchFile)
+    }
+
+    /// Every fragment and the init in ONE resource, addressed by
+    /// `EXT-X-BYTERANGE` — the single-file layout. Fetched whole, each
+    /// "segment" would decode from the file's first keyframe on and hand
+    /// later fragments the references they are supposed to do without, so
+    /// the frame count is the regression: 720 exactly once, not 720 per
+    /// segment.
+    @Test("Byte-range segments in one resource are fetched and decoded one range at a time")
+    func byteRangeSegmentsVerifyIndependently() async throws {
+        let (initSegment, segments) = try await servedVideoRendition()
+        try #require(segments.count > 1)
+        var resource = initSegment
+        var playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:7\n"
+            + "#EXT-X-MAP:URI=\"all.mp4\",BYTERANGE=\"\(initSegment.count)@0\"\n"
+        for (index, segment) in segments.enumerated() {
+            // The first range carries its offset; the rest continue from it,
+            // the way packagers write them.
+            let range = index == 0 ? "\(segment.data.count)@\(resource.count)" : "\(segment.data.count)"
+            playlist += "#EXTINF:\(segment.duration),\n#EXT-X-BYTERANGE:\(range)\nall.mp4\n"
+            resource += segment.data
+        }
+        playlist += "#EXT-X-ENDLIST\n"
+        let body = resource
+        let text = playlist
+        let server = try ScriptedHTTPServer { request in
+            switch request.path {
+            case "/media.m3u8": return ScriptedHTTPServer.text(text)
+            case "/all.mp4": return ScriptedHTTPServer.ranged(body, for: request)
+            default: return .respond(status: 404, body: Data())
+            }
+        }
+        let root = try await server.start()
+        defer { server.stop() }
+
+        let report = try await SegmentVerifier.verify(playlist: root.appendingPathComponent("media.m3u8"))
+        #expect(!report.hasErrors && report.isComplete, "findings: \(report.findings)")
+        let checked = try #require(report.playlists.first)
+        #expect(checked.segmentsChecked == segments.count)
+        #expect(checked.videoFrames == 720, "each range must decode alone, not the file from its start")
+        // Every fetch was a range: the init once, then one per fragment.
+        let ranged = server.requests.filter { $0.path == "/all.mp4" }
+        #expect(ranged.count == segments.count + 1)
+        #expect(ranged.allSatisfy { $0.headers["range"] != nil })
+    }
+
+    /// A live-style window of three that advances one segment per reload
+    /// before `#EXT-X-ENDLIST`. Indexing each reload by a lifetime count
+    /// skips the segment that slid in (three checked, three listed, nothing
+    /// "new") and then exits clean on the end tag; following the media
+    /// sequence checks each exactly once.
+    @Test("A sliding playlist is followed by media sequence, and a missed segment is unverified")
+    func slidingWindowFollowsMediaSequence() async throws {
+        let (initSegment, segments) = try await servedVideoRendition()
+        try #require(segments.count > 3)
+        let count = segments.count
+        let fragments = segments.map(\.data)
+        let durations = segments.map(\.duration)
+        let initBody = initSegment
+
+        /// A window starting at `first`, ended once it reaches the last one.
+        @Sendable func window(_ first: Int, width: Int) -> String {
+            let last = min(count - 1, first + width - 1)
+            var text = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:7\n#EXT-X-MEDIA-SEQUENCE:\(first)\n"
+                + "#EXT-X-MAP:URI=\"init.mp4\"\n"
+            for index in first...last { text += "#EXTINF:\(durations[index]),\nseg\(index).m4s\n" }
+            return text + (last == count - 1 ? "#EXT-X-ENDLIST\n" : "")
+        }
+        func origin(advance step: Int, width: Int) throws -> ScriptedHTTPServer {
+            let reloads = Counter()
+            return try ScriptedHTTPServer { request in
+                switch request.path {
+                case "/live.m3u8":
+                    return ScriptedHTTPServer.text(window(min(count - width, reloads.next() * step), width: width))
+                case "/init.mp4":
+                    return .respond(status: 200, body: initBody)
+                default:
+                    let name = request.path.dropFirst("/seg".count).dropLast(".m4s".count)
+                    guard let index = Int(name), fragments.indices.contains(index) else {
+                        return .respond(status: 404, body: Data())
+                    }
+                    return .respond(status: 200, body: fragments[index])
+                }
+            }
+        }
+
+        let sliding = try origin(advance: 1, width: 3)
+        let root = try await sliding.start()
+        let report = try await SegmentVerifier.verify(playlist: root.appendingPathComponent("live.m3u8"))
+        sliding.stop()
+        #expect(!report.hasErrors && report.isComplete, "findings: \(report.findings)")
+        #expect(report.playlists.first?.segmentsChecked == count)
+        #expect(report.playlists.first?.videoFrames == 720)
+        let fetched = sliding.requests.map(\.path).filter { $0.hasPrefix("/seg") }
+        #expect(fetched == (0..<count).map { "/seg\($0).m4s" }, "each segment exactly once, in order")
+
+        // A window that jumps past segments between reloads: what it skipped
+        // was never checked, which must not read as a pass.
+        let jumping = try origin(advance: 2, width: 1)
+        let jumpRoot = try await jumping.start()
+        let jumped = try await SegmentVerifier.verify(playlist: jumpRoot.appendingPathComponent("live.m3u8"))
+        jumping.stop()
+        #expect(!jumped.hasErrors)
+        #expect(!jumped.isComplete)
+        #expect(jumped.findings.contains {
+            $0.severity == .unverified && $0.problem.contains("left the playlist window")
+        }, "findings: \(jumped.findings)")
+    }
+
+    /// `-H` on `segverify --hls` is the presentation's credential, and an
+    /// origin that wants a token wants it on the master, the media
+    /// playlist a level down, the init and every fragment.
+    @Test("Headers reach every request of the walk, nested playlists included")
+    func headersReachEveryRequest() async throws {
+        let (initSegment, segments) = try await servedVideoRendition()
+        let fragments = segments.prefix(2).map(\.data)
+        let initBody = initSegment
+        var media = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+        for (index, segment) in segments.prefix(2).enumerated() {
+            media += "#EXTINF:\(segment.duration),\nseg\(index).m4s\n"
+        }
+        media += "#EXT-X-ENDLIST\n"
+        let mediaText = media
+        let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.640028\"\nvideo/media.m3u8\n"
+        let server = try ScriptedHTTPServer { request in
+            guard request.headers["authorization"] == "Bearer s3cret" else {
+                return .respond(status: 401, body: Data())
+            }
+            switch request.path {
+            case "/master.m3u8": return ScriptedHTTPServer.text(master)
+            case "/video/media.m3u8": return ScriptedHTTPServer.text(mediaText)
+            case "/video/init.mp4": return .respond(status: 200, body: initBody)
+            case "/video/seg0.m4s": return .respond(status: 200, body: fragments[0])
+            case "/video/seg1.m4s": return .respond(status: 200, body: fragments[1])
+            default: return .respond(status: 404, body: Data())
+            }
+        }
+        let root = try await server.start()
+        defer { server.stop() }
+        let top = root.appendingPathComponent("master.m3u8")
+
+        let report = try await SegmentVerifier.verify(
+            playlist: top, httpHeaders: ["Authorization": "Bearer s3cret"]
+        )
+        #expect(!report.hasErrors && report.isComplete, "findings: \(report.findings)")
+        #expect(report.playlists.first?.segmentsChecked == 2)
+        #expect(Set(server.requests.map(\.path)) == [
+            "/master.m3u8", "/video/media.m3u8", "/video/init.mp4", "/video/seg0.m4s", "/video/seg1.m4s",
+        ])
+        #expect(server.requests.allSatisfy { $0.headers["authorization"] == "Bearer s3cret" })
+
+        // And without them the walk fails where it is refused, loudly.
+        await #expect(throws: SegmentVerifier.FetchFailure.self) {
+            _ = try await SegmentVerifier.verify(playlist: top)
+        }
+    }
+
+    /// A stream this build cannot decode is demuxed and skipped — so a
+    /// presentation could finish with no video decoded at all. That is not a
+    /// corrupt segment, and it is not a pass either.
+    @Test("A stream with no decoder makes the report unverified, naming it")
+    func missingDecoderIsUnverified() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_30s.mkv"))
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        let report = try await SegmentVerifier.verify(playlist: playlist, unavailableDecoders: ["h264"])
+        #expect(!report.hasErrors, "a missing decoder is not a media fault: \(report.findings)")
+        #expect(!report.isComplete)
+        #expect(report.playlists.allSatisfy { $0.videoFrames == 0 })
+        let video = try #require(report.playlists.first { !$0.undecodedStreams.isEmpty })
+        #expect(video.undecodedStreams.allSatisfy { $0.contains("h264") })
+        #expect(report.findings.contains {
+            $0.severity == .unverified && $0.location == video.uri && $0.problem.contains("h264")
+        }, "findings: \(report.findings)")
+    }
+}
+
+/// A thread-safe tick for a handler that must answer differently per call.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    /// The count before this call.
+    func next() -> Int { lock.withLock { defer { value += 1 }; return value } }
 }
