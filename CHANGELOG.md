@@ -8,6 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Embedded text subtitle cues from the host cue tap no longer land in the
+  past after a resume or seek on a demand-driven session** (muxed+bridge
+  included, since 3.2.4). A re-anchor that arrived before the head keyframe
+  made the anchor the timeline origin. Planned mode now takes the origin from
+  the plan's first entry.
+
 ## [3.2.4] — 2026-09-30
 
 Two AudioBridge fixes from contributor PR #104 (@jpokorny312), landed via
