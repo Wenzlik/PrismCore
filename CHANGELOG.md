@@ -8,6 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.2.4] — 2026-09-30
+
+Two AudioBridge fixes from contributor PR #104 (@jpokorny312), landed via
+#109. An `aac` bridge target no longer produces a PCE-described layout that
+makes AVPlayer reject the master. Demand-driven seeking now covers the muxed
+shape with a bridged track, so Resume no longer restarts the remux from
+0:00. A patch release, per the host pin discipline.
+
 ### Fixed
 
 - **A bridged 5.1(side) or 7.1 track encoded to `aac` no longer fails the
@@ -2501,7 +2509,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.3...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.4...HEAD
+[3.2.4]: https://github.com/Wenzlik/PrismCore/compare/3.2.3...3.2.4
 [3.2.3]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...3.2.3
 [3.2.2]: https://github.com/Wenzlik/PrismCore/compare/3.2.1...3.2.2
 [3.2.1]: https://github.com/Wenzlik/PrismCore/compare/3.2.0...3.2.1
