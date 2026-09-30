@@ -28,7 +28,8 @@ final class RangeFixtureServer: @unchecked Sendable {
     /// default because it is also the honest model of Aether's range proxy,
     /// which synthesises its responses and forwards no `ETag` — the gap the
     /// probe-hints design calls the validator problem.
-    private let etag: String?
+    private var etag: String?
+    private var rangeLog: [String] = []
     private var requestTimes: [TimeInterval] = []
     private var resumed = false
 
@@ -50,6 +51,11 @@ final class RangeFixtureServer: @unchecked Sendable {
     }
 
     var requests: [TimeInterval] { queue.sync { requestTimes } }
+    /// Each request's `Range` header value (`-` for none), in arrival order.
+    var ranges: [String] { queue.sync { rangeLog } }
+    /// Publish a different validator from the next response on — the origin
+    /// replacing the file underneath a prewarm.
+    func setETag(_ value: String?) { queue.sync { etag = value } }
 
     func start() async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
@@ -96,6 +102,7 @@ final class RangeFixtureServer: @unchecked Sendable {
                 return
             }
             requestTimes.append(ProcessInfo.processInfo.systemUptime)
+            if drops > 0 || refusals > 0 || deniedStatus != nil { rangeLog.append("refused") }
             if drops > 0 { drops -= 1; close(connection); return }
             if let deniedStatus {
                 let retryHeader = [429, 503, 509].contains(deniedStatus) ? "Retry-After: \(retryAfter)\r\n" : ""
@@ -110,6 +117,7 @@ final class RangeFixtureServer: @unchecked Sendable {
                 return
             }
             let range = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("range: bytes=") }
+            rangeLog.append(range.map { String($0.dropFirst("range: ".count)) } ?? "-")
             let bounds = range?.components(separatedBy: "=").last?.split(separator: "-", omittingEmptySubsequences: false)
             let start = bounds?.first.flatMap { Int($0) } ?? 0
             let requestedEnd = bounds.flatMap { $0.count > 1 ? Int($0[1]) : nil } ?? (media.count - 1)

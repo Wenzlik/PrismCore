@@ -27,6 +27,12 @@ enum ContainerLayoutScanner {
         var headerBytes: Int?
         var firstMediaOffset: Int64?
         var indexLocation: IndexLocation = .unknown
+        /// Where the index element itself starts, when the framing names it:
+        /// a Matroska's Cues as its SeekHead points at them, or an ISO-BMFF
+        /// `moov` found past the end of `mdat`. Used by the source prewarm to
+        /// fetch the tail the demuxer will jump to — never to conclude there
+        /// is no index when it is `nil`.
+        var indexOffset: Int64?
 
         static let unknown = Layout()
     }
@@ -113,6 +119,7 @@ enum ContainerLayoutScanner {
                 layout.headerBytes = Int(exactly: child.start)
                 if let cuesOffset {
                     layout.indexLocation = cuesOffset < child.start ? .head : .tail
+                    layout.indexOffset = cuesOffset
                 }
                 return layout
             case cuesID:
@@ -136,6 +143,9 @@ enum ContainerLayoutScanner {
             guard let next = child.end, next > cursor else { break }
             cursor = next
         }
+        // No Cluster reached — a header longer than what the reader could see.
+        // The SeekHead's word on where the Cues are still stands on its own.
+        layout.indexOffset = cuesOffset
         return layout
     }
 
@@ -256,8 +266,9 @@ enum ContainerLayoutScanner {
             visited += 1
             guard let head = read(cursor, 8), head.count == 8 else { break }
             let bytes = [UInt8](head)
-            var size = Int64(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16
-                             | UInt32(bytes[2]) << 8 | UInt32(bytes[3]))
+            let headerSize = Int64(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16
+                                   | UInt32(bytes[2]) << 8 | UInt32(bytes[3]))
+            var size = headerSize
             let type = String(decoding: bytes[4..<8], as: UTF8.self)
             var headerLength: Int64 = 8
             if size == 1 {
@@ -270,6 +281,7 @@ enum ContainerLayoutScanner {
                 size = (byteSize ?? limit) - cursor
             }
             guard size >= headerLength else { break }
+            let sizeWasDeclared = headerSize != 0
 
             switch type {
             case "moov":
@@ -293,6 +305,14 @@ enum ContainerLayoutScanner {
                     // not the metadata region a consumer would want to read —
                     // reporting them as `headerBytes` would size a first read
                     // that learns nothing. Left absent on purpose.
+                    //
+                    // Whatever follows a declared-length `mdat` is the one
+                    // place a trailing `moov` can be; a to-end-of-file `mdat`
+                    // has nothing after it to point at.
+                    let (after, overflow) = cursor.addingReportingOverflow(size)
+                    if sizeWasDeclared, !overflow, after < (byteSize ?? Int64.max) {
+                        layout.indexOffset = after
+                    }
                 }
                 return layout
             default:

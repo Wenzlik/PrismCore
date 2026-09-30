@@ -41,6 +41,16 @@ struct StartupCheckpointBenchmark {
         // for bounded blocks.
         let coordinatedHTTP =
             ProcessInfo.processInfo.environment["PRISMCORE_BENCH_COORDINATED_HTTP"] == "1"
+        // A prewarm ahead of the probe, timed on its own: it is work a host
+        // does while the user is still choosing, so it must not be folded
+        // into the startup it is meant to shorten. Only the coordinated
+        // reader consults the prewarm store.
+        var prewarmLine: String?
+        if ProcessInfo.processInfo.environment["PRISMCORE_BENCH_PREWARM"] == "1" {
+            let prewarm = await PrismCoreEngine.prewarm(url: mediaURL)
+            prewarmLine = "prewarm \(ms(prewarm.duration))ms (\(prewarm.status), \(prewarm.requests) req, "
+                + "\(prewarm.storedBytes) B, index \(prewarm.indexPrewarmed))"
+        }
         let probed = try SourceProbe.open(
             url: mediaURL, budget: .seconds(budget), coordinatedHTTP: coordinatedHTTP
         )
@@ -49,6 +59,7 @@ struct StartupCheckpointBenchmark {
             + " (open \(ms(timing.open))"
             + " + info \(ms(timing.streamInfo))"
             + " + describe \(ms(timing.describe)))"
+            + (prewarmLine == nil ? "" : " prewarm-use \(probed.prewarm)")
 
         let session = try PrismCoreSession(
             url: mediaURL,
@@ -72,7 +83,7 @@ struct StartupCheckpointBenchmark {
 
         print("""
 
-        \(probeLine)
+        \(prewarmLine.map { $0 + "\n" } ?? "")\(probeLine)
         startup \(collected.marks.joined(separator: " -> "))
         start() returned in \(total)ms\(failure.map { " — FAILED: \($0)" } ?? "")
 
