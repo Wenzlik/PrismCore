@@ -60,6 +60,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 | Video (software) | VP9 / VP8, MPEG-2, MPEG-4 Part 2, VC-1 / WMV3, AV1 without hardware (libdav1d), interlaced H.264 with CPU `bwdif` deinterlace at field rate |
 | HDR | HDR10 (PQ) and HLG, signaled honestly in the master playlist and tone-mapped by the system |
 | Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi; 8.2's Rec.709 base plays as plain SDR because that is what it is |
+| HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC, AC3, EAC3, FLAC, ALAC — bit-for-bit |
 | Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel. Needs an FFmpeg build with the **`eac3` encoder**; without it those sources take the software path instead, which decodes them itself |
@@ -513,6 +514,20 @@ probed.structure.firstClusterOffset   // Int64?  — where media begins
 probed.structure.indexLocation        // .head / .tail / .none / .unknown
 probed.structure.index?.completeness  // .complete / .partial / .absent / .unknown
 ```
+
+**HDR10+.** No container declares it, so the only honest answer comes from
+the bitstream, and it costs reads — which is why it is asked for, like the
+structure export, and never paid by a routing probe by default.
+
+```swift
+let probed = try SourceProbe.open(url: url, hdr10Plus: .standard)
+probed.info.hdr10Plus?.verdict        // .seen / .notSeenWithinBudget / .unknown(reason)
+probed.info.hdr10Plus?.applicationVersion
+```
+
+`notSeenWithinBudget` means exactly that. The finding changes nothing about
+how the source is played: `VIDEO-RANGE` stays PQ, and HDR10+ rides the
+stream-copy whether or not anyone asked.
 
 **Consuming.** `SourceProbe.open(_:hints:)` takes what a caller already knows.
 `hints: nil` is the unhinted open, unchanged.

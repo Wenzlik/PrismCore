@@ -8,6 +8,56 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **HDR10+ (SMPTE ST 2094-40) detection, read from the bitstream.** Containers
+  never declare HDR10+. The metadata rides each picture as an SEI
+  `user_data_registered_itu_t_t35` message with Samsung's T.35 header, and
+  stream-copy already carried it through untouched, but the engine had no
+  way to know it was there. `SourceProbe.open(…, hdr10Plus: .standard)` (and
+  `openDetached`) now walks at most 24 video packets, stopping at the first
+  message, and reports the result as `SourceInfo.hdr10Plus`
+  (`HDR10PlusFinding`). The answer has three values: `seen` (with the
+  `application_version`), `notSeenWithinBudget`, or `unknown(reason)`, where
+  the reason is a codec whose SEI is not walked (AV1, VP9), an unseekable
+  input, a failed or interrupted read, or no video packets. A scan that
+  finds nothing cannot prove there is no HDR10+ further in, so there is
+  deliberately no "absent" value.
+
+  The scan is **opt-in**. The default `.off` reads nothing and leaves the
+  field `nil`, so a routing-only probe pays no extra I/O on the way to its
+  verdict. Its cost shows up separately as `ProbeTiming.hdr10PlusScan`. It
+  runs right after `describe`, so its first reads are the packets
+  `avformat_find_stream_info` already buffered, and an adopted context is
+  rewound by the producer as before (a test checks that the head segment
+  starts at `tfdt` 0 and still carries the SEI byte for byte).
+
+  The NAL framing, the SEI message loop, emulation-prevention removal and
+  the carriage choice now live in `HEVCNALUnits`, shared with the A/53
+  caption reader. Only the T.35 header test belongs to the scout. There is a
+  new fuzz target, `hdr10plus-sei`, with a seed that puts an encoder banner
+  and an A/53 caption message ahead of the HDR10+ one. Its checks: a `seen`
+  needs an SEI unit under it and a defined version, and in length-prefixed
+  carriage, adding a slice on either side must not change the verdict.
+
+  **Detection and reporting only.** `VIDEO-RANGE`, the master playlist and
+  `DisplayCriteriaController` are unchanged, and a test pins the scanned and
+  unscanned masters as byte-identical. Whether AVPlayer and tvOS render
+  HDR10+ from HLS-fMP4, and whether any playlist or display-criteria signal
+  changes that, needs a named device run on an HDR10+ panel. None has been
+  done yet. A wrong HDR variant is a `-11868` rejection, so nothing ships on
+  a guess. HDR10+ carried only as Matroska `BlockAdditional` side data (the
+  WebM/VP9 form) is not scanned: stream-copy to fMP4 would not carry it
+  anyway.
+
+  The fixtures `hevc_hdr10plus.mkv` and `hevc_hdr10plus.ts` are 10-bit PQ
+  HEVC with a real ST 2094-40 SEI on every picture. The encoder available to
+  CI cannot write HDR10+, so `Fixtures/inject_hdr10plus_sei.py` adds it, and
+  FFmpeg's own decoder reads it back as "HDR Dynamic Metadata SMPTE2094-40
+  (HDR10+)". That check keeps the tests from only agreeing with our own
+  reading of the syntax. `Fixtures/generate_hdr10plus.sh` regenerates both
+  files.
+
 ## [3.2.2] — 2026-09-24
 
 A memory fix for every host that plays over the coordinated HTTP reader.

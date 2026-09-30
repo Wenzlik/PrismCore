@@ -37,8 +37,12 @@ public struct ProbeTiming: Sendable, Equatable {
     /// ran — the phase that DECODES, so a declared-interlaced H.264 source
     /// pays for real packets here.
     public let describe: Duration
+    /// The opt-in HDR10+ packet scan (`HDR10PlusScan`); zero when it was not
+    /// asked for. Separate from `describe` so its cost is visible on its own —
+    /// it is the one phase a host chooses to pay.
+    public let hdr10PlusScan: Duration
 
-    public var total: Duration { open + streamInfo + describe }
+    public var total: Duration { open + streamInfo + describe + hdr10PlusScan }
 }
 
 public final class ProbedSource: @unchecked Sendable {

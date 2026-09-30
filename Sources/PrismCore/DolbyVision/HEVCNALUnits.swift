@@ -1,4 +1,5 @@
 import Foundation
+import Libavcodec
 
 /// Walks and rewrites the NAL units inside a length-prefixed HEVC packet — the
 /// form libavformat's mov and matroska demuxers hand us (`hvcC`-style: each NAL
@@ -291,5 +292,104 @@ enum HEVCNALUnits {
                 emit(offset: start, length: count - start)
             }
         }
+    }
+
+    // MARK: - SEI messages (shared by every SEI reader)
+
+    /// The framing and codec of a video track, or `nil` for a codec whose
+    /// bitstream has no NAL units (and so no SEI) to walk.
+    ///
+    /// Shared by every reader that looks inside SEI — closed captions, HDR10+
+    /// — because the rule is about the carriage, not about what rides in it.
+    static func carriage(
+        codecID: AVCodecID, nalUnitLengthSize: Int?
+    ) -> (framing: Framing, codec: Codec)? {
+        let codec: Codec
+        switch codecID {
+        case AV_CODEC_ID_H264: codec = .h264
+        case AV_CODEC_ID_HEVC: codec = .hevc
+        default: return nil
+        }
+        // No `avcC`/`hvcC` means no length prefixes, which means Annex-B start
+        // codes — the shape the MPEG-TS demuxer produces.
+        if let lengthSize = nalUnitLengthSize, (1...4).contains(lengthSize) {
+            return (.lengthPrefixed(lengthSize), codec)
+        }
+        return (.annexB, codec)
+    }
+
+    /// `nal_unit_type` values that carry SEI messages.
+    static func isSEI(_ type: UInt8, codec: Codec) -> Bool {
+        switch codec {
+        case .h264: return type == 6
+        // Prefix (39) and suffix (40) SEI both legally carry user data; A/53
+        // and HDR10+ use the prefix one, but reading both costs nothing and a
+        // suffix message is not malformed.
+        case .hevc: return type == 39 || type == 40
+        }
+    }
+
+    /// `user_data_registered_itu_t_t35` — the SEI payload type every
+    /// registered user-data format (A/53 captions, ST 2094-40, Dolby's own)
+    /// shares, and tells apart only by the T.35 header inside it.
+    static let t35PayloadType = 4
+
+    /// Walk the SEI message loop of one SEI NAL payload (header already
+    /// stripped, emulation prevention still in). `visit` gets each message's
+    /// `payloadType` and its payload bytes, and returns `false` to stop.
+    ///
+    /// Best-effort in the same sense as `scan`: a message whose declared size
+    /// runs past the NAL ends the walk, and the messages before it stand.
+    static func forEachSEIMessage(
+        inSEINAL payload: UnsafeBufferPointer<UInt8>,
+        _ visit: (_ payloadType: Int, _ message: ArraySlice<UInt8>) -> Bool
+    ) {
+        // Emulation prevention has to come off before the message loop reads
+        // sizes: a `00 00 03` inside a payload would otherwise be counted as
+        // three payload bytes and shift every field after it.
+        let rbsp = unescaped(payload)
+        var cursor = 0
+
+        func readExtended() -> Int? {
+            var value = 0
+            while cursor < rbsp.count {
+                let byte = rbsp[cursor]
+                cursor += 1
+                value += Int(byte)
+                if byte != 0xFF { return value }
+                // A run of 0xFF that never terminates is a malformed message,
+                // and the sum would otherwise grow past the buffer silently.
+                if value > rbsp.count { return nil }
+            }
+            return nil
+        }
+
+        while cursor < rbsp.count {
+            // `rbsp_trailing_bits`: the stop bit ends the message loop.
+            if rbsp[cursor] == 0x80 { return }
+            guard let payloadType = readExtended(), let payloadSize = readExtended(),
+                  cursor + payloadSize <= rbsp.count
+            else { return }
+            let message = rbsp[cursor..<(cursor + payloadSize)]
+            cursor += payloadSize
+            if !visit(payloadType, message) { return }
+        }
+    }
+
+    /// Remove `emulation_prevention_three_byte`: every `00 00 03` becomes
+    /// `00 00`.
+    static func unescaped(_ payload: UnsafeBufferPointer<UInt8>) -> [UInt8] {
+        var output: [UInt8] = []
+        output.reserveCapacity(payload.count)
+        var zeroRun = 0
+        for byte in payload {
+            if zeroRun >= 2 && byte == 0x03 {
+                zeroRun = 0
+                continue
+            }
+            zeroRun = byte == 0 ? zeroRun + 1 : 0
+            output.append(byte)
+        }
+        return output
     }
 }
