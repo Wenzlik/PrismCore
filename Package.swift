@@ -12,6 +12,10 @@ let package = Package(
     ],
     products: [
         .library(name: "PrismCore", targets: ["PrismCore"]),
+        // A macOS diagnostic tool, not something a host links: probe, serve,
+        // bench and verify a source from a terminal, so a field report can be
+        // reproduced without a device build. See AGENTS.md *Measuring*.
+        .executable(name: "prismcore-cli", targets: ["prismcore-cli"]),
     ],
     dependencies: [
         // FFmpeg (LGPL) as prebuilt xcframeworks — the same package Aether
@@ -34,6 +38,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "prismcore-fuzz",
+            dependencies: ["PrismCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+            ]
+        ),
+        .executableTarget(
+            name: "prismcore-cli",
             dependencies: ["PrismCore"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
