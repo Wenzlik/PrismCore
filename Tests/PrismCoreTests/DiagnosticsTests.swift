@@ -105,6 +105,77 @@ struct DiagnosticsTests {
         #expect(encrypted.encryption == "SAMPLE-AES")
     }
 
+    /// Playlist integers are untrusted: a range end or a sequence number
+    /// past `Int.max` used to trap the process (SIGTRAP, no diagnostic).
+    /// Each must become a parse issue instead — and a value just inside the
+    /// domain must still parse.
+    @Test("Range ends and media sequences at Int.max are issues, not traps")
+    func numericBoundariesAreIssues() {
+        func parse(_ body: String) -> SegmentVerifier.MediaPlaylist {
+            SegmentVerifier.parseMediaPlaylist("#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\"\n" + body)
+        }
+        let max = Int.max
+
+        // Explicit segment range ending one past Int.max, and exactly at it.
+        #expect(!parse("#EXTINF:6,\n#EXT-X-BYTERANGE:2@\(max - 1)\na.mp4\n").issues.isEmpty)
+        let atEdge = parse("#EXTINF:6,\n#EXT-X-BYTERANGE:1@\(max - 1)\na.mp4\n")
+        #expect(atEdge.issues.isEmpty, "\(atEdge.issues)")
+        #expect(atEdge.segments.first?.resource.range?.end == max)
+        // An implicit range continuing from an end at Int.max.
+        #expect(!parse("#EXT-X-BYTERANGE:1@\(max - 1)\na.mp4\n#EXT-X-BYTERANGE:1\na.mp4\n").issues.isEmpty)
+        // Map ranges: overflowing, and offset-less (no position to continue).
+        let mapOverflow = SegmentVerifier.parseMediaPlaylist(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\",BYTERANGE=\"2@\(max - 1)\"\n#EXTINF:6,\na.m4s\n")
+        #expect(!mapOverflow.issues.isEmpty)
+        let mapNoOffset = SegmentVerifier.parseMediaPlaylist(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\",BYTERANGE=\"700\"\n#EXTINF:6,\na.m4s\n")
+        #expect(!mapNoOffset.issues.isEmpty)
+        // Out-of-range integers themselves.
+        #expect(!parse("#EXT-X-BYTERANGE:1@99999999999999999999\na.mp4\n").issues.isEmpty)
+
+        // Media sequence: the walk advances to `sequence + 1`, so Int.max
+        // itself is out, as is a later segment's position past it.
+        #expect(!parse("#EXT-X-MEDIA-SEQUENCE:\(max)\n#EXTINF:6,\na.m4s\n").issues.isEmpty)
+        #expect(!parse("#EXT-X-MEDIA-SEQUENCE:\(max - 1)\n#EXTINF:6,\na.m4s\n#EXTINF:6,\nb.m4s\n").issues.isEmpty)
+        let lastSupported = parse("#EXT-X-MEDIA-SEQUENCE:\(max - 1)\n#EXTINF:6,\na.m4s\n")
+        #expect(lastSupported.issues.isEmpty && lastSupported.segments.map(\.sequence) == [max - 1])
+        // Unparseable or negative is refused, not read as 0.
+        #expect(!parse("#EXT-X-MEDIA-SEQUENCE:99999999999999999999\n#EXTINF:6,\na.m4s\n").issues.isEmpty)
+        #expect(!parse("#EXT-X-MEDIA-SEQUENCE:-1\n#EXTINF:6,\na.m4s\n").issues.isEmpty)
+        #expect(!parse("#EXT-X-MEDIA-SEQUENCE:abc\n#EXTINF:6,\na.m4s\n").issues.isEmpty)
+    }
+
+    /// The two playlists that trapped the CLI, end to end over HTTP: the
+    /// walk must return a report with an error finding (which the CLI
+    /// exits 1 on), and must not fetch media on a misread playlist.
+    @Test("Overflowing playlist integers end the walk with a finding over HTTP")
+    func numericBoundariesOverHTTP() async throws {
+        let playlists = [
+            "range.m3u8": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+                + "#EXTINF:6,\n#EXT-X-BYTERANGE:2@9223372036854775806\na.mp4\n#EXT-X-ENDLIST\n",
+            "sequence.m3u8": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+                + "#EXT-X-MEDIA-SEQUENCE:9223372036854775807\n#EXTINF:6,\na.m4s\n#EXT-X-ENDLIST\n",
+            "sequence2.m3u8": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+                + "#EXT-X-MEDIA-SEQUENCE:9223372036854775806\n#EXTINF:6,\na.m4s\n#EXTINF:6,\nb.m4s\n"
+                + "#EXT-X-ENDLIST\n",
+        ]
+        let mediaRequests = Counter()
+        let server = try ScriptedHTTPServer { request in
+            if let text = playlists[String(request.path.dropFirst())] { return ScriptedHTTPServer.text(text) }
+            _ = mediaRequests.next()
+            return .respond(status: 404, body: Data())
+        }
+        let root = try await server.start()
+        defer { server.stop() }
+
+        for name in playlists.keys.sorted() {
+            let report = try await SegmentVerifier.verify(
+                playlist: root.appendingPathComponent(name), stallTimeout: .seconds(2))
+            #expect(report.hasErrors, "\(name): \(report.findings)")
+        }
+        #expect(mediaRequests.next() == 0, "a misread playlist still fetched media")
+    }
+
     // MARK: SegmentVerifier — over a served session
 
     @Test("Every segment of a served H.264 + AAC remux decodes on its own")

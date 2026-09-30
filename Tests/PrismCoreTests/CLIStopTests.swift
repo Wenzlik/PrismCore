@@ -123,13 +123,19 @@ struct CLIStopTests {
     func stopDuringWorkIsInterrupt() async throws {
         let stop = StopSignal(watchStdin: false)
         stop.fire(after: .milliseconds(100), "interrupted")
+        let parked = Parked()
         await #expect(throws: CLIFailure.self) {
-            // Work that ignores cancellation entirely.
+            // Work that ignores cancellation entirely: it ends only when the
+            // test releases it below, long after the stop has won.
             _ = try await untilStopped(stop) { () async -> Int in
-                await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+                await withCheckedContinuation { parked.hold($0) }
                 return 0
             }
         }
+        // Resumed rather than dropped: a checked continuation that is never
+        // resumed is reported as a leak, and the worker task would outlive
+        // the test.
+        parked.release()
         // And a work that wins is returned as itself.
         #expect(try await untilStopped(StopSignal(watchStdin: false)) { 7 } == 7)
     }
@@ -150,6 +156,30 @@ private final class Flag: @unchecked Sendable {
     private var raised = false
     var value: Bool { lock.withLock { raised } }
     func set() { lock.withLock { raised = true } }
+}
+
+/// A continuation held by work that must not finish until the test says so.
+/// Release before hold resumes at once, so the order of the two cannot hang.
+private final class Parked: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func hold(_ continuation: CheckedContinuation<Void, Never>) {
+        let resumeNow = lock.withLock { () -> Bool in
+            if released { return true }
+            self.continuation = continuation
+            return false
+        }
+        if resumeNow { continuation.resume() }
+    }
+    func release() {
+        let held = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { continuation = nil }
+            return continuation
+        }
+        held?.resume()
+    }
 }
 
 private final class Counter: @unchecked Sendable {

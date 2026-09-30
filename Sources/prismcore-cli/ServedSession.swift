@@ -187,8 +187,11 @@ func untilStopped<T: Sendable>(
         }
         let watcher = Task {
             if let reason = await stop.wait() {
-                worker.cancel()
+                // Decide the race first: cancelled work that honours
+                // cancellation throws `CancellationError` at once, and if it
+                // resolved first a Ctrl-C would exit 1 instead of 130.
                 outcome.resolve(.failure(CLIFailure.interrupted(reason)))
+                worker.cancel()
             }
         }
         // A watcher left waiting after the work won would hold its task

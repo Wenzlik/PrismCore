@@ -87,11 +87,28 @@ package enum SegmentVerifier {
     }
 
     /// `#EXT-X-BYTERANGE` / `BYTERANGE=`: `length` bytes from `offset`.
+    ///
+    /// Only constructible when the range's end is representable: the
+    /// playlist is untrusted input, and `2@9223372036854775806` would
+    /// otherwise trap the process on `offset + length` — in the header, the
+    /// slice, or the next implicit offset — instead of becoming a finding.
     package struct ByteRange: Sendable, Hashable {
         package let length: Int
         package let offset: Int
+        /// One past the last byte; never overflows, by construction.
+        package let end: Int
+
+        package init?(length: Int, offset: Int) {
+            guard length > 0, offset >= 0 else { return nil }
+            let (end, overflow) = offset.addingReportingOverflow(length)
+            guard !overflow else { return nil }
+            self.length = length
+            self.offset = offset
+            self.end = end
+        }
+
         /// The HTTP `Range` value for it (inclusive end).
-        var header: String { "bytes=\(offset)-\(offset + length - 1)" }
+        var header: String { "bytes=\(offset)-\(end - 1)" }
     }
 
     /// A URI, or a sub-range of one.
@@ -165,11 +182,31 @@ package enum SegmentVerifier {
                         issues.append("unreadable BYTERANGE in \(line)")
                         continue
                     }
-                    range = ByteRange(length: parsed.length, offset: parsed.offset ?? 0)
+                    // A map has no previous sub-range to continue, and
+                    // RFC 8216 does not say an omitted offset means 0 here.
+                    // Guessing would decode the wrong bytes as the init and
+                    // blame every segment for it.
+                    guard let offset = parsed.offset else {
+                        issues.append("BYTERANGE without @offset in \(line): the init's position is unknown")
+                        continue
+                    }
+                    guard let valid = ByteRange(length: parsed.length, offset: offset) else {
+                        issues.append("BYTERANGE in \(line) ends past the largest supported offset")
+                        continue
+                    }
+                    range = valid
                 }
                 currentMap = Resource(uri: uri, range: range)
             } else if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
-                mediaSequence = Int(line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)) ?? 0
+                // Not `?? 0`: a sequence misread as 0 renumbers every
+                // segment, and a sliding walk then follows the wrong ones.
+                let value = line.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)
+                    .trimmingCharacters(in: .whitespaces)
+                guard let parsed = Int(value), parsed >= 0 else {
+                    issues.append("unreadable or unsupported \(line) (supported: 0…\(Int.max))")
+                    continue
+                }
+                mediaSequence = parsed
             } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
                 pendingRange = parseByteRange(line.dropFirst("#EXT-X-BYTERANGE:".count))
                 if pendingRange == nil { issues.append("unreadable \(line)") }
@@ -184,10 +221,11 @@ package enum SegmentVerifier {
             } else if !line.isEmpty, !line.hasPrefix("#") {
                 var range: ByteRange?
                 if let pending = pendingRange {
-                    if let offset = pending.offset {
+                    if let offset = pending.offset ?? previousRange.flatMap({ $0.uri == line ? $0.end : nil }) {
                         range = ByteRange(length: pending.length, offset: offset)
-                    } else if let previousRange, previousRange.uri == line {
-                        range = ByteRange(length: pending.length, offset: previousRange.end)
+                        if range == nil {
+                            issues.append("#EXT-X-BYTERANGE for \(line) ends past the largest supported offset")
+                        }
                     } else {
                         // RFC 8216 §4.3.2.2: an offset-less range continues
                         // the previous segment's sub-range of the same
@@ -197,12 +235,20 @@ package enum SegmentVerifier {
                             + "which does not follow a sub-range of the same resource")
                     }
                 }
-                previousRange = range.map { (line, $0.offset + $0.length) }
+                previousRange = range.map { (line, $0.end) }
+                // The walk advances to `sequence + 1`, so the last number a
+                // segment may carry is `Int.max - 1`; past that is a finding,
+                // not a trap.
+                let (sequence, overflow) = mediaSequence.addingReportingOverflow(segments.count)
+                guard !overflow, sequence < Int.max else {
+                    issues.append("media sequence of \(line) exceeds the supported range (0…\(Int.max - 1))")
+                    break
+                }
                 segments.append(.init(
                     resource: Resource(uri: line, range: range),
                     duration: pendingDuration,
                     initSection: currentMap,
-                    sequence: mediaSequence + segments.count
+                    sequence: sequence
                 ))
                 pendingDuration = nil
                 pendingRange = nil
@@ -422,7 +468,7 @@ package enum SegmentVerifier {
                         report.findings.append(Finding(severity: severity, location: location, problem: problem))
                     }
                     progress?("\(name) \(segment.resource): "
-                        + (check.hasErrors ? "FAIL" : "ok")
+                        + (check.hasErrors ? "FAIL" : check.undecodedStreams.isEmpty ? "ok" : "unverified")
                         + " (\(check.packets) pkt, \(check.videoFrames) video / \(check.audioFrames) audio frames"
                         + (check.undecodedStreams.isEmpty
                             ? "" : "; not decoded: " + check.undecodedStreams.joined(separator: ", "))
@@ -647,10 +693,10 @@ package enum SegmentVerifier {
             }
             // A 200 to a ranged request is an origin that ignores `Range` and
             // sent the whole resource; the sub-range is still in it.
-            guard data.count >= range.offset + range.length else {
+            guard data.count >= range.end else {
                 throw RangeFailure(url: url, range: range, received: data.count)
             }
-            return data.subdata(in: range.offset..<(range.offset + range.length))
+            return data.subdata(in: range.offset..<range.end)
         }
 
         func data(_ resource: Resource, against playlist: URL) async throws -> Data {
