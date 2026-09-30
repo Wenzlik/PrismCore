@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.2.5] — 2026-09-30
+
+Keeps host cue-tap subtitles on the plan's timeline origin after an early
+demand re-anchor (resume/seek), including the muxed+bridge shape since 3.2.4.
+A patch release, per the host pin discipline.
+
 ### Fixed
 
 - **Embedded text subtitle cues from the host cue tap no longer land in the
@@ -2517,7 +2523,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.4...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.5...HEAD
+[3.2.5]: https://github.com/Wenzlik/PrismCore/compare/3.2.4...3.2.5
 [3.2.4]: https://github.com/Wenzlik/PrismCore/compare/3.2.3...3.2.4
 [3.2.3]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...3.2.3
 [3.2.2]: https://github.com/Wenzlik/PrismCore/compare/3.2.1...3.2.2
