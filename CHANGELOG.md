@@ -8,6 +8,17 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **`PrismCoreSession.playbackEvents()`**, a runtime counterpart to
+  `startupCheckpoints()`: `.slowServe`, `.serveTimedOut`, `.producerStalled`
+  (no packet read for 5 s while a request waits on the producer — never
+  while it is parked on purpose, so a pause is not a stall),
+  `.originThrottled` and `.originRecovered` (coordinated HTTP only; every
+  session on that origin sees them). Callable before or after `start()`,
+  finishes on `stop()`, keeps the newest 64. Report-only: nothing is
+  repaired automatically. `prismcore-cli serve` prints them.
+
 ## [3.2.5] — 2026-09-30
 
 Keeps host cue-tap subtitles on the plan's timeline origin after an early
