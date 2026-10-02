@@ -123,6 +123,52 @@ public actor PrismCoreSession {
         }
         return remuxer.requestAudioDelay(seconds) ? .pendingReanchor : .unsupported
     }
+
+    /// The subtitle offset in force for host cues and for WebVTT segments
+    /// written from now on, in seconds. Positive values show text later.
+    public var subtitleDelaySeconds: Double { remuxer.subtitles.delaySeconds }
+
+    /// What `setSubtitleDelaySeconds(_:)` did.
+    public enum SubtitleDelayChange: Sendable, Equatable {
+        /// In force everywhere before the call returned. Only happens before
+        /// `start()`, when no cue has been delivered and no segment written.
+        case inForce
+        /// Accepted and in force for everything produced from now on: every
+        /// `TimedTextCue` delivered after the call carries it, and so does
+        /// every WebVTT segment written after it. It is NOT in force for what
+        /// already left the engine — AVPlayer never re-fetches a subtitle
+        /// segment it has loaded, and a `.vtt` already on disk is served as
+        /// written, so the rendition shows the old offset for whatever is
+        /// buffered or was produced ahead. Cues the host already holds keep
+        /// their old times too; registering the cue handler again replays
+        /// everything with the new offset.
+        case appliesToNewSegments
+        /// The session is stopped. Nothing changed.
+        case sessionStopped
+    }
+
+    /// Shift subtitle text against the picture — the fix for a sidecar or
+    /// embedded track cut for another release, which only the viewer can see
+    /// is off.
+    ///
+    /// Clamped to +/-10 s; a non-finite value becomes zero. Applies to
+    /// embedded text, closed captions, OCR'd bitmap tracks and files from
+    /// `addExternalSubtitle` alike, on top of the presentation origin. Video,
+    /// audio and the source clock are untouched.
+    ///
+    /// **When it takes effect.** Unlike audio there is no re-anchor: nothing
+    /// muxed depends on it. The return value says what that buys — see
+    /// `SubtitleDelayChange.appliesToNewSegments` for why a WebVTT rendition
+    /// catches up only as new segments arrive. Forcing buffered segments to
+    /// re-load is deliberately not done here; it would cost a re-buffer the
+    /// cue tap does not need.
+    @discardableResult
+    public func setSubtitleDelaySeconds(_ seconds: Double) -> SubtitleDelayChange {
+        guard !stopped else { return .sessionStopped }
+        remuxer.subtitles.setDelay(seconds)
+        return started ? .appliesToNewSegments : .inForce
+    }
+
     /// Summary of usable base audio routes. Inspect audioTrackDeliveries when
     /// multiple renditions have different outcomes; the host owns selection.
     public nonisolated var audioDelivery: AudioDelivery { remuxer.audioDeliveryStore.summary }
@@ -845,6 +891,8 @@ public actor PrismCoreSession {
                 isForced: subtitle.isForced
             )
         }
+        // Before the handler, so its replay already carries the correction.
+        await fallback.setSubtitleDelaySeconds(subtitleDelaySeconds)
         if let handler = timedTextCueHandler {
             await fallback.setTimedTextCueHandler(handler)
         }

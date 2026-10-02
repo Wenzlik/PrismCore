@@ -10,6 +10,16 @@ source-compatible.)
 
 ### Added
 
+- `PrismCoreSession.setSubtitleDelaySeconds(_:)` / `subtitleDelaySeconds`
+  shift subtitle text against the picture (clamped to +/-10 s, non-finite
+  becomes 0), on top of the presentation origin. Host cues (`TimedTextCue`)
+  carry it at once; WebVTT renditions carry it in the `X-TIMESTAMP-MAP` of
+  segments written after the call, so the result is `.appliesToNewSegments`
+  mid-playback — AVPlayer does not re-load buffered subtitle segments. Covers
+  embedded text, captions, OCR'd bitmap tracks and `addExternalSubtitle`.
+  The software path gets `SoftwarePlaybackPipeline.setSubtitleDelaySeconds(_:)`,
+  in force on the next `activeSubtitleCues` read; a muxed fallback session
+  inherits the offset.
 - **`PrismCoreSession.playbackEvents()`**, a runtime counterpart to
   `startupCheckpoints()`: `.slowServe`, `.serveTimedOut`, `.producerStalled`
   (no packet read for 5 s while a request waits on the producer — never
@@ -37,7 +47,6 @@ source-compatible.)
   past the previous, and a PTS below its DTS is raised to it. Nothing is
   dropped and no GOP is rewritten. The sanitizer resets with each re-anchor's
   fresh muxer. Per-packet cost is unmeasured.
-
 ## [3.2.5] — 2026-09-30
 
 Keeps host cue-tap subtitles on the plan's timeline origin after an early
