@@ -21,6 +21,7 @@ func withServedSession<T>(
     _ options: SourceOptions,
     stop: StopSignal,
     afterProbe: () -> Void = {},
+    beforeStart: (PrismCoreSession) async -> Void = { _ in },
     _ body: (URL) async throws -> T
 ) async throws -> T {
     let (probed, decision) = try await untilStopped(stop) { try await probeAndRoute(options) }
@@ -42,6 +43,7 @@ func withServedSession<T>(
         probed: probed,
         coordinatedHTTP: options.coordinatedHTTP
     )
+    await beforeStart(session)
     let playlist: URL
     do {
         playlist = try await untilStopped(stop) { try await session.start() }
