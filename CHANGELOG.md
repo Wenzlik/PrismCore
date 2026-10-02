@@ -8,6 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.2.6] — 2026-10-02
+
+Three landings: repair non-monotonic or missing DTS before writing fMP4
+(#113, `TimestampSanitizer` / `timestampRepairs`), report-only playback
+health events (#114, `playbackEvents()`), and a host subtitle delay API
+(#115, `setSubtitleDelaySeconds`). Shipped as a patch although it adds
+API, per the host pin discipline: a release a host takes is always a
+patch bump.
+
 ### Added
 
 - `PrismCoreSession.setSubtitleDelaySeconds(_:)` / `subtitleDelaySeconds`
@@ -47,6 +56,7 @@ source-compatible.)
   past the previous, and a PTS below its DTS is raised to it. Nothing is
   dropped and no GOP is rewritten. The sanitizer resets with each re-anchor's
   fresh muxer. Per-packet cost is unmeasured.
+
 ## [3.2.5] — 2026-09-30
 
 Keeps host cue-tap subtitles on the plan's timeline origin after an early
@@ -2562,7 +2572,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.5...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.6...HEAD
+[3.2.6]: https://github.com/Wenzlik/PrismCore/compare/3.2.5...3.2.6
 [3.2.5]: https://github.com/Wenzlik/PrismCore/compare/3.2.4...3.2.5
 [3.2.4]: https://github.com/Wenzlik/PrismCore/compare/3.2.3...3.2.4
 [3.2.3]: https://github.com/Wenzlik/PrismCore/compare/3.2.2...3.2.3
