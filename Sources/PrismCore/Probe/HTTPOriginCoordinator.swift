@@ -16,6 +16,12 @@ final class HTTPOriginCoordinator: @unchecked Sendable {
     /// later: a recovery has to be reported however long the throttle lasted.
     private var throttled: Set<String> = []
     private var observers: [UUID: (origin: String, handler: @Sendable (PlaybackEvent) -> Void)] = [:]
+    /// Two fills share an origin, so a 429 and a 206 can cross: without one
+    /// order for "decide and deliver", a throttle decided first could land
+    /// after the recovery that ended it, and the host would sit on
+    /// "overloaded" with nothing left to clear it. Separate from `condition`
+    /// so admission never waits behind a handler.
+    private let emitLock = NSLock()
 
     /// Holds a session's subscription; dropping it unsubscribes, so a session
     /// a host forgot to `stop()` does not leave a handler behind forever.
@@ -54,8 +60,10 @@ final class HTTPOriginCoordinator: @unchecked Sendable {
     /// throttle: `acquire` admits as soon as the backoff expires, and the
     /// answer to that request may well be the next 429.
     func succeeded(_ origin: String) {
-        guard withLock({ throttled.remove(origin) != nil }) else { return }
-        notify(origin, .originRecovered)
+        emitLock.withLock {
+            guard withLock({ throttled.remove(origin) != nil }) else { return }
+            notify(origin, .originRecovered)
+        }
     }
 
     static func origin(_ url: URL) -> String {
@@ -141,7 +149,13 @@ final class HTTPOriginCoordinator: @unchecked Sendable {
         condition.broadcast()
         condition.unlock()
         if isThrottle {
-            notify(origin, .originThrottled(retryAfter: Self.retryDelay(retryAfter).map { .seconds($0) }))
+            let event = PlaybackEvent.originThrottled(retryAfter: Self.retryDelay(retryAfter).map { .seconds($0) })
+            emitLock.withLock {
+                // A success that crossed this refusal has already cleared and
+                // reported it; a throttle sent now would be the last word.
+                guard withLock({ throttled.contains(origin) }) else { return }
+                notify(origin, event)
+            }
         }
     }
 
