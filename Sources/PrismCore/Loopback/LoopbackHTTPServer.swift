@@ -564,6 +564,16 @@ public actor LoopbackHTTPServer {
         // up on *waiting* without giving up on the *work* — the payload is
         // still wanted, it just gets a different framing.
         let resolution = Task { await pending.resolve() }
+        // A client that hangs up mid-wait (AVPlayer dropping the old socket
+        // on a seek) must end the wait with it, not leave it to run out the
+        // production window and report a timeout nobody is waiting on.
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled: resolution.cancel()
+            default: break
+            }
+        }
+        defer { connection.stateUpdateHandler = nil }
         let began = ContinuousClock.now
         let quick = await withTimeout(limits.slowServeThreshold) { await resolution.value }
 
@@ -593,6 +603,8 @@ public actor LoopbackHTTPServer {
         // an immediate terminator.
         if headOnly {
             _ = await send(Self.chunkTerminator, on: connection)
+            // Answered already; the wait would otherwise run on to a timeout.
+            resolution.cancel()
             return .completed
         }
 

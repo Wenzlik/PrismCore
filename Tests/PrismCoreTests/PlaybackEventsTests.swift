@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 @testable import PrismCore
 
 /// A host input that parks its read once `parkAfterBytes` have been handed
@@ -136,12 +137,33 @@ struct PlaybackEventsTests {
         #expect((lastPTS ?? 0) > 0)
     }
 
-    @Test("A serve the producer never satisfies reports its timeout")
-    func serveTimedOut() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PrismCore-events-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+    @Test("A 429 and a 206 that cross never leave the host on a throttle")
+    func crossedRefusalAndSuccessEndRecovered() {
+        let coordinator = HTTPOriginCoordinator()
+        let origin = "http://race.invalid:80"
+        let last = OSAllocatedUnfairLock<PlaybackEvent?>(initialState: nil)
+        let observation = coordinator.observe(origin) { event in last.withLock { $0 = event } }
+        defer { withExtendedLifetime(observation) {} }
+
+        // The two fills of one origin, answered at the same moment. Many
+        // rounds, because the bad interleaving is a narrow window.
+        for round in 0..<5_000 {
+            DispatchQueue.concurrentPerform(iterations: 2) { slot in
+                if slot == 0 { coordinator.refuse(origin, retryAfter: nil) } else { coordinator.succeeded(origin) }
+            }
+            // The origin is healthy from here on.
+            coordinator.succeeded(origin)
+            let final = last.withLock { $0 }
+            if final != nil, final != .originRecovered {
+                Issue.record("round \(round): host left on \(String(describing: final))")
+                return
+            }
+        }
+    }
+
+    /// A provider with no producer behind it, so every planned miss can only
+    /// run out — plus the feed its events go to.
+    private func orphanProvider(root: URL, timeout: Duration) -> (PlanSegmentProvider, PlaybackEventSink, AsyncStream<PlaybackEvent>) {
         let coordinator = DemandCoordinator()
         coordinator.publish(plan: SegmentPlan(
             entries: (0..<4).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
@@ -152,8 +174,29 @@ struct PlaybackEventsTests {
         sink.replace(with: continuation)
         var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
         provider.events = sink
-        // No producer behind this provider: the wait can only run out.
-        provider.productionTimeout = .milliseconds(300)
+        provider.productionTimeout = timeout
+        return (provider, sink, stream)
+    }
+
+    private func temporaryRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCore-events-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func finish(_ sink: PlaybackEventSink, _ stream: AsyncStream<PlaybackEvent>) async -> [PlaybackEvent] {
+        sink.replace(with: nil)
+        var events: [PlaybackEvent] = []
+        for await event in stream { events.append(event) }
+        return events
+    }
+
+    @Test("A serve the producer never satisfies reports its timeout")
+    func serveTimedOut() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (provider, sink, stream) = orphanProvider(root: root, timeout: .milliseconds(300))
 
         guard case .pending(let pending) = await provider.data(forPath: "seg00003.m4s") else {
             Issue.record("a missing planned segment must go pending")
@@ -163,9 +206,46 @@ struct PlaybackEventsTests {
             Issue.record("the timed-out serve must answer the miss")
             return
         }
-        sink.replace(with: nil)
-        var events: [PlaybackEvent] = []
-        for await event in stream { events.append(event) }
-        #expect(events == [.serveTimedOut(path: "seg00003.m4s")])
+        #expect(await finish(sink, stream) == [.serveTimedOut(path: "seg00003.m4s")])
+    }
+
+    @Test("A wait whose request went away reports no timeout")
+    func cancelledWaitIsSilent() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (provider, sink, stream) = orphanProvider(root: root, timeout: .milliseconds(600))
+
+        guard case .pending(let pending) = await provider.data(forPath: "seg00003.m4s") else {
+            Issue.record("a missing planned segment must go pending")
+            return
+        }
+        // What a seek does to the old request: the server cancels its wait.
+        let wait = Task { await pending.resolve() }
+        try await Task.sleep(for: .milliseconds(100))
+        wait.cancel()
+        _ = await wait.value
+        // Past the window the wait would have timed out in.
+        try await Task.sleep(for: .milliseconds(800))
+        #expect(await finish(sink, stream) == [])
+    }
+
+    @Test("A HEAD answered during a slow serve reports no timeout")
+    func answeredHeadIsSilent() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (provider, sink, stream) = orphanProvider(root: root, timeout: .seconds(1))
+        let server = LoopbackHTTPServer(
+            provider: provider, limits: .init(slowServeThreshold: .milliseconds(200)), events: sink
+        )
+        let base = try await server.start()
+
+        var request = URLRequest(url: base.appendingPathComponent("seg00003.m4s"))
+        request.httpMethod = "HEAD"
+        let (_, response) = try await URLSession.uncached.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        // Past the production window the orphaned wait used to run out.
+        try await Task.sleep(for: .milliseconds(1_500))
+        await server.stop()
+        #expect(await finish(sink, stream) == [])
     }
 }

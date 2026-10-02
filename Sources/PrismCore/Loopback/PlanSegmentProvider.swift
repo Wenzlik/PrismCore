@@ -230,7 +230,9 @@ struct PlanSegmentProvider: SegmentProvider {
             // a queued pending must get its full window.
             let deadline = ContinuousClock.now.advanced(by: timeout)
             let waitingSince = ProcessInfo.processInfo.systemUptime
-            while ContinuousClock.now < deadline {
+            // A cancelled wait is one whose request is gone (seek, abort,
+            // HEAD): the host must not hear a timeout for a file nobody wants.
+            while ContinuousClock.now < deadline, !Task.isCancelled {
                 // Snapshot BEFORE the disk check: a broadcast between the
                 // check and the wait then makes the wait return at once,
                 // instead of being lost to a waiter that was not yet asleep.
@@ -263,7 +265,7 @@ struct PlanSegmentProvider: SegmentProvider {
                     try? await Task.sleep(for: Self.backstopPoll)
                 }
             }
-            events?.yield(.serveTimedOut(path: path))
+            if !Task.isCancelled { events?.yield(.serveTimedOut(path: path)) }
             return onTimeout
         }
     }
