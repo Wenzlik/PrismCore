@@ -10,6 +10,14 @@ source-compatible.)
 
 ### Added
 
+- **`PrismCoreSession.playbackEvents()`**, a runtime counterpart to
+  `startupCheckpoints()`: `.slowServe`, `.serveTimedOut`, `.producerStalled`
+  (no packet read for 5 s while a request waits on the producer — never
+  while it is parked on purpose, so a pause is not a stall),
+  `.originThrottled` and `.originRecovered` (coordinated HTTP only; every
+  session on that origin sees them). Callable before or after `start()`,
+  finishes on `stop()`, keeps the newest 64. Report-only: nothing is
+  repaired automatically. `prismcore-cli serve` prints them.
 - **`PrismCoreSession.timestampRepairs`** (`TimestampRepairStats?`): how many
   packets needed a DTS filled in, a DTS bumped past its predecessor, or a PTS
   raised to its DTS before the muxer would take them. `nil` while nothing was
