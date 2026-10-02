@@ -425,6 +425,12 @@ final class HLSRemuxer: @unchecked Sendable {
         conversionStatsLock.withLock { storedConversionStats }
     }
 
+    /// Shared by every writer this remux builds, the renditions' included:
+    /// writers are rebuilt on each re-anchor, the session's count is not.
+    let timestampRepairLedger = TimestampRepairLedger()
+
+    var timestampRepairStats: TimestampRepairStats? { timestampRepairLedger.stats }
+
     /// Frames a JOC walk may read before "no JOC" is the answer. Shared by both
     /// output shapes so a source's verdict can't depend on which one carried it.
     static let atmosSniffPacketBudget = 24
@@ -1058,6 +1064,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 }
                 do {
                     rendition.audioDelaySeconds = audioDelaySeconds
+                    rendition.timestampRepairs = timestampRepairLedger
                     try rendition.open(input: input)
                     renditions.append(rendition)
                     audioDeliveryStore.update(index: Int(route.index),
@@ -1114,6 +1121,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 }
                 do {
                     rendition.audioDelaySeconds = audioDelaySeconds
+                    rendition.timestampRepairs = timestampRepairLedger
                     try rendition.open(input: input)
                     renditions.append(rendition)
                 } catch {
@@ -1206,6 +1214,7 @@ final class HLSRemuxer: @unchecked Sendable {
 
         var writer = FMP4SegmentWriter()
         writer.audioDelaySeconds = audioDelaySeconds
+        writer.timestampRepairs = timestampRepairLedger
         _ = try writer.open(input: input, plan: plan)   // delay_moov: header emits nothing
         var streamMap = writer.streamMap
         let playlist = MediaPlaylistWriter(directory: outputDirectory)
@@ -1519,6 +1528,7 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             writer = FMP4SegmentWriter()
             writer.audioDelaySeconds = audioDelaySeconds
+            writer.timestampRepairs = timestampRepairLedger
             _ = try writer.open(input: input, plan: plan, restart: true)
             streamMap = writer.streamMap
             for rendition in renditions {

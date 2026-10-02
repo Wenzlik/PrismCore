@@ -18,6 +18,25 @@ source-compatible.)
   session on that origin sees them). Callable before or after `start()`,
   finishes on `stop()`, keeps the newest 64. Report-only: nothing is
   repaired automatically. `prismcore-cli serve` prints them.
+- **`PrismCoreSession.timestampRepairs`** (`TimestampRepairStats?`): how many
+  packets needed a DTS filled in, a DTS bumped past its predecessor, or a PTS
+  raised to its DTS before the muxer would take them. `nil` while nothing was
+  repaired; counts across re-anchors. `prismcore-cli segverify` prints the
+  same counts after a remux.
+
+### Fixed
+
+- **A source with broken decode timestamps no longer fails the remux.** Video
+  and stream-copied audio went from the demuxer to the mp4 muxer with only a
+  rescale, so one non-increasing DTS (a Matroska cut, a joined TS, packed
+  B-frames) or a PTS below its DTS made `av_interleaved_write_frame` return
+  `EINVAL` and the session stopped producing segments. Every packet now passes
+  a per-stream `TimestampSanitizer` first, with three local rules: a missing
+  DTS follows the previous one plus the packet's duration (or its PTS, only
+  where nothing reorders), a DTS that does not move forward is set one tick
+  past the previous, and a PTS below its DTS is raised to it. Nothing is
+  dropped and no GOP is rewritten. The sanitizer resets with each re-anchor's
+  fresh muxer. Per-packet cost is unmeasured.
 
 ## [3.2.5] — 2026-09-30
 
