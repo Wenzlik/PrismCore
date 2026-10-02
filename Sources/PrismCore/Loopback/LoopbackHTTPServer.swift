@@ -157,10 +157,23 @@ public actor LoopbackHTTPServer {
         limits: Limits = Limits(),
         reachability: Reachability = .loopbackOnly
     ) {
+        self.init(provider: provider, limits: limits, reachability: reachability, events: nil)
+    }
+
+    init(
+        provider: SegmentProvider,
+        limits: Limits = Limits(),
+        reachability: Reachability = .loopbackOnly,
+        events: PlaybackEventSink?
+    ) {
         self.provider = provider
         self.limits = limits
         self.reachability = reachability
+        self.events = events
     }
+
+    /// The owning session's `playbackEvents()` feed, for `.slowServe`.
+    private let events: PlaybackEventSink?
 
     /// Bind and listen. Returns the base URL — `http://127.0.0.1:<port>/` by
     /// default, and `http://<lan-ip>:<port>/<token>/` in LAN mode, where every
@@ -551,6 +564,7 @@ public actor LoopbackHTTPServer {
         // up on *waiting* without giving up on the *work* — the payload is
         // still wanted, it just gets a different framing.
         let resolution = Task { await pending.resolve() }
+        let began = ContinuousClock.now
         let quick = await withTimeout(limits.slowServeThreshold) { await resolution.value }
 
         if let quick {
@@ -590,12 +604,17 @@ public actor LoopbackHTTPServer {
             resolution.cancel()
         }
         guard !Task.isCancelled else { return .aborted }
+        let waited = ContinuousClock.now - began
 
         switch landed {
         case .data(let body, _):
             guard await send(Self.chunk(body), on: connection),
                   await send(Self.chunkTerminator, on: connection)
             else { return .aborted }
+            // Reported once delivered, not when the threshold passes: only
+            // then is `waited` the whole wait. A serve that missed is the
+            // provider's `.serveTimedOut` instead.
+            events?.yield(.slowServe(path: path, waited: waited))
             return .completed
         default:
             // Committed to a 200 and then missed. Abort the transfer instead of
