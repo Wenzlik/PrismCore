@@ -299,6 +299,13 @@ public actor PrismCoreSession {
     /// the video variant is playable, and what the provider's pending serves
     /// sleep on until their file lands (replacing two 10 ms polls).
     private let landed = ProductionSignal()
+    /// Behind `playbackEvents()`. Built before the server and provider so
+    /// they can hold it from birth, which is what lets a host register at
+    /// any point in the session's life.
+    private let events = PlaybackEventSink()
+    /// This session's share of the process-wide origin admission; released
+    /// with the session.
+    private let originObservation: HTTPOriginCoordinator.Observation?
     /// The remux's own thread. Not a `Task`: `run()` blocks in FFmpeg reads and
     /// parks at EOF, which is a contract violation on the cooperative pool and
     /// a deadlock once several sessions do it at once (#44, `ProducerThread`).
@@ -324,6 +331,19 @@ public actor PrismCoreSession {
 
     public var dolbyVisionConversion: DolbyVisionConversionStats? {
         remuxer.dolbyVisionConversionStats
+    }
+
+    /// What had to be repaired in the source's timestamps for the muxer to
+    /// accept them — a DTS filled in, bumped past its predecessor, or a PTS
+    /// raised to its DTS — or `nil` while nothing has been. Counts across the
+    /// whole session, re-anchors included, and grows as production does.
+    ///
+    /// Worth a log line rather than an alarm: every repair is what lets such a
+    /// source play at all instead of failing the remux, but each one moves a
+    /// packet by a tick or two, so a stutter report on a source with a large
+    /// count here starts with the source.
+    public var timestampRepairs: TimestampRepairStats? {
+        remuxer.timestampRepairStats
     }
 
     /// What the **bitstream** said about object audio on this session's
@@ -620,7 +640,19 @@ public actor PrismCoreSession {
         provider.isSuperseded = { [store = remuxer.residentSegments] index in
             store.isSuperseded(index: index)
         }
-        self.server = LoopbackHTTPServer(provider: provider, reachability: reachability)
+        let events = self.events
+        provider.events = events
+        provider.stallReport = { [remuxer] waitingSince, threshold in
+            remuxer.stallReport(waitingSince: waitingSince, threshold: threshold)
+        }
+        self.server = LoopbackHTTPServer(provider: provider, reachability: reachability, events: events)
+        // Keyed on the source URL's origin. A redirect to another origin is
+        // admitted under THAT origin and its refusals go unreported here;
+        // following the reader's resolved origin is the upgrade if a field
+        // log ever shows a redirecting origin throttling.
+        self.originObservation = ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+            ? HTTPOriginCoordinator.shared.observe(HTTPOriginCoordinator.origin(url)) { events.yield($0) }
+            : nil
     }
 
     /// A session for the display the host is playing to right now.
@@ -968,6 +1000,46 @@ public actor PrismCoreSession {
         return stream
     }
 
+    // MARK: - Playback events
+
+    /// What the running session ran into: slow and timed-out serves, a
+    /// producer that stopped reading while a request waited on it, and an
+    /// origin throttling its readers (see `PlaybackEvent`).
+    ///
+    /// ```swift
+    /// let events = await session.playbackEvents()
+    /// Task { for await event in events { log("\(event)") } }
+    /// ```
+    ///
+    /// Callable before or after `start()` — unlike `startupCheckpoints()`,
+    /// this describes the whole run, and a host usually wants it once
+    /// playback is up. Nothing that happened before registration is
+    /// replayed. The stream finishes on `stop()`; registering on a stopped
+    /// session returns one that is already finished.
+    ///
+    /// Report-only: the engine does not act on any of these, it only stops
+    /// keeping them to itself.
+    ///
+    /// Buffers the newest 64 events. Unlike five startup stages, a run has no
+    /// natural end, and a host that registers and never reads must not grow
+    /// without limit for the length of a film.
+    ///
+    /// Origin events require the coordinated reader (`coordinatedHTTP`); the
+    /// built-in libavformat HTTP never reports a refusal back to the engine.
+    ///
+    /// Calling this twice finishes the earlier stream and hands out a new one.
+    public func playbackEvents() -> AsyncStream<PlaybackEvent> {
+        let (stream, continuation) = AsyncStream<PlaybackEvent>.makeStream(
+            bufferingPolicy: .bufferingNewest(64)
+        )
+        if stopped {
+            continuation.finish()
+        } else {
+            events.replace(with: continuation)
+        }
+        return stream
+    }
+
     /// The registered stream's continuation, `nil` when nobody asked — which
     /// is what keeps the producer's sink nil and the whole feature free.
     private var checkpoints: AsyncStream<StartupCheckpoint>.Continuation?
@@ -1117,6 +1189,7 @@ public actor PrismCoreSession {
         // otherwise never end.
         checkpoints?.finish()
         checkpoints = nil
+        events.replace(with: nil)
         // `cancel()` is the only stop signal the producer has (it also wakes a
         // parked one, and releases a conforming host input's blocked read);
         // the join then waits for the thread to notice.
