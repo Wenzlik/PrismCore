@@ -280,6 +280,19 @@ public actor PrismCoreSession {
         remuxer.dolbyVisionConversionStats
     }
 
+    /// What had to be repaired in the source's timestamps for the muxer to
+    /// accept them — a DTS filled in, bumped past its predecessor, or a PTS
+    /// raised to its DTS — or `nil` while nothing has been. Counts across the
+    /// whole session, re-anchors included, and grows as production does.
+    ///
+    /// Worth a log line rather than an alarm: every repair is what lets such a
+    /// source play at all instead of failing the remux, but each one moves a
+    /// packet by a tick or two, so a stutter report on a source with a large
+    /// count here starts with the source.
+    public var timestampRepairs: TimestampRepairStats? {
+        remuxer.timestampRepairStats
+    }
+
     /// What the **bitstream** said about object audio on this session's
     /// stream-copied E-AC-3 tracks, one finding per track, in stream order.
     ///

@@ -221,10 +221,13 @@ enum SegVerifyCommand {
             }
         }
         let report: SegmentVerifier.Report
+        var repairs: TimestampRepairStats?
         if alreadyHLS {
             report = try await verify(options.source!)
         } else {
-            report = try await withServedSession(options, stop: stop, verify)
+            report = try await withServedSession(
+                options, stop: stop, beforeStop: { repairs = await $0.timestampRepairs }, verify
+            )
         }
 
         print("")
@@ -238,8 +241,18 @@ enum SegVerifyCommand {
                         ? "" : "; NOT decoded: " + playlist.undecodedStreams.joined(separator: ", ")))
             }
         }
+        if !alreadyHLS { print(render(repairs)) }
         for finding in report.findings { print(finding) }
         return summarize(report)
+    }
+
+    /// A remux that repaired nothing says so: the line's absence would read
+    /// the same as a build that never checked.
+    static func render(_ repairs: TimestampRepairStats?) -> String {
+        guard let repairs else { return "timestamp repairs: none" }
+        return "timestamp repairs: \(repairs.missingDTSFilled) missing DTS filled, "
+            + "\(repairs.nonMonotonicDTSBumped) DTS bumped forward, "
+            + "\(repairs.ptsRaisedToDTS) PTS raised to DTS"
     }
 
     /// The last line and the exit status. A problem found outranks a check
