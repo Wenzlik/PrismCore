@@ -8,6 +8,23 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bridged `aac` track no longer carries frames of the old position across
+  a re-anchor.** FFmpeg's native `aac` encoder (the bridge target in every
+  build without an `eac3` encoder) keeps two frames of look-ahead and has no
+  `AV_CODEC_CAP_ENCODER_FLUSH`, so the `avcodec_flush_buffers` in
+  `AudioBridge.reset()` did nothing to it. After a jump to an earlier position
+  the first packets were stamped with the old position's times (`Queue input
+  is backward in time`), ahead of everything the new position produces after
+  them: the muxer refuses that step back (`non monotonically increasing dts`,
+  `-22`), and the timestamp repair would answer it by stacking the packets
+  behind them one tick apart. An encoder that delays its output and cannot be
+  flushed is now re-opened with the same parameters on reset; its stream
+  description is identical, so an init segment already served stays valid.
+  `AudioBridge.reset()` can therefore throw. New test
+  `aacResetDropsTheOldPosition` fails without the change.
+
 ## [3.2.6] — 2026-10-02
 
 Three landings: repair non-monotonic or missing DTS before writing fMP4
