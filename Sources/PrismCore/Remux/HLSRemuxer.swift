@@ -1523,7 +1523,7 @@ final class HLSRemuxer: @unchecked Sendable {
                         }
                     }
                 } else {
-                    bridge.reset()
+                    try bridge.reset()
                 }
             }
             writer = FMP4SegmentWriter()
