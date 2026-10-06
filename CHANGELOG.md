@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-10-06
+
+A host that draws its own captions can have a bitmap subtitle stream (PGS /
+DVB / DVD) OCR'd into its cue tap, including beside a text track (#119). A
+minor: new API, nothing removed.
+
 ### Added
 
 - **A host drawing its own captions can have a bitmap subtitle stream OCR'd
@@ -2641,7 +2647,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.2.7...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...HEAD
+[3.3.0]: https://github.com/Wenzlik/PrismCore/compare/3.2.7...3.3.0
 [3.2.7]: https://github.com/Wenzlik/PrismCore/compare/3.2.6...3.2.7
 [3.2.6]: https://github.com/Wenzlik/PrismCore/compare/3.2.5...3.2.6
 [3.2.5]: https://github.com/Wenzlik/PrismCore/compare/3.2.4...3.2.5
