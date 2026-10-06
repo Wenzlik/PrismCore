@@ -495,9 +495,10 @@ public struct SubtitleTrackInfo: Sendable, Equatable {
         /// Text codec (SubRip / ASS / SSA / WebVTT / mov_text): carried as a
         /// WebVTT `SUBTITLES` rendition, so it survives PiP and AirPlay.
         case textRendition
-        /// Bitmap codec (PGS / DVB / DVD / XSUB) or teletext: **not** carried.
-        /// Reported so the host can render it in its own overlay — a rendition
-        /// would need OCR, which phase 6 doesn't ship.
+        /// Bitmap codec (PGS / DVB / DVD / XSUB) or teletext. Not carried as
+        /// pixels; a rendition only through OCR, and only when the source has
+        /// no text track. See `isOCRReadable` for whether the host can have it
+        /// read into its cue tap with `requestBitmapSubtitleOCR`.
         case bitmapHostOnly
         /// Something we neither convert nor recognize as bitmap.
         case unsupported
@@ -511,6 +512,10 @@ public struct SubtitleTrackInfo: Sendable, Equatable {
     public let isDefault: Bool
     public let isForced: Bool
     public let isHearingImpaired: Bool
+    /// Whether `PrismCoreSession.requestBitmapSubtitleOCR(streamIndex:)` can
+    /// turn this track into text here: a PGS / DVB / DVD stream on a platform
+    /// with Vision. Always `false` for text tracks, which need no OCR.
+    public let isOCRReadable: Bool
 }
 
 /// One chapter mark from the container — a Matroska `Chapters` edition entry
@@ -1341,7 +1346,8 @@ public enum SourceProbe {
             kind: kind,
             isDefault: disposition & AV_DISPOSITION_DEFAULT != 0,
             isForced: disposition & AV_DISPOSITION_FORCED != 0,
-            isHearingImpaired: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0
+            isHearingImpaired: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0,
+            isOCRReadable: SubtitleRenditionSet.ocrCodecs.contains(par.codec_id) && SubtitleOCR.isAvailable
         )
     }
 

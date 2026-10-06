@@ -8,6 +8,29 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **A host drawing its own captions can have a bitmap subtitle stream OCR'd
+  (#119).** `PrismCoreSession.requestBitmapSubtitleOCR(streamIndex:)` names
+  the PGS / DVB / DVD stream the viewer picked, and its recognized lines reach
+  the `setTimedTextCueHandler` tap under that stream index, like an embedded
+  text track's. Two things kept such a host from ever seeing them: OCR is armed
+  by AVPlayer fetching a rendition segment, and a host that draws captions
+  itself keeps AVPlayer's selection off; and since #86 a bitmap stream beside
+  a text track got no OCR track at all. Those streams are now built host-only:
+  unarmed until requested, never declared in the master, so the menu stays
+  as #86 left it. Callable before `start()` (produces from the first packet) or
+  after (from the demux position on). The request survives `makeSession` and
+  both fallback sessions. `SubtitleTrackInfo.isOCRReadable` says up front which
+  tracks qualify.
+
+### Changed
+
+- **A standing bitmap composition reaches the host tap at each segment cut**,
+  not only once its clear arrives, so a line shown for several seconds is not
+  delivered after its own start. Declared OCR renditions were already split
+  at the boundary for the playlist; the host now gets the same head.
+
 ## [3.2.7] — 2026-10-04
 
 A demand-driven re-anchor no longer ends the remux about a minute later
