@@ -247,4 +247,84 @@ struct LazyOCRArmingTests {
         #expect(PlanSegmentProvider.segmentIndex(inPath: "subs2/seg00034.vtt") == nil)
     }
 }
+/// Host-requested OCR (#119): a host drawing captions from the cue tap names
+/// the bitmap stream it will draw, because lazy arming never fires for it and
+/// beside a text track the stream is no rendition at all.
+@Suite("Host-requested OCR")
+struct HostRequestedOCRTests {
+
+    private func track() -> SubtitleRenditionSet.BitmapRenditionTrack {
+        SubtitleRenditionSet.BitmapRenditionTrack(
+            decoder: nil, language: nil, recognize: { _, _ in "Hello" }
+        )
+    }
+
+    private func tinyImage() throws -> CGImage {
+        let context = try #require(CGContext(
+            data: nil, width: 2, height: 2,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        return try #require(context.makeImage())
+    }
+
+    private func set() -> SubtitleRenditionSet {
+        SubtitleRenditionSet(outputDirectory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("host-ocr-\(UUID().uuidString)", isDirectory: true))
+    }
+
+    @Test("A request made before setup arms the track when it is built")
+    func requestBeforeSetup() {
+        let renditions = set()
+        let pgs = track()
+        renditions.requestHostOCR(streamIndex: 3)
+        #expect(!renditions.isHostOCRArmed(streamIndex: 3), "nothing to arm before setup")
+        renditions.adoptHostOnlyBitmapsForTesting([3: pgs])
+        #expect(pgs.isArmed)
+    }
+
+    @Test("A request made after setup arms only the stream it names")
+    func requestAfterSetup() {
+        let renditions = set()
+        let first = track()
+        let second = track()
+        renditions.adoptHostOnlyBitmapsForTesting([3: first, 4: second])
+        #expect(!first.isArmed && !second.isArmed, "host-only tracks start unarmed")
+        renditions.requestHostOCR(streamIndex: 4)
+        #expect(second.isArmed)
+        #expect(!first.isArmed)
+        renditions.requestHostOCR(streamIndex: 9)
+        #expect(!renditions.isHostOCRArmed(streamIndex: 9), "a stream with no OCR track is ignored")
+    }
+
+    @Test("A standing composition reaches the host at the segment cut, under its stream index")
+    func standingCompositionSplitsToHost() throws {
+        let renditions = set()
+        let pgs = track()
+        renditions.adoptHostOnlyBitmapsForTesting([5: pgs])
+        renditions.requestHostOCR(streamIndex: 5)
+        renditions.setTimelineOrigin(seconds: 0)
+        let received = CueBox()
+        renditions.setCueHandler { received.append($0) }
+
+        // Shown at 2 s, no clear yet: only its end would release it.
+        _ = pgs.process([.init(startSeconds: 2, endSeconds: nil, image: try tinyImage())])
+        #expect(received.cues.isEmpty)
+
+        try renditions.flushSegment(start: 0, end: 6)
+        let cue = try #require(received.cues.first)
+        #expect(cue.streamIndex == 5)
+        #expect(cue.text == "Hello")
+        #expect(cue.start == 2)
+        #expect(cue.end == 6)
+    }
+}
+
+private final class CueBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [TimedTextCue] = []
+    var cues: [TimedTextCue] { lock.withLock { stored } }
+    func append(_ cue: TimedTextCue) { lock.withLock { stored.append(cue) } }
+}
 #endif

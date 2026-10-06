@@ -290,6 +290,9 @@ public actor PrismCoreSession {
     /// The host's cue sink, replayed onto a fallback session the same way —
     /// a master rejection must not silently cost the host its captions.
     private var timedTextCueHandler: (@Sendable (TimedTextCue) -> Void)?
+    /// Bitmap streams the host asked to have OCR'd, replayed onto a fallback
+    /// session with the handler they feed.
+    private var hostOCRStreams: Set<Int> = []
     /// Where this session's playlists and segments live. Internal so the
     /// startup-cost benchmark can watch artifacts appear as they land.
     let workDirectory: URL
@@ -893,6 +896,9 @@ public actor PrismCoreSession {
         }
         // Before the handler, so its replay already carries the correction.
         await fallback.setSubtitleDelaySeconds(subtitleDelaySeconds)
+        for streamIndex in hostOCRStreams.sorted() {
+            await fallback.requestBitmapSubtitleOCR(streamIndex: streamIndex)
+        }
         if let handler = timedTextCueHandler {
             await fallback.setTimedTextCueHandler(handler)
         }
@@ -948,6 +954,29 @@ public actor PrismCoreSession {
     public func setTimedTextCueHandler(_ handler: (@Sendable (TimedTextCue) -> Void)?) {
         timedTextCueHandler = handler
         remuxer.subtitles.setCueHandler(handler)
+    }
+
+    /// OCR a bitmap subtitle stream (PGS / DVB / DVD) for the host's cue tap.
+    ///
+    /// For a host that draws captions itself from `setTimedTextCueHandler`.
+    /// Bitmap tracks are OCR'd lazily, armed by AVPlayer fetching a rendition
+    /// segment, and such a host keeps AVPlayer's own selection off, so nothing
+    /// ever arms them. Beside a text subtitle track a bitmap stream is not a
+    /// rendition at all (#86 keeps OCR readings out of the menu). This names
+    /// the stream the viewer picked, and its cues reach the handler under its
+    /// `streamIndex` like any embedded text track's.
+    ///
+    /// Callable before or after `start()`. Before, the track produces from the
+    /// first packet. After, it produces from wherever the demux is reading,
+    /// which is ahead of playback, so lines between the playhead and that
+    /// point are not recovered (a seek re-demuxes and closes the gap).
+    ///
+    /// Ignored for a stream that is not OCR-able on this platform: see
+    /// `SubtitleTrackInfo.isOCRReadable`. A request is one-way and survives
+    /// `makeSession` and both fallback sessions.
+    public func requestBitmapSubtitleOCR(streamIndex: Int) {
+        hostOCRStreams.insert(streamIndex)
+        remuxer.subtitles.requestHostOCR(streamIndex: Int32(streamIndex))
     }
 
     // MARK: - Startup checkpoints

@@ -201,6 +201,18 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     private let lock = NSLock()
     private var externalFiles: [ExternalFile] = []
     private var tracks: [Track] = []
+    /// OCR-able bitmap streams that are NOT renditions: the source has a text
+    /// track, so #86 keeps them out of the master — but a host drawing its own
+    /// captions may still ask for one (`requestHostOCR`). No writer and no
+    /// ordinal, so the declared renditions' `subs<N>` numbering is untouched;
+    /// their cues reach the host tap only. Built unarmed for every such stream
+    /// at setup, so a request made mid-film finds its track already there.
+    /// Written once in `prepare`, before the read loop that reads it.
+    private var hostOnlyBitmaps: [Int32: BitmapRenditionTrack] = [:]
+    /// Streams the host asked to have OCR'd, kept from before `prepare` so a
+    /// request made ahead of `start()` arms its track the moment it exists.
+    private var hostOCRRequests: Set<Int32> = []
+    private var prepared = false
     private var storedRenditions: [MasterPlaylistBuilder.SubtitleRendition] = []
     /// Set once the presentation origin is known; guards a flush that would
     /// otherwise print cues against origin 0.
@@ -281,6 +293,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         closedCaptionLanguage: String? = nil
     ) throws -> Set<Int32> {
         var built: [Track] = []
+        var hostOnly: [Int32: BitmapRenditionTrack] = [:]
         var descriptions: [MasterPlaylistBuilder.SubtitleRendition] = []
 
         // How many subtitle streams share each language — `isForcedRendition` needs to know
@@ -304,20 +317,27 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             let converter: Track.Converter
             if let kind = Self.kind(for: par.codec_id) {
                 converter = .text(kind, playResolution: Self.playResolution(of: stream.pointee.codecpar, kind: kind))
-            } else if Self.ocrCodecs.contains(par.codec_id), !hasTextTrack, SubtitleOCR.isAvailable,
+            } else if Self.ocrCodecs.contains(par.codec_id), SubtitleOCR.isAvailable,
                       let decoder = try? BitmapSubtitleDecoder(
                         codecpar: stream.pointee.codecpar, timeBase: stream.pointee.time_base
                       ) {
                 // A bitmap track becomes a rendition through on-device OCR —
                 // lossy by design (typography dies, text survives), but it is
                 // the only form that rides PiP, AirPlay and the system menu.
-                // Only when the source has no text track at all: beside a real
-                // SRT, four unlabelled OCR readings of the same dialogue are
-                // menu noise that hides the one worth choosing (a Vision Pro
-                // menu of "English-SRT, Subtitles 2, 3, 4, 5" — 2026-09-06).
-                // A build without Vision, or a decoder this build lacks,
-                // leaves the track host-only exactly as before.
-                converter = .bitmap(BitmapRenditionTrack(decoder: decoder, language: language))
+                // Declared only when the source has no text track at all:
+                // beside a real SRT, four unlabelled OCR readings of the same
+                // dialogue are menu noise that hides the one worth choosing (a
+                // Vision Pro menu of "English-SRT, Subtitles 2, 3, 4, 5" —
+                // 2026-09-06). Beside one it is still built, host-only, for a
+                // host that explicitly picked it (#119). A build without
+                // Vision, or a decoder this build lacks, leaves the track
+                // host-drawn exactly as before.
+                let bitmap = BitmapRenditionTrack(decoder: decoder, language: language)
+                guard !hasTextTrack else {
+                    hostOnly[index] = bitmap
+                    continue
+                }
+                converter = .bitmap(bitmap)
             } else {
                 continue
             }
@@ -409,14 +429,73 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             )
         }
 
-        lock.withLock {
-            tracks = built
-            storedRenditions = Self.applyingPreferredDefault(
+        adopt(
+            tracks: built,
+            hostOnly: hostOnly,
+            renditions: Self.applyingPreferredDefault(
                 Self.withUniqueNames(descriptions),
                 preferredLanguage: preferredLanguage
             )
+        )
+        return Set(built.compactMap(\.inputIndex)).union(hostOnly.keys)
+    }
+
+    /// Publish what `prepare` built, then arm whatever the host asked for
+    /// before it existed.
+    private func adopt(
+        tracks built: [Track],
+        hostOnly: [Int32: BitmapRenditionTrack],
+        renditions: [MasterPlaylistBuilder.SubtitleRendition]
+    ) {
+        let requested: [BitmapRenditionTrack] = lock.withLock {
+            tracks = built
+            hostOnlyBitmaps = hostOnly
+            prepared = true
+            storedRenditions = renditions
+            return hostOCRRequests.compactMap(bitmapLocked(streamIndex:))
         }
-        return Set(built.compactMap(\.inputIndex))
+        for bitmap in requested { bitmap.arm() }
+    }
+
+    /// `prepare`'s outcome for a source with host-only bitmap streams, which
+    /// no fixture can carry: no FFmpeg build encodes PGS.
+    func adoptHostOnlyBitmapsForTesting(_ hostOnly: [Int32: BitmapRenditionTrack]) {
+        adopt(tracks: [], hostOnly: hostOnly, renditions: [])
+    }
+
+    // MARK: - Host-requested OCR
+
+    /// The host will draw this bitmap stream itself, from the cue tap: arm its
+    /// OCR so the cues exist. Lazy arming alone never fires for such a host —
+    /// it keeps AVPlayer's legible selection off, so no `.vtt` is fetched —
+    /// and beside a text track the stream has no rendition to fetch anyway.
+    ///
+    /// Before `prepare` the request is kept and applied when the track is
+    /// built; after it, the track is armed now and produces from the current
+    /// read position on. A stream that is not OCR-able here (text, an
+    /// undecodable codec, no Vision) is ignored. One-way, like arming.
+    func requestHostOCR(streamIndex: Int32) {
+        let bitmap: BitmapRenditionTrack? = lock.withLock {
+            hostOCRRequests.insert(streamIndex)
+            return prepared ? bitmapLocked(streamIndex: streamIndex) : nil
+        }
+        bitmap?.arm()
+    }
+
+    /// Whether `requestHostOCR` reached a real track — for tests and the
+    /// session's diagnostics. `false` before `prepare`.
+    func isHostOCRArmed(streamIndex: Int32) -> Bool {
+        lock.withLock { bitmapLocked(streamIndex: streamIndex) }?.isArmed ?? false
+    }
+
+    /// The OCR track behind a source stream, declared or host-only. Caller
+    /// holds `lock`.
+    private func bitmapLocked(streamIndex: Int32) -> BitmapRenditionTrack? {
+        if let hostOnly = hostOnlyBitmaps[streamIndex] { return hostOnly }
+        for track in tracks where track.inputIndex == streamIndex {
+            if case .bitmap(let bitmap) = track.converter { return bitmap }
+        }
+        return nil
     }
 
     /// Force every rendition's `NAME` to be unique within the group.
@@ -654,6 +733,11 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// tracked (a codec we neither convert nor OCR) are ignored.
     func ingest(_ packet: UnsafeMutablePointer<AVPacket>) {
         let streamIndex = Int32(packet.pointee.stream_index)
+        if let bitmap = hostOnlyBitmaps[streamIndex] {
+            // No rendition to write into: the host tap is the only consumer.
+            for cue in bitmap.ingest(packet) { emitHostCue(streamIndex: streamIndex, cue) }
+            return
+        }
         guard let track = tracks.first(where: { $0.inputIndex == streamIndex }) else { return }
 
         switch track.converter {
@@ -765,9 +849,18 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                 }
                 if let head = bitmap.splitPending(at: end) {
                     track.writer.add(head)
+                    // The host gets the head too: a cue otherwise reaches the
+                    // tap only once its end is known, and a composition that
+                    // stands for seconds would arrive after its own start.
+                    if let inputIndex = track.inputIndex { emitHostCue(streamIndex: inputIndex, head) }
                 }
             }
             try track.writer.flushSegment(start: start, end: end, delaySeconds: delay)
+        }
+        // Host-only tracks split on the same boundaries, for the same reason
+        // — the variant's cut is the cadence the demux keeps ahead of play.
+        for (streamIndex, bitmap) in hostOnlyBitmaps {
+            if let head = bitmap.splitPending(at: end) { emitHostCue(streamIndex: streamIndex, head) }
         }
     }
 
@@ -789,6 +882,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             }
             track.writer.reanchor(segmentIndex: segmentIndex, startSeconds: startSeconds)
         }
+        for bitmap in hostOnlyBitmaps.values { bitmap.reanchor() }
     }
 
     /// `EXT-X-ENDLIST` on every rendition playlist.
