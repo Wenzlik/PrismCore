@@ -493,6 +493,15 @@ final class HLSRemuxer: @unchecked Sendable {
         dialogueBoostLock.withLock { storedDialogueBoostRenditions }
     }
 
+    /// When each audio rendition is produced (or that it was left out),
+    /// recorded in master order once the master is decided. Same lifecycle
+    /// and lock discipline as `dialogueBoostRenditions`.
+    private var storedAudioRenditionProductions: [AudioRenditionProduction] = []
+
+    var audioRenditionProductions: [AudioRenditionProduction] {
+        dialogueBoostLock.withLock { storedAudioRenditionProductions }
+    }
+
     /// The renditions of the running session, by directory name — what the
     /// loopback's demand seam arms (`noteAudioDemand`). Written once on the
     /// producer thread before the master lands; `arm()` itself is
@@ -1034,13 +1043,34 @@ final class HLSRemuxer: @unchecked Sendable {
             let byIndex = Dictionary(
                 uniqueKeysWithValues: info.audioTracks.map { ($0.streamIndex, $0) }
             )
+            var productions: [AudioRenditionProduction] = []
+            func record(_ route: AudioRoute, _ production: AudioRenditionProduction.Production) {
+                productions.append(AudioRenditionProduction(
+                    streamIndex: Int(route.index),
+                    dialogueBoost: route.mode.dialogueBoostLevel,
+                    encodes: route.mode != .streamCopy,
+                    production: production
+                ))
+            }
             for (ordinal, route) in routes.enumerated() {
                 guard let track = byIndex[Int(route.index)] else { continue }
+                // DEFAULT is whichever rendition lands first (routes[0] unless
+                // it failed to open), so it is decided by what has landed, not
+                // by the ordinal: a lazy DEFAULT would hold AVPlayer's first
+                // audio fetch for a re-anchor at every start.
+                let production = Self.audioProduction(
+                    mode: route.mode, isDefault: renditions.isEmpty, planned: plannedPlan != nil
+                )
+                guard production != .omitted else {
+                    record(route, .omitted)
+                    continue
+                }
                 let rendition = AudioRenditionWriter(
                     route: route,
                     track: track,
                     ordinal: ordinal,
-                    parent: outputDirectory
+                    parent: outputDirectory,
+                    lazy: production == .lazy
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
@@ -1067,6 +1097,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     rendition.timestampRepairs = timestampRepairLedger
                     try rendition.open(input: input)
                     renditions.append(rendition)
+                    record(route, production)
                     audioDeliveryStore.update(index: Int(route.index),
                         delivery: route.mode == .streamCopy ? .streamCopy : .bridged)
                 } catch {
@@ -1085,29 +1116,43 @@ final class HLSRemuxer: @unchecked Sendable {
             // failure exactly like the base renditions.
             let defaultCodecID = candidates
                 .first { $0.index == renditions.first?.route.index }?.codecID
-            for route in Self.dialogueBoostRoutes(
+            let boostRoutes = Self.dialogueBoostRoutes(
                 requested: dialogueBoost,
                 base: renditions.first?.route,
                 trackChannelCount: renditions.first.map { $0.track.channelCount } ?? 0,
                 boostIsBuildable: defaultCodecID.map {
                     AudioBridge.canDecodeForBoost(codecID: $0) && DialogueBoostFilter.isAvailable
                 } ?? false
-            ) {
+            )
+            for (offset, route) in boostRoutes.enumerated() {
                 guard let track = byIndex[Int(route.index)] else { continue }
+                // Lazy in the planned shape: declared now, produced from the
+                // first fetch under its directory, which re-anchors production
+                // to the demanded segment. The host requests every level on
+                // every session; a decode→filter→encode chain per level ran
+                // for the whole film whether or not anyone picked it. Left out
+                // of the sequential shape, whose provider has no demand seam
+                // (a miss is a 404 there): eager was the only other option,
+                // and two encoders for the whole film is the cost #122 is
+                // about. `dialogueBoostRenditions` then reports none, which is
+                // what the master says.
+                let production = Self.audioProduction(
+                    mode: route.mode, isDefault: false, planned: plannedPlan != nil
+                )
+                guard production != .omitted else {
+                    record(route, .omitted)
+                    continue
+                }
                 let rendition = AudioRenditionWriter(
                     route: route,
                     track: track,
-                    ordinal: renditions.count,
+                    // Past every base ordinal rather than `renditions.count`:
+                    // a base rendition that failed to open (or was left out)
+                    // keeps its ordinal, and a count would hand its directory
+                    // name to a boost that already has a sibling there.
+                    ordinal: routes.count + offset,
                     parent: outputDirectory,
-                    // Lazy in the planned shape: declared now, produced from
-                    // the first fetch under its directory, which re-anchors
-                    // production to the demanded segment. The host requests
-                    // every level on every session; a decode→filter→encode
-                    // chain per level ran for the whole film whether or not
-                    // anyone picked it. Eager in the sequential shape, whose
-                    // provider has no demand seam (a miss is a 404 there) —
-                    // that shape keeps today's cost, and today's behaviour.
-                    lazy: plannedPlan != nil
+                    lazy: production == .lazy
                 )
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).
@@ -1124,9 +1169,21 @@ final class HLSRemuxer: @unchecked Sendable {
                     rendition.timestampRepairs = timestampRepairLedger
                     try rendition.open(input: input)
                     renditions.append(rendition)
+                    record(route, production)
                 } catch {
                     rendition.close()
                 }
+            }
+            dialogueBoostLock.withLock { storedAudioRenditionProductions = productions }
+            if productions.contains(where: { $0.production != .eager }) {
+                // The one record a field log has without the host's help: a
+                // device that runs hot, or a track missing from the picker on a
+                // first (sequential) play, is answered by this line.
+                PrismCoreLog.notice(
+                    "audio renditions "
+                        + (plannedPlan != nil ? "(planned)" : "(sequential)") + ": "
+                        + AudioRenditionProduction.summary(productions)
+                )
             }
             // The master is static — URIs, codecs and languages are all known
             // now — so it lands before the first segment. `PrismCoreSession`
@@ -2018,6 +2075,37 @@ final class HLSRemuxer: @unchecked Sendable {
         ordered.remove(at: position)
         ordered.insert(preferred, at: 0)
         return ordered
+    }
+
+    /// When an audio rendition is produced, given its route, whether it is
+    /// the master's DEFAULT, and whether the session has a plan (and so a
+    /// demand seam).
+    ///
+    /// Pure on purpose (same rule as `routeAll`); the cost model behind it:
+    ///
+    /// - The DEFAULT rendition is always eager. It is what AVPlayer fetches
+    ///   at load, its init gates `start()`, and its Atmos finding
+    ///   (`onObjectAudioSettled`) is read off its own packets.
+    /// - A stream-copied rendition is eager too. Copying costs a muxer and
+    ///   its segment writes, not a codec, and it keeps a switch between
+    ///   copied tracks (an Atmos alternate, a second language) free of the
+    ///   re-anchor that arming a lazy rendition forces.
+    /// - Anything that encodes — a bridged TrueHD / DTS track, a dialogue
+    ///   boost — is lazy in the planned shape: declared, and started by the
+    ///   first fetch under its directory (issue #122: a UHD remux with four
+    ///   such tracks decoded and re-encoded all four for the whole film).
+    /// - In the sequential shape the same rendition is omitted. There is no
+    ///   plan to re-anchor on, so a lazy rendition could only join mid-film
+    ///   with a playlist that does not line up with the video's. Eager is
+    ///   what it used to be, and it is the cost above. A first play over
+    ///   HTTP of a file whose Cues sit at the tail is the common sequential
+    ///   case; the keyframe cache harvests that play, so the next one is
+    ///   planned and carries every track again.
+    static func audioProduction(
+        mode: AudioRouteMode, isDefault: Bool, planned: Bool
+    ) -> AudioRenditionProduction.Production {
+        if isDefault || mode == .streamCopy { return .eager }
+        return planned ? .lazy : .omitted
     }
 
     /// Which extra dialogue-boost renditions to derive, given what the

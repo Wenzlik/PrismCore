@@ -79,14 +79,17 @@ final class AudioRenditionWriter {
     /// the first pass found empty.
     var onPlannedSegment: ((_ index: Int, _ produced: Bool) -> Void)?
 
-    /// Lazy renditions (dialogue boost) are DECLARED at open but PRODUCED
-    /// only once a fetch under `audioN/` says someone selected them — the
-    /// same pattern as OCR subtitles (`SubtitleRenditionSet.noteSegmentDemand`).
-    /// Until then the bridge (decoder + filter + encoder + resampler + FIFO)
-    /// does not exist and the copy loop's `write` is a no-op, so a session
-    /// that never touches Enhance Dialogue pays nothing for the two levels
-    /// the host always requests. `arm()` is called from the server's thread,
-    /// hence the lock; the producer applies it at the next safe point.
+    /// Lazy renditions (dialogue boost, and every bridged track that is not
+    /// the DEFAULT one — see `HLSRemuxer.audioProduction`) are DECLARED at
+    /// open but PRODUCED only once a fetch under `audioN/` says someone
+    /// selected them — the same pattern as OCR subtitles
+    /// (`SubtitleRenditionSet.noteSegmentDemand`). Until then the bridge
+    /// (decoder + filter + encoder + resampler + FIFO) does not exist and the
+    /// copy loop's `write` is a no-op, so a session pays nothing for the two
+    /// boost levels the host always requests, nor for the three or four
+    /// TrueHD / DTS tracks of a UHD remux nobody is listening to. `arm()` is
+    /// called from the server's thread, hence the lock; the producer applies
+    /// it at the next safe point.
     let isLazy: Bool
     private let armLock = NSLock()
     private var armRequested = false
@@ -99,6 +102,10 @@ final class AudioRenditionWriter {
     /// has to be right before the first fetch, but the bridge itself need
     /// not exist for that.
     private var negotiatedChannelCount: Int?
+    /// The encoder that answered the same negotiation, for `CODECS`: the
+    /// build's default target is what a bridge asks for, but the probe is
+    /// what actually opened.
+    private var negotiatedCodecName: String?
 
     init(
         route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL,
@@ -163,6 +170,7 @@ final class AudioRenditionWriter {
                     dialogueBoost: route.mode.dialogueBoostLevel
                 )
                 negotiatedChannelCount = probeBridge.outputChannelCount
+                negotiatedCodecName = probeBridge.outputCodecName
                 probeBridge.close()
             }
             isProducing = false
@@ -537,7 +545,8 @@ final class AudioRenditionWriter {
             // Whichever encoder the bridge negotiated — EAC3 where the build
             // has it, AAC otherwise — never assumed.
             return MasterPlaylistBuilder.audioCodecString(
-                forCodecName: bridge?.outputCodecName ?? AudioBridge.defaultTargetCodecName
+                forCodecName: bridge?.outputCodecName ?? negotiatedCodecName
+                    ?? AudioBridge.defaultTargetCodecName
             )
         }
     }

@@ -757,6 +757,15 @@ output during priming is normal. A terminal, completely drained silent bridge
 raises `AudioBridgeFailure.producedNoAudio` through the session error path.
 The software pipeline exposes `.decoded` only after its decoder opens.
 
+Only the DEFAULT audio rendition and stream-copied ones are produced from the
+first packet. A bridged track that is not the DEFAULT, and every dialogue-boost
+level, is declared in the master and started by AVPlayer's first fetch under
+its directory (a track switch re-anchors production at the demanded segment).
+A sequential session — no keyframe plan, so no demand seam — leaves those
+renditions out of the master instead of encoding them for the whole film.
+`audioRenditionProductions` lists which was which, and
+`AudioRenditionProduction.summary(_:)` is its one-line form for a startup log.
+
 Audio delay is fixed at construction and carried by every clone. Changing it
 mid-title means a replacement session and a host-managed handover at the current
 position — see *Changing a setting mid-title* below. Both positive and negative
