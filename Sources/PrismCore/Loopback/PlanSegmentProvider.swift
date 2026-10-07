@@ -36,7 +36,8 @@ struct PlanSegmentProvider: SegmentProvider {
     var subtitleDemand: (@Sendable (String) -> SubtitleRenditionSet.DemandVerdict)?
 
     /// Consulted on every fetch under an `audioN/` directory, BEFORE the disk
-    /// read — the seam that arms a lazy (dialogue-boost) rendition. Returns
+    /// read — the seam that arms a lazy rendition (a dialogue-boost level, or
+    /// a bridged track that is not the DEFAULT). Returns
     /// `true` when THIS fetch armed it, in which case production is
     /// re-anchored — forced, so it happens even inside the forward-wait
     /// window — at the demanded segment (or the one being produced, for an

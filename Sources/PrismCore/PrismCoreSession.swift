@@ -389,6 +389,20 @@ public actor PrismCoreSession {
         remuxer.dialogueBoostRenditions
     }
 
+    /// When each audio rendition is produced — eager, lazy (declared, started
+    /// by AVPlayer's first fetch under it), or omitted (the sequential shape's
+    /// bridged and boost renditions) — in master order. Populated with the
+    /// master, so any time after `start()` returns; empty in the muxed shape.
+    /// `AudioRenditionProduction.summary(_:)` is the one-line form for a
+    /// startup log.
+    ///
+    /// A host that offers a track picker should build it from the player's
+    /// media selection group, which only ever lists what the master declares;
+    /// this list is for explaining the session, not for driving UI.
+    public var audioRenditionProductions: [AudioRenditionProduction] {
+        remuxer.audioRenditionProductions
+    }
+
     /// The source's chapter marks (Matroska `Chapters`, MP4 chapter tracks),
     /// in start order — empty for a source without them.
     ///
@@ -517,13 +531,17 @@ public actor PrismCoreSession {
     ///   `public.accessibility.enhances-speech-intelligibility`
     ///   characteristic; the base track stays bit-for-bit untouched (Atmos
     ///   included), and the host flips levels via `AVMediaSelection` like any
-    ///   other track. Opt-in because each level costs a full decode → filter →
-    ///   encode chain for the length of the session. Best-effort by design:
+    ///   other track. Each level is a full decode → filter → encode chain,
+    ///   which runs only once AVPlayer fetches the level (a planned session
+    ///   declares it and starts it on demand). Best-effort by design:
     ///   levels that can't be built (no centre channel, or a build without
     ///   the EAC3 encoder / `pan` filter — check `isDialogueBoostAvailable`)
     ///   are skipped, and `dialogueBoostRenditions` reports what actually
     ///   made it into the served master. Renditions live only in a master, so
-    ///   the muxed fallback shape drops them.
+    ///   the muxed fallback shape drops them, and a sequential session (no
+    ///   keyframe plan: an index that did not load in time, a live source)
+    ///   leaves them out too, as it does every bridged track but the
+    ///   DEFAULT one — see `audioRenditionProductions`.
     /// - Parameter preferredAudioLanguage: the language the viewer wants to
     ///   hear, as a BCP-47 / ISO-639 tag (`"cs"`, `"ces"`, `"cze"` and
     ///   `"cs-CZ"` all mean the same thing — see `LanguageMatch`). The
@@ -629,9 +647,10 @@ public actor PrismCoreSession {
         provider.subtitleDemand = { [subtitles = remuxer.subtitles] path in
             subtitles.noteSegmentDemand(path: path)
         }
-        // The same seam for lazy dialogue-boost renditions: an init/segment
-        // fetch under `audioN/` is what arms one, so the two levels the host
-        // requests on every session cost nothing until someone picks one.
+        // The same seam for lazy audio renditions: an init/segment fetch
+        // under `audioN/` is what arms one, so the two boost levels the host
+        // requests on every session, and every bridged track but the DEFAULT,
+        // cost nothing until someone picks one.
         provider.audioDemand = { [remuxer] path in
             remuxer.noteAudioDemand(path: path)
         }

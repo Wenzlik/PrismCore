@@ -61,3 +61,62 @@ final class AudioDeliveryStore: @unchecked Sendable {
         }
     }
 }
+
+/// When an audio rendition of the served master is produced — the answer to
+/// "what is this session spending CPU on" that `audioTrackDeliveries` (how a
+/// track is carried) does not give.
+///
+/// It exists because the cost is invisible from outside: a bridged rendition
+/// is a decode → resample → encode chain, and a UHD remux with four TrueHD /
+/// DTS tracks used to run all four for the whole film while one was heard
+/// (issue #122, a Vision Pro running hot). The list is what a field log needs
+/// to tell an expensive session from a cheap one.
+public struct AudioRenditionProduction: Sendable, Equatable {
+
+    public enum Production: String, Sendable, Equatable {
+        /// Produced from the first packet: the DEFAULT rendition, and every
+        /// stream-copied one (copying costs a muxer, not a codec).
+        case eager
+        /// Declared in the master; nothing runs until AVPlayer fetches under
+        /// its directory, which re-anchors production at the demanded segment.
+        case lazy
+        /// Not declared at all. Only in the sequential shape, which has no
+        /// demand seam to start a lazy rendition from: a bridged or boost
+        /// rendition there would have to run for the whole film on the
+        /// chance someone picks it.
+        case omitted
+    }
+
+    /// The source stream the rendition is built from. A dialogue-boost
+    /// rendition shares its stream with the DEFAULT rendition.
+    public let streamIndex: Int
+    /// Set on a dialogue-boost rendition, `nil` on a track's own.
+    public let dialogueBoost: DialogueBoostLevel?
+    /// Whether the rendition re-encodes (bridge or boost) rather than copies.
+    public let encodes: Bool
+    public let production: Production
+
+    public init(
+        streamIndex: Int, dialogueBoost: DialogueBoostLevel?, encodes: Bool, production: Production
+    ) {
+        self.streamIndex = streamIndex
+        self.dialogueBoost = dialogueBoost
+        self.encodes = encodes
+        self.production = production
+    }
+
+    /// One line for a host's startup log, e.g.
+    /// `eager #1; lazy #2 #3 #1/boost-medium #1/boost-high; omitted none`.
+    /// A stream index rather than a language: the line is for whoever reads
+    /// the log next to the probe's track list, which is indexed the same way.
+    public static func summary(_ productions: [AudioRenditionProduction]) -> String {
+        func names(_ production: Production) -> String {
+            let matching = productions.filter { $0.production == production }
+            guard !matching.isEmpty else { return "none" }
+            return matching.map { entry in
+                "#\(entry.streamIndex)" + (entry.dialogueBoost.map { "/boost-\($0.rawValue)" } ?? "")
+            }.joined(separator: " ")
+        }
+        return "eager \(names(.eager)); lazy \(names(.lazy)); omitted \(names(.omitted))"
+    }
+}

@@ -8,6 +8,74 @@ source-compatible.)
 
 ## [Unreleased]
 
+Audio renditions that re-encode are no longer produced for the whole film
+when nobody listens to them (#122). A Vision Pro playing a 4K MKV ran hot:
+every TrueHD / DTS / DTS-HD track of a UHD remux (often three to five) was
+decoded and re-encoded to EAC3 from the first packet, selected or not, and a
+session without a keyframe plan ran both dialogue-boost encoders as well.
+
+### Changed
+
+- **A bridged track that is not the DEFAULT is lazy in a planned session**,
+  the way dialogue-boost levels already were: declared in the master (same
+  `NAME`, `LANGUAGE`, `CODECS` and `CHANNELS`, read off a bridge opened once
+  at setup and closed again) and started by AVPlayer's first fetch under its
+  `audioN/` directory, which re-anchors production at the demanded segment.
+  A mid-film track switch therefore costs a re-anchor (a demuxer seek) before
+  its first segment, as a boost level already did. The DEFAULT rendition and
+  every stream-copied one stay eager: copying costs a muxer, not a codec, so
+  a switch between copied tracks (an Atmos alternate, a second language)
+  stays instant, and the DEFAULT track's object-audio finding still comes
+  from its own packets.
+- **A sequential session leaves its encoded renditions out of the master**:
+  every bridged track but the DEFAULT one, and every dialogue-boost level.
+  Sequential means no keyframe plan (the index did not load within
+  `SegmentPlan.indexLoadBudget`, common over HTTP with Cues at the tail, or
+  a live source), so there is no demand seam a lazy rendition could start
+  from, and eager was the cost above. The master declares only what is
+  produced: `dialogueBoostRenditions` is empty there, and the omitted tracks
+  stay `.unavailable` in `audioTrackDeliveries`. The DEFAULT track (the
+  `preferredAudioLanguage` match when there is one) and stream-copied
+  alternates are unaffected. With `keyframeIndexCacheDirectory` set, the
+  sequential play harvests the keyframe map, so the next play of the same
+  file is planned and offers every track again.
+- A dialogue-boost rendition's directory ordinal now starts past every base
+  route rather than at the number of base renditions that opened, so a base
+  track that failed to open can no longer leave its `audioN/` name to a boost.
+
+### Added
+
+- **`PrismCoreSession.audioRenditionProductions`**: per rendition, its
+  stream, boost level, whether it encodes, and whether it is `eager`, `lazy`
+  or `omitted`. `AudioRenditionProduction.summary(_:)` is the one-line form
+  for a host's startup log (`eager #1; lazy #2 #3 #1/boost-medium
+  #1/boost-high; omitted none`). The engine also logs that line once per
+  session, under `cz.zmrhal.prismcore`, whenever anything was made lazy or
+  left out.
+
+### Considered and not done
+
+- Raising `SegmentPlan.indexLoadBudget` for remote inputs, to make the
+  sequential shape rarer. Behind the host's range proxy each tail request
+  costs a whole bite (see AGENTS.md, *Model the host's proxy*), so a longer
+  budget is seconds added to the start of exactly the files that already
+  start slowest, and a file with no index at all would pay it in full for
+  nothing. The keyframe cache already turns those first plays into planned
+  second plays.
+
+### Validation
+
+- `LazyBridgedRenditionTests`, on a new fixture (`h264_ac3_dts_20s.mkv`: AC3
+  5.1 `eng` default + DTS `ces`): in a planned session the DTS rendition is
+  declared, its directory holds only its playlist after the whole file has
+  been produced, and a fetch of its init and of segment 2 serves the bridge
+  codec's init and a fragment whose first sample sits at 8 s, where the
+  playlist puts segment 2. In a sequential session (zero index budget) the
+  master declares the AC3 rendition only, no other `audioN/` directory
+  exists, and the boost report is empty. The decision itself is tested as a
+  pure table. The CPU saving has not been measured on a device; it is the
+  absence of the encoders, which the tests show directly.
+
 ## [3.3.0] — 2026-10-06
 
 A host that draws its own captions can have a bitmap subtitle stream (PGS /
