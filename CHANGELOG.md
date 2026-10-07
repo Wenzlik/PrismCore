@@ -8,11 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.4.0] — 2026-10-07
+
 Audio renditions that re-encode are no longer produced for the whole film
 when nobody listens to them (#122). A Vision Pro playing a 4K MKV ran hot:
 every TrueHD / DTS / DTS-HD track of a UHD remux (often three to five) was
 decoded and re-encoded to EAC3 from the first packet, selected or not, and a
-session without a keyframe plan ran both dialogue-boost encoders as well.
+session without a keyframe plan ran both dialogue-boost encoders as well. A
+minor: new API (`audioRenditionProductions`), nothing removed.
 
 ### Changed
 
@@ -2715,7 +2718,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...HEAD
+[3.4.0]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...3.4.0
 [3.3.0]: https://github.com/Wenzlik/PrismCore/compare/3.2.7...3.3.0
 [3.2.7]: https://github.com/Wenzlik/PrismCore/compare/3.2.6...3.2.7
 [3.2.6]: https://github.com/Wenzlik/PrismCore/compare/3.2.5...3.2.6
