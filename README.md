@@ -348,7 +348,9 @@ fragment or `user:password@`, the LAN access token, or any path on the
 device's disk: the work directory, `keyframeIndexCacheDirectory` (reported as
 on or off) and sidecar subtitle files are all left out, and a local source is
 named by its file name alone. Error descriptions are also scrubbed of every one
-of those values, because an error can quote the failing URL. Two things do stay
+of those values, because an error can quote the failing URL — and any URL it
+quotes, a redirect target included, loses its credentials, query and fragment
+too. Two things do stay
 in: a remote URL's host and path, which are what a reproduction needs, and the
 track titles, languages and file name the media itself carries. A host whose
 URLs keep a token in the *path* should cut it before sharing.

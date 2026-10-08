@@ -28,7 +28,8 @@ source-compatible.)
   query, fragment and credentials, the LAN access token, and every path on
   disk (work directory, keyframe cache, sidecars; a local source is named by
   file name only). Free-text error descriptions are scrubbed of the same
-  values.
+  values, and any URL they quote — a redirect target included — loses its
+  credentials, query and fragment.
 - `prismcore-cli probe --json` prints the report alone on stdout.
   `serve --report FILE` and `segverify --report FILE` write it on every exit,
   including a failed start.

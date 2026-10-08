@@ -161,6 +161,25 @@ struct SessionDiagnosticReportTests {
         #expect(Redaction.location(of: url).url == "https://media.example/v.mkv")
     }
 
+    /// A redirect target is a URL the session never held: its query token
+    /// only exists inside the error, so only the generic URL pass can see it.
+    @Test("A redirect URL quoted by an error loses credentials and query")
+    func scrubsRedirectURL() throws {
+        let url = try #require(URL(string: "https://origin.example/movie.mkv?X-Plex-Token=ORIG1234"))
+        let redaction = Redaction(url: url, httpHeaders: [:])
+        let cdn = "https://user:cdnpass9@cdn.example/file.mkv?token=CDNSECRET99#frag77"
+        let underlying = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: [
+            "NSErrorFailingURLStringKey": cdn,
+            NSURLErrorFailingURLErrorKey: try #require(URL(string: cdn)),
+        ])
+        let failure = redaction.failure(PrismCoreError.originUnreachable(
+            status: nil, url: try #require(URL(string: cdn)), underlying: underlying))
+        for secret in ["CDNSECRET99", "cdnpass9", "frag77", "ORIG1234"] {
+            #expect(!failure.description.contains(secret), "\(secret) survived: \(failure.description)")
+        }
+        #expect(failure.description.contains("cdn.example/file.mkv"))
+    }
+
     // MARK: - Without a session
 
     @Test("A software-routed source gets a report from its probe alone")
