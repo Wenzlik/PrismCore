@@ -430,7 +430,9 @@ public struct SourceDescription: Sendable, Equatable, Codable {
         public var videoPacketsScanned: Int
     }
 
-    init(_ info: SourceInfo) {
+    /// `redaction` scrubs the track names and languages: the muxer wrote
+    /// them, not the engine, so they are free text like an error's.
+    init(_ info: SourceInfo, redaction: Redaction) {
         formatName = info.formatName
         durationSeconds = info.duration
         nativeReadiness = info.nativeReadiness.rawValue
@@ -459,14 +461,16 @@ public struct SourceDescription: Sendable, Equatable, Codable {
                 streamIndex: audio.streamIndex, codecName: audio.codecName,
                 profileName: audio.profileName, channelCount: audio.channelCount,
                 channelLayout: audio.channelLayoutDescription, sampleRate: audio.sampleRate,
-                bitRate: audio.bitRate, language: audio.language, title: audio.title,
+                bitRate: audio.bitRate, language: audio.language.map(redaction.metadata),
+                title: audio.title.map(redaction.metadata),
                 isObjectAudio: audio.isObjectAudio, copyability: audio.copyability.rawValue
             )
         }
         subtitles = info.subtitleTracks.map { subtitle in
             Subtitle(
                 streamIndex: subtitle.streamIndex, codecName: subtitle.codecName,
-                language: subtitle.language, title: subtitle.title, kind: subtitle.kind.rawValue,
+                language: subtitle.language.map(redaction.metadata),
+                title: subtitle.title.map(redaction.metadata), kind: subtitle.kind.rawValue,
                 isDefault: subtitle.isDefault, isForced: subtitle.isForced,
                 isHearingImpaired: subtitle.isHearingImpaired, isOCRReadable: subtitle.isOCRReadable
             )
@@ -536,6 +540,15 @@ struct Redaction: Sendable {
         return secrets.reduce(urlsScrubbed) { $0.replacingOccurrences(of: $1, with: "<redacted>") }
     }
 
+    /// A track's title or language as the container stores it. A mux tool
+    /// will store whatever it was handed — a signed URL, the path it read a
+    /// subtitle file from — so on top of `scrub`, any absolute path of two
+    /// or more components goes whole. A `/` inside a word ("AC3/DTS") or
+    /// before a space ("5.1 / 2.0") is not one.
+    func metadata(_ text: String) -> String {
+        scrub(text).replacing(#/(^|[^\w.])/[^\s/"'<>]+/[^\s"'<>]*/#) { "\($0.1)<redacted>" }
+    }
+
     /// `url` for a remote source, `fileName` for a local one — never both,
     /// and neither when the URL cannot be taken apart safely.
     static func location(of url: URL) -> (url: String?, fileName: String?) {
@@ -562,7 +575,7 @@ struct Redaction: Sendable {
             url: location.url, fileName: location.fileName, scheme: url.scheme?.lowercased(),
             httpHeaderCount: httpHeaders.count, hostInput: hostInput,
             byteSize: structure?.byteSize, durationSeconds: info?.duration,
-            info: info.map(SourceDescription.init), structure: structure.map(Self.withoutKeyframes)
+            info: info.map { SourceDescription($0, redaction: self) }, structure: structure.map(Self.withoutKeyframes)
         )
     }
 

@@ -183,6 +183,35 @@ struct SessionDiagnosticReportTests {
         #expect(failure.description.contains("cdn.example/file.mkv"))
     }
 
+    /// Track names are the muxer's free text: a signed URL or the path a
+    /// subtitle was read from must not ride out in them, ordinary names must.
+    @Test("Track titles and languages are scrubbed, ordinary names kept")
+    func scrubsTrackMetadata() throws {
+        let url = try #require(URL(string: "https://origin.example/movie.mkv?X-Plex-Token=ORIG1234"))
+        let redaction = Redaction(url: url, httpHeaders: [:])
+        let audio = ["https://media.example/movie?token=SECRET123", "Commentary AC3/DTS 5.1 / 2.0"].enumerated().map {
+            AudioTrackInfo(
+                streamIndex: $0.offset + 1, codecName: "aac", profileName: nil, channelCount: 2,
+                channelLayoutDescription: "stereo", sampleRate: 48_000, language: "eng",
+                title: $0.element, isObjectAudio: false, copyability: .streamCopy
+            )
+        }
+        let subtitle = SubtitleTrackInfo(
+            streamIndex: 3, codecName: "subrip", language: "ORIG1234",
+            title: "/Users/alice/private/movie.srt", kind: .textRendition, isDefault: false,
+            isForced: false, isHearingImpaired: false, isOCRReadable: false
+        )
+        let info = SourceInfo(formatName: "matroska", duration: 60, video: nil,
+                              audioTracks: audio, subtitleTracks: [subtitle])
+        let source = redaction.source(url: url, httpHeaders: [:], hostInput: false, info: info, structure: nil)
+        let json = String(decoding: try JSONEncoder().encode(source), as: UTF8.self)
+        for secret in ["SECRET123", "ORIG1234", "alice", "private"] {
+            #expect(!json.contains(secret), "\(secret) leaked: \(json)")
+        }
+        #expect(source.info?.audio.last?.title == "Commentary AC3/DTS 5.1 / 2.0")
+        #expect(source.info?.audio.first?.language == "eng")
+    }
+
     // MARK: - Without a session
 
     @Test("A software-routed source gets a report from its probe alone")
