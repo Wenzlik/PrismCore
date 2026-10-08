@@ -29,8 +29,9 @@ source-compatible.)
   disk (work directory, keyframe cache, sidecars; a local source is named by
   file name only). Free-text error descriptions are scrubbed of the same
   values, and any URL they quote — a redirect target included — loses its
-  credentials, query and fragment. Track titles and languages, which the
-  muxer wrote, get the same scrub and lose any absolute path.
+  credentials, query and fragment. Error descriptions and track titles and
+  languages, which the muxer wrote, also lose any absolute path — POSIX,
+  Windows drive or UNC — even one the session never knew.
 - `prismcore-cli probe --json` prints the report alone on stdout.
   `serve --report FILE` and `segverify --report FILE` write it on every exit,
   including a failed start.

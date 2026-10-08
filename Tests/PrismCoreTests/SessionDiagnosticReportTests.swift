@@ -212,6 +212,43 @@ struct SessionDiagnosticReportTests {
         #expect(source.info?.audio.first?.language == "eng")
     }
 
+    /// A path the session never held — a host `input:` factory's cache file,
+    /// a Windows subtitle path a muxer stored — has no known value to cut,
+    /// so free text loses any absolute path by shape. A URL keeps its host
+    /// and path, an error its wording.
+    @Test("Unknown absolute paths leave error text and track metadata")
+    func scrubsUnknownPaths() throws {
+        let url = try #require(URL(string: "https://origin.example/movie.mkv"))
+        let redaction = Redaction(url: url, httpHeaders: [:])
+        let failure = redaction.failure(NSError(domain: "Factory", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Cannot open /Users/alice/private/cache/movie.mkv: Input/output error; "
+                + "also file:///Users/alice/private/x.mkv, /Users/alice/My Private/y.mkv and https://cdn.example/a/b.mkv",
+        ]))
+        let decision = redaction.decision(.failure(NSError(domain: "Factory", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "Cannot open /Users/alice/private/cache/movie.mkv",
+        ])))
+        let titles = [#"C:\Users\alice\private\movie.srt"#, "D:/alice/private/movie.srt",
+                      #"\\nas\alice\private\movie.srt"#]
+        let subtitles = titles.enumerated().map {
+            SubtitleTrackInfo(
+                streamIndex: $0.offset, codecName: "subrip", language: nil, title: $0.element,
+                kind: .textRendition, isDefault: false, isForced: false, isHearingImpaired: false,
+                isOCRReadable: false
+            )
+        }
+        let info = SourceInfo(formatName: "matroska", duration: 60, video: nil,
+                              audioTracks: [], subtitleTracks: subtitles)
+        let source = redaction.source(url: url, httpHeaders: [:], hostInput: true, info: info, structure: nil)
+        let json = String(decoding: try JSONEncoder().encode(source), as: UTF8.self)
+        for text in [failure.description, decision.reason, json] {
+            for secret in ["alice", "private", "Private"] {
+                #expect(!text.contains(secret), "\(secret) leaked: \(text)")
+            }
+        }
+        #expect(failure.description.contains("Input/output error"))
+        #expect(failure.description.contains("https://cdn.example/a/b.mkv"))
+    }
+
     // MARK: - Without a session
 
     @Test("A software-routed source gets a report from its probe alone")

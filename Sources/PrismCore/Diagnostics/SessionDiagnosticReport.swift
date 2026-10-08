@@ -461,16 +461,16 @@ public struct SourceDescription: Sendable, Equatable, Codable {
                 streamIndex: audio.streamIndex, codecName: audio.codecName,
                 profileName: audio.profileName, channelCount: audio.channelCount,
                 channelLayout: audio.channelLayoutDescription, sampleRate: audio.sampleRate,
-                bitRate: audio.bitRate, language: audio.language.map(redaction.metadata),
-                title: audio.title.map(redaction.metadata),
+                bitRate: audio.bitRate, language: audio.language.map(redaction.freeText),
+                title: audio.title.map(redaction.freeText),
                 isObjectAudio: audio.isObjectAudio, copyability: audio.copyability.rawValue
             )
         }
         subtitles = info.subtitleTracks.map { subtitle in
             Subtitle(
                 streamIndex: subtitle.streamIndex, codecName: subtitle.codecName,
-                language: subtitle.language.map(redaction.metadata),
-                title: subtitle.title.map(redaction.metadata), kind: subtitle.kind.rawValue,
+                language: subtitle.language.map(redaction.freeText),
+                title: subtitle.title.map(redaction.freeText), kind: subtitle.kind.rawValue,
                 isDefault: subtitle.isDefault, isForced: subtitle.isForced,
                 isHearingImpaired: subtitle.isHearingImpaired, isOCRReadable: subtitle.isOCRReadable
             )
@@ -540,13 +540,24 @@ struct Redaction: Sendable {
         return secrets.reduce(urlsScrubbed) { $0.replacingOccurrences(of: $1, with: "<redacted>") }
     }
 
-    /// A track's title or language as the container stores it. A mux tool
-    /// will store whatever it was handed — a signed URL, the path it read a
-    /// subtitle file from — so on top of `scrub`, any absolute path of two
-    /// or more components goes whole. A `/` inside a word ("AC3/DTS") or
-    /// before a space ("5.1 / 2.0") is not one.
-    func metadata(_ text: String) -> String {
-        scrub(text).replacing(#/(^|[^\w.])/[^\s/"'<>]+/[^\s"'<>]*/#) { "\($0.1)<redacted>" }
+    /// Free text whose author could quote any path on the machine: a track's
+    /// title or language (a mux tool stores whatever it was handed — the path
+    /// it read a subtitle from, Windows ones included) and an error's
+    /// description (a host's `input:` factory failing on a cache file the
+    /// session never knew). On top of `scrub`, every absolute path goes
+    /// whole: POSIX of two or more components, a drive path (`C:\` or `C:/`)
+    /// or a UNC share. A path runs on across a space while the next word has
+    /// a separator too ("/Users/alice/My Movies/x.srt"), but not past a `:`
+    /// or `,`, so "<path>: Input/output error" keeps its error.
+    ///
+    /// Not a path: a `/` inside a word ("AC3/DTS"), before a space
+    /// ("5.1 / 2.0"), or after `:` or `/` — that is a URL, which `scrub`
+    /// already cut to scheme, host and path. `file://` is the one URL whose
+    /// path is a disk path, so it goes too.
+    func freeText(_ text: String) -> String {
+        scrub(text).replacing(
+            #/(^|[^\w.:/]|file://)(?:/[^\s/"'<>]+/|[A-Za-z]:[\\/]|\\\\)(?:[^\s"'<>]*[^\s"'<>:,;])?(?: [^\s"'<>]*[\\/][^\s"'<>]*[^\s"'<>:,;])*/#
+        ) { "\($0.1)<redacted>" }
     }
 
     /// `url` for a remote source, `fileName` for a local one — never both,
@@ -582,9 +593,9 @@ struct Redaction: Sendable {
     func decision(_ outcome: Result<PrismCoreEngine.Decision, any Error>) -> SessionDiagnosticReport.Decision {
         switch outcome {
         case .success(let decision):
-            return .init(engine: decision.engine.rawValue, reason: scrub(decision.reason))
+            return .init(engine: decision.engine.rawValue, reason: freeText(decision.reason))
         case .failure(let error):
-            return .init(engine: nil, reason: scrub("\(error)"))
+            return .init(engine: nil, reason: freeText("\(error)"))
         }
     }
 
@@ -597,7 +608,7 @@ struct Redaction: Sendable {
         case .unknown: retryability = "unknown"
         }
         return .init(kind: classified.caseName, retryability: retryability,
-                     description: scrub(classified.description))
+                     description: freeText(classified.description))
     }
 
     private static func withoutKeyframes(_ structure: SourceStructure) -> SourceStructure {
