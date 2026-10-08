@@ -163,11 +163,14 @@ struct SessionDiagnosticReportTests {
 
     /// A redirect target is a URL the session never held: its query token
     /// only exists inside the error, so only the generic URL pass can see it.
+    /// The redirect carries the source's own token too, ahead of the CDN's:
+    /// cutting the known one first used to end the URL match at its
+    /// `<redacted>` and leave the CDN token behind it.
     @Test("A redirect URL quoted by an error loses credentials and query")
     func scrubsRedirectURL() throws {
         let url = try #require(URL(string: "https://origin.example/movie.mkv?X-Plex-Token=ORIG1234"))
         let redaction = Redaction(url: url, httpHeaders: [:])
-        let cdn = "https://user:cdnpass9@cdn.example/file.mkv?token=CDNSECRET99#frag77"
+        let cdn = "https://user:cdnpass9@cdn.example/file.mkv?old=ORIG1234&token=CDNSECRET99#frag77"
         let underlying = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: [
             "NSErrorFailingURLStringKey": cdn,
             NSURLErrorFailingURLErrorKey: try #require(URL(string: cdn)),

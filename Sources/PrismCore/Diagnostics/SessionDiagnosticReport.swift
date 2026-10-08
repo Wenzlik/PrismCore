@@ -519,17 +519,21 @@ struct Redaction: Sendable {
     }
 
     func scrub(_ text: String) -> String {
-        let known = secrets.reduce(text) { $0.replacingOccurrences(of: $1, with: "<redacted>") }
         // A URL the session never held still has to lose its secrets: a
         // coordinated-HTTP redirect moves the fetch to a `Location` whose
         // query token (a CDN signature) only exists in the error that quotes
         // it, so no list of known values can catch it. Any URL in free text
         // keeps scheme, host and path; credentials, query and fragment go.
-        return known
-            // Query first: its pattern stops at the `<` the credential pass
-            // writes, which would leave the token behind it untouched.
+        //
+        // The URL passes run BEFORE the known values are cut: their patterns
+        // stop at `<`, so a `<redacted>` written into a query first (the
+        // source's own token, carried on by the redirect) would end the match
+        // there and leave every parameter after it — the CDN token — behind.
+        let urlsScrubbed = text
+            // Query before userinfo, for the same `<` reason.
             .replacing(#/([A-Za-z][A-Za-z0-9+.\-]*://[^\s?#"'<>]*)[?#][^\s"'<>]*/#) { "\($0.1)?<redacted>" }
             .replacing(#/([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@"'<>]+@/#) { "\($0.1)<redacted>@" }
+        return secrets.reduce(urlsScrubbed) { $0.replacingOccurrences(of: $1, with: "<redacted>") }
     }
 
     /// `url` for a remote source, `fileName` for a local one — never both,
