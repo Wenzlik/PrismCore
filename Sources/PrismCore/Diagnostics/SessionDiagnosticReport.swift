@@ -287,7 +287,8 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         public struct Event: Sendable, Equatable, Codable {
             /// The `PlaybackEvent` case name.
             public var kind: String
-            /// Since `start()`; `nil` for an event from before it.
+            /// Since `start()`, negative for an event from before it; `nil`
+            /// while the session has not been started.
             public var atSeconds: Double?
             /// The loopback path served (never a source path).
             public var path: String?
