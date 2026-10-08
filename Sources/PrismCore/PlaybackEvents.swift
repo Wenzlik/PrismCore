@@ -39,17 +39,36 @@ public enum PlaybackEvent: Sendable, Equatable {
 
 /// Where the engine's components drop `PlaybackEvent`s. Exists from session
 /// init, so a host may register before or after `start()`; with nobody
-/// registered, a yield is one lock and a nil check.
+/// registered, a yield is one lock and an append to the retained window.
 final class PlaybackEventSink: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<PlaybackEvent>.Continuation?
+    /// The newest events, kept whether or not anyone registered, so a
+    /// diagnostic report taken after the fact still has them — a host
+    /// usually only thinks to ask once playback has already gone wrong.
+    /// Bounded like the stream's buffer: a run has no natural end.
+    private var recent: [(at: ContinuousClock.Instant, event: PlaybackEvent)] = []
+    private var dropped = 0
+    static let retainedCount = 64
 
     var isObserved: Bool { lock.withLock { continuation != nil } }
+
+    /// What `recent` holds, oldest first, and how many older ones it let go.
+    var retained: (events: [(at: ContinuousClock.Instant, event: PlaybackEvent)], dropped: Int) {
+        lock.withLock { (recent, dropped) }
+    }
 
     func yield(_ event: PlaybackEvent) {
         // Yielded outside the lock: the continuation has its own, and holding
         // ours across it would order unrelated emitters behind each other.
-        lock.withLock { continuation }?.yield(event)
+        lock.withLock {
+            recent.append((.now, event))
+            if recent.count > Self.retainedCount {
+                recent.removeFirst()
+                dropped += 1
+            }
+            return continuation
+        }?.yield(event)
     }
 
     func replace(with next: AsyncStream<PlaybackEvent>.Continuation?) {
