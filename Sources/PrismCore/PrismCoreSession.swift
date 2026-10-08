@@ -66,7 +66,8 @@ public actor PrismCoreSession {
 
     /// `audioDelaySeconds` and `pendingAudioDelaySeconds` sampled together.
     /// Internal: only a caller asserting how the two RELATE needs them
-    /// atomic, and that caller is a test (see `HLSRemuxer.audioDelayReport`).
+    /// atomic — a test, and `diagnosticReport()`, which prints them side by
+    /// side (see `HLSRemuxer.audioDelayReport`).
     var audioDelayReport: (serving: Double, pending: Double?) { remuxer.audioDelayReport }
 
     /// What `setAudioDelaySeconds(_:)` did.
@@ -1138,6 +1139,7 @@ public actor PrismCoreSession {
         let options = self.options
         let retained = events.retained
         let productions = audioRenditionProductions
+        let audioDelay = audioDelayReport
         let seconds = { (duration: Duration) in duration / .seconds(1) }
 
         return SessionDiagnosticReport(
@@ -1206,8 +1208,11 @@ public actor PrismCoreSession {
                 retention: .init(budgetBytes: options.segmentCacheBytes,
                                  evictedSegments: remuxer.residentSegments.evictedCount),
                 remuxFailure: remuxError.map(redaction.failure),
-                audioDelaySeconds: audioDelaySeconds,
-                pendingAudioDelaySeconds: pendingAudioDelaySeconds,
+                // One lock: read apart, a re-anchor landing between the two
+                // reads yields a pair that never existed (the old offset
+                // serving, nothing pending).
+                audioDelaySeconds: audioDelay.serving,
+                pendingAudioDelaySeconds: audioDelay.pending,
                 subtitleDelaySeconds: subtitleDelaySeconds
             )
         )
