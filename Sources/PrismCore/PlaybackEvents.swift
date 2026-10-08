@@ -51,8 +51,6 @@ final class PlaybackEventSink: @unchecked Sendable {
     private var dropped = 0
     static let retainedCount = 64
 
-    var isObserved: Bool { lock.withLock { continuation != nil } }
-
     /// What `recent` holds, oldest first, and how many older ones it let go.
     var retained: (events: [(at: ContinuousClock.Instant, event: PlaybackEvent)], dropped: Int) {
         lock.withLock { (recent, dropped) }
