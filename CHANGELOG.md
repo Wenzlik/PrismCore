@@ -8,6 +8,13 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.1] — 2026-10-09
+
+The keyframe sidecar can be keyed by the host's own name for a source, so a
+map survives an app restart behind a local range proxy whose port and token
+change every launch (#132). Purely additive: one new type and new defaulted
+parameters; without them nothing changes.
+
 ### Added
 
 - **A host-supplied identity for the keyframe sidecar** —
@@ -2939,7 +2946,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...HEAD
+[3.5.1]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...3.5.1
 [3.5.0]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...3.5.0
 [3.4.0]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...3.4.0
 [3.3.0]: https://github.com/Wenzlik/PrismCore/compare/3.2.7...3.3.0
