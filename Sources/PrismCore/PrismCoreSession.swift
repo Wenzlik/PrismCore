@@ -66,7 +66,8 @@ public actor PrismCoreSession {
 
     /// `audioDelaySeconds` and `pendingAudioDelaySeconds` sampled together.
     /// Internal: only a caller asserting how the two RELATE needs them
-    /// atomic, and that caller is a test (see `HLSRemuxer.audioDelayReport`).
+    /// atomic — a test, and `diagnosticReport()`, which prints them side by
+    /// side (see `HLSRemuxer.audioDelayReport`).
     var audioDelayReport: (serving: Double, pending: Double?) { remuxer.audioDelayReport }
 
     /// What `setAudioDelaySeconds(_:)` did.
@@ -277,6 +278,13 @@ public actor PrismCoreSession {
     private let inputFactory: PrismCoreInputFactory?
     /// A session mints at most one successor (`makeSession(changing:)`).
     private var hasSuccessor = false
+    /// From the `ProbedSource` this session was built with, if any — for
+    /// `diagnosticReport()`.
+    private let probeTiming: ProbeTiming?
+    private let probeStructure: SourceStructure?
+    private let probedInfo: SourceInfo?
+    /// What `start()` threw, for `diagnosticReport()`.
+    private var startupError: (any Error)?
 
     /// What a clone (fallback session) carries: the value the host last asked
     /// for, pending or not. A fresh session writes every segment itself, so a
@@ -605,6 +613,11 @@ public actor PrismCoreSession {
         // factory; a session built from one must not have to be told twice
         // where its bytes come from.
         self.inputFactory = input ?? probed?.inputFactory
+        // Copied out now: the context is consumed by the remuxer, but these
+        // are values, and the diagnostic report wants them afterwards.
+        self.probeTiming = probed?.timing
+        self.probeStructure = probed?.structure
+        self.probedInfo = probed?.info
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PrismCore-\(UUID().uuidString)", isDirectory: true)
@@ -1088,19 +1101,139 @@ public actor PrismCoreSession {
         return stream
     }
 
-    /// The registered stream's continuation, `nil` when nobody asked — which
-    /// is what keeps the producer's sink nil and the whole feature free.
+    // MARK: - Diagnostic report
+
+    /// Everything this session knows about itself, as one `Codable` value for
+    /// a bug report — see `SessionDiagnosticReport`, and `jsonData()` on it
+    /// for the text to paste.
+    ///
+    /// Callable at any point, before `start()`, during, after a failed one,
+    /// and after `stop()`: each section says what it knew at the time. The
+    /// checkpoints and the playback events are kept by the session itself
+    /// (bounded: the five startup stages, the newest 64 events), so a host
+    /// that never registered for either still gets them.
+    ///
+    /// Withholds every secret the session holds: header values, the URL's
+    /// credentials, query and fragment, and every path on this device's
+    /// disk (work directory, keyframe cache, a local source's directory,
+    /// external subtitle files).
+    public func diagnosticReport() async -> SessionDiagnosticReport {
+        let accessToken = await server.accessToken
+        let redaction = Redaction(
+            url: configuration.sourceURL,
+            httpHeaders: configuration.httpHeaders,
+            paths: [workDirectory, configuration.keyframeIndexCacheDirectory] + externalSubtitles.map(\.url),
+            extra: accessToken.map { [$0.value] } ?? []
+        )
+        let marks = startupRecord.checkpoints
+        // The remuxer's own description wins over the probe's: it is what
+        // the session actually produced from (a fallback session re-opens).
+        let info = marks.lazy.compactMap { mark -> SourceInfo? in
+            if case .streamInfoResolved(let info) = mark.phase { return info }
+            return nil
+        }.first ?? probedInfo
+        let plan = marks.lazy.compactMap { mark -> (SegmentPlanOrigin, Int)? in
+            if case .segmentPlanReady(let origin, let segments) = mark.phase { return (origin, segments) }
+            return nil
+        }.first
+        let options = self.options
+        let retained = events.retained
+        let productions = audioRenditionProductions
+        let audioDelay = audioDelayReport
+        let seconds = { (duration: Duration) in duration / .seconds(1) }
+
+        return SessionDiagnosticReport(
+            source: redaction.source(
+                url: options.sourceURL, httpHeaders: options.httpHeaders, hostInput: inputFactory != nil,
+                info: info, structure: probeStructure
+            ),
+            // What `PrismCoreEngine.decide` says of this source on this build:
+            // a pure function of the two, so it is the host's verdict too
+            // unless the host routed without asking.
+            decision: info.map { info in redaction.decision(Result { try PrismCoreEngine.decide(for: info) }) },
+            options: SessionDiagnosticReport.Options(
+                display: .init(
+                    isHDRReady: options.display.isHDRReady,
+                    isDolbyVisionCapable: options.display.isDolbyVisionCapable,
+                    panelIsCurrentlyHDR: options.display.panelIsCurrentlyHDR,
+                    source: options.display.source.rawValue
+                ),
+                segmentCacheBytes: options.segmentCacheBytes,
+                forceMuxedShape: options.forceMuxedShape,
+                keyframeIndexCacheEnabled: options.keyframeIndexCacheDirectory != nil,
+                dialogueBoost: options.dialogueBoost.map(\.rawValue),
+                preferredAudioLanguage: options.preferredAudioLanguage,
+                preferredSubtitleLanguage: options.preferredSubtitleLanguage,
+                audioDelaySeconds: options.audioDelaySeconds,
+                coordinatedHTTP: options.coordinatedHTTP,
+                reachability: options.reachability == .loopbackOnly
+                    ? "loopbackOnly" : "localNetworkUnencryptedForAirPlay",
+                externalSubtitleCount: externalSubtitles.count
+            ),
+            startup: .init(
+                checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },
+                planOrigin: plan?.0.rawValue,
+                planSegments: plan?.1,
+                probeTiming: probeTiming.map(SessionDiagnosticReport.Startup.ProbeTiming.init),
+                failure: startupError.map(redaction.failure)
+            ),
+            runtime: .init(
+                started: started,
+                stopped: stopped,
+                uptimeSeconds: startupReference.map { seconds(ContinuousClock.now - $0) },
+                sourceBytesRead: sourceBytesRead,
+                playbackEvents: retained.events.map {
+                    .init($0.event, at: $0.at, since: startupReference, redaction: redaction)
+                },
+                playbackEventsDropped: retained.dropped,
+                timestampRepairs: timestampRepairs.map {
+                    .init(missingDTSFilled: $0.missingDTSFilled, nonMonotonicDTSBumped: $0.nonMonotonicDTSBumped,
+                          ptsRaisedToDTS: $0.ptsRaisedToDTS, total: $0.total)
+                },
+                audioRenditionProductions: productions.map {
+                    .init(streamIndex: $0.streamIndex, dialogueBoost: $0.dialogueBoost?.rawValue,
+                          encodes: $0.encodes, production: $0.production.rawValue)
+                },
+                audioRenditionSummary: productions.isEmpty ? nil : AudioRenditionProduction.summary(productions),
+                objectAudio: objectAudio.map {
+                    .init(streamIndex: $0.streamIndex, complexityIndex: $0.complexityIndex,
+                          claimedByMetadata: $0.claimedByMetadata, isObjectAudio: $0.isObjectAudio,
+                          wasMissedByMetadata: $0.wasMissedByMetadata)
+                },
+                dolbyVisionConversion: dolbyVisionConversion.map {
+                    .init(convertedRPUs: $0.convertedRPUs, failedRPUs: $0.failedRPUs,
+                          droppedEnhancementLayerNALs: $0.droppedEnhancementLayerNALs,
+                          staleUnconvertedPackets: $0.staleUnconvertedPackets, isClean: $0.isClean)
+                },
+                retention: .init(budgetBytes: options.segmentCacheBytes,
+                                 evictedSegments: remuxer.residentSegments.evictedCount),
+                remuxFailure: remuxError.map(redaction.failure),
+                // One lock: read apart, a re-anchor landing between the two
+                // reads yields a pair that never existed (the old offset
+                // serving, nothing pending).
+                audioDelaySeconds: audioDelay.serving,
+                pendingAudioDelaySeconds: audioDelay.pending,
+                subtitleDelaySeconds: subtitleDelaySeconds
+            )
+        )
+    }
+
+    /// The registered stream's continuation, `nil` when nobody asked.
     private var checkpoints: AsyncStream<StartupCheckpoint>.Continuation?
+
+    /// Every checkpoint, kept for `diagnosticReport()` whether or not a host
+    /// registered — five values a session, so keeping them is free.
+    private let startupRecord = StartupRecord()
 
     /// When `start()` was called — the zero every checkpoint's `elapsed` is
     /// measured from.
     private var startupReference: ContinuousClock.Instant?
 
     private func note(_ phase: StartupPhase) {
-        guard let checkpoints, let startupReference else { return }
-        checkpoints.yield(
-            StartupCheckpoint(phase: phase, elapsed: ContinuousClock.now - startupReference)
-        )
+        guard let startupReference else { return }
+        let mark = StartupCheckpoint(phase: phase, elapsed: ContinuousClock.now - startupReference)
+        startupRecord.append(mark)
+        checkpoints?.yield(mark)
     }
 
     /// The WebVTT subtitle renditions this session serves, in declaration order
@@ -1130,6 +1263,17 @@ public actor PrismCoreSession {
     /// waiting. A caller that bypasses the server and reads the work directory
     /// gets no such guarantee and must wait for the file itself.
     public func start(startupTimeout: Duration = .seconds(20)) async throws -> URL {
+        do {
+            return try await startServing(startupTimeout: startupTimeout)
+        } catch {
+            // Kept for `diagnosticReport()`: the host holds the error too,
+            // but a report taken later should not depend on it passing it in.
+            startupError = error
+            throw error
+        }
+    }
+
+    private func startServing(startupTimeout: Duration) async throws -> URL {
         precondition(!started, "PrismCoreSession is single-use — make a new one per load")
         started = true
         let reference = ContinuousClock.now
@@ -1146,15 +1290,15 @@ public actor PrismCoreSession {
 
         // The producer's sink is installed BEFORE the thread that calls it
         // exists — that ordering is what lets the remuxer read it without a
-        // lock on its own hot path (see `HLSRemuxer.onStartupPhase`). Left nil
-        // when nobody registered, so an unwatched session pays a nil check per
-        // stage and nothing else.
-        if let checkpoints {
-            remuxer.onStartupPhase = { phase in
-                checkpoints.yield(
-                    StartupCheckpoint(phase: phase, elapsed: ContinuousClock.now - reference)
-                )
-            }
+        // lock on its own hot path (see `HLSRemuxer.onStartupPhase`). Always
+        // installed since the diagnostic report keeps the stages too: a lock
+        // and an append per stage, five times a session.
+        let checkpoints = self.checkpoints
+        let record = startupRecord
+        remuxer.onStartupPhase = { phase in
+            let mark = StartupCheckpoint(phase: phase, elapsed: ContinuousClock.now - reference)
+            record.append(mark)
+            checkpoints?.yield(mark)
         }
 
         // The producer first, the listener second: the remux's opening move

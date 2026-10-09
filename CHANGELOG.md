@@ -8,6 +8,37 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **`PrismCoreSession.diagnosticReport()`**: one `Codable` snapshot of a
+  playback for a field report. It holds the build (`PrismCoreVersion.current`,
+  the FFmpeg libraries and any ABI mismatch, the platform), the source
+  (`SourceInfo` through an explicit DTO, the container layout without
+  keyframe timestamps), the routing verdict, the options, the startup
+  checkpoints with plan origin and the probe timings, and the run: the newest
+  64 playback events, timestamp repairs, audio rendition production, object
+  audio, Dolby Vision conversion, retention evictions, and the classified
+  failure with its retryability. `PrismCoreEngine.diagnosticReport(for:decision:)`
+  is the same report for a source that never got a session. `jsonData()`
+  writes sorted keys, and `schemaVersion` (1) only ever grows additively. The
+  session now keeps its startup checkpoints and the newest 64 playback events
+  even when no host subscribed, so a report taken after a failure still has
+  them.
+- The report withholds HTTP headers (only their count is kept), the URL's
+  query, fragment and credentials, the LAN access token, and every path on
+  disk (work directory, keyframe cache, sidecars; a local source is named by
+  file name only). Free-text error descriptions are scrubbed of the same
+  values, and any URL they quote — a redirect target included — loses its
+  credentials, query and fragment. Error descriptions and track titles and
+  languages, which the muxer wrote, also lose any absolute path — POSIX,
+  Windows drive or UNC — even one the session never knew or one glued to a
+  label by `:`.
+- `prismcore-cli probe --json` prints the report alone on stdout.
+  `serve --report FILE` and `segverify --report FILE` write it on every exit,
+  including a failed start.
+- `PrismCoreVersion.current` (`3.4.0`). A test fails while it disagrees with
+  the newest version heading here.
+
 ## [3.4.0] — 2026-10-07
 
 Audio renditions that re-encode are no longer produced for the whole film
