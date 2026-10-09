@@ -123,11 +123,14 @@ enum ProbeCommand {
 enum ServeCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var duration: Duration?
+        var keyframeCache: URL?
         var reportPath: String?
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
             switch flag {
             case "--for": duration = .seconds(try reader.number(for: flag))
+            case "--keyframe-cache":
+                keyframeCache = URL(fileURLWithPath: (try reader.value(for: flag) as NSString).expandingTildeInPath)
             case "--report": reportPath = try reader.value(for: flag)
             default: return false
             }
@@ -138,7 +141,8 @@ enum ServeCommand {
         // Once the URL is out, Ctrl-C is how a serve is *meant* to end, so it
         // exits 0; before that it interrupted a startup, and exits 130.
         let stop = StopSignal(watchStdin: true)
-        return try await withServedSession(reader.options, stop: stop, beforeStart: { session in
+        return try await withServedSession(
+            reader.options, stop: stop, keyframeIndexCacheDirectory: keyframeCache, beforeStart: { session in
             // Registered before `start()` so a throttle during the opening
             // reads is printed too; the stream ends with the session.
             let events = await session.playbackEvents()
@@ -168,6 +172,8 @@ enum ServeCommand {
         case .originThrottled(let retryAfter):
             return "origin throttled" + (retryAfter.map { ", retry after \(seconds($0))" } ?? "")
         case .originRecovered: return "origin recovered"
+        case .segmentPlanAvailable(let segments):
+            return "segment plan available (\(segments) segments) for a successor session"
         }
     }
 }

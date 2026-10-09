@@ -296,6 +296,8 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var stalledSeconds: Double?
             public var lastPTS: Double?
             public var retryAfterSeconds: Double?
+            /// The segment count of a plan a late index load stored.
+            public var segments: Int?
         }
 
         public struct TimestampRepairs: Sendable, Equatable, Codable {
@@ -690,6 +692,8 @@ extension SessionDiagnosticReport.Runtime.Event {
             (kind, retryAfterSeconds) = ("originThrottled", retryAfter.map(seconds))
         case .originRecovered:
             kind = "originRecovered"
+        case .segmentPlanAvailable(let segments):
+            (kind, self.segments) = ("segmentPlanAvailable", segments)
         }
     }
 }

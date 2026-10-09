@@ -40,6 +40,7 @@ struct PrismCoreCLI {
         probe:      --structure none|layout|full   (default layout)
                     --json                         the diagnostic report as JSON, alone on stdout
         serve:      --for SECONDS                  stop on its own after SECONDS
+                    --keyframe-cache DIR           persist keyframe maps (and load a late index)
                     --report FILE                  write the session's diagnostic report (JSON) on exit
         validate:   --require-validator            exit 69 when the validator is missing
                     --out DIR                      where the report goes (default ./prismcore-validation)

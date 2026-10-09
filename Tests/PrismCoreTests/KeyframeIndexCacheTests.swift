@@ -45,6 +45,19 @@ struct KeyframeIndexCacheTests {
         #expect(cache.lookup(identity: "http://nas/other.mkv|1|2") == nil)
     }
 
+    @Test("store reports a write the directory refused, and only that")
+    func storeReportsAFailedWrite() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let entry = KeyframeIndexCache.Entry(identity: "a", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000])
+        #expect(KeyframeIndexCache(directory: directory).store(entry))
+        // The cache path is a regular file: neither the directory nor the
+        // sidecar can be made under it.
+        let blocked = directory.appendingPathComponent("not-a-directory")
+        try Data("x".utf8).write(to: blocked)
+        #expect(!KeyframeIndexCache(directory: blocked).store(entry))
+    }
+
     @Test("The identity keeps the query and binds the version: only the same URL, size, duration and strong ETag match")
     func identityKeepsQuery() {
         func identity(

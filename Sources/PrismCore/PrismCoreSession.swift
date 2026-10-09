@@ -677,6 +677,7 @@ public actor PrismCoreSession {
         }
         let events = self.events
         provider.events = events
+        remuxer.events = events
         provider.stallReport = { [remuxer] waitingSince, threshold in
             remuxer.stallReport(waitingSince: waitingSince, threshold: threshold)
         }
@@ -1365,6 +1366,10 @@ public actor PrismCoreSession {
         }
         throw SessionError.startupTimedOut(underlying: remuxError)
     }
+
+    /// The background index load's thread, once the producer launched one
+    /// (`LateIndexLoader`). Test seam: `stop()` must bring it back too.
+    nonisolated var lateIndexLoadThread: ProducerThread? { remuxer.lateIndexLoadThread }
 
     /// Cancel the remux, stop serving, and remove the session's segments.
     ///

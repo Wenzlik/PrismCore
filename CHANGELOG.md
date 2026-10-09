@@ -39,6 +39,44 @@ source-compatible.)
 - `PrismCoreVersion.current` (`3.4.0`). A test fails while it disagrees with
   the newest version heading here.
 
+- **A first play that lost its index to the startup budget loads it in the
+  background.** A Matroska with Cues at the tail, behind a range proxy whose
+  one tail request can outlast `SegmentPlan.indexLoadBudget` (3 s), played the
+  whole first play sequentially, and the keyframe sidecar only learned the map
+  at EOF. The plan now records why it fell back to the uniform stride
+  (`budgetExpired`, `untrustedIndex`, `noIndex`); on an expired budget the
+  remuxer, once its first video segment is out, opens the source a second time
+  on its own `ProducerThread` with its own `ReadInterruptGuard` (installed
+  before the open, 60 s for open and index read, cancelled by `stop()`), reads
+  only the index, and stores it as a complete map when it passes the plan's
+  witnesses, reaches the end of the source, and the second open's identity
+  equals the producer's. `PlaybackEvent.segmentPlanAvailable(segments:)` then
+  tells the host that a successor session would plan from it; the running
+  session does not change.
+  - Started only where the result can be stored: coordinated HTTP with a strong
+    `ETag` and a `keyframeIndexCacheDirectory`. Without a version proof there
+    is no event either — a successor would face the same budget and most
+    likely play sequentially again, so the event would invite a restart for
+    nothing.
+  - Not started for a live / no-duration source, for a junk index, or when a
+    probe's `SourceStructure` positively reports no index. The second open
+    nudges only a container whose framing names its index (a SeekHead pointing
+    at Cues); a Cues-less Matroska or an MPEG-TS would turn the nudge into a
+    scan of the whole file, which the EOF harvest does for free.
+  - Bandwidth: the second open skips `avformat_find_stream_info` (it never
+    feeds a muxer) and its reader takes an origin slot only while nothing else
+    is in flight, the source prewarm's admission. On a tail-Cues Matroska it
+    costs the header block and the Cues read. Startup is untouched: nothing
+    starts before the first video segment.
+  - `prismcore-cli serve` takes `--keyframe-cache DIR`, as `bench` does, so the
+    late load and its event can be watched from a terminal.
+  - Considered and not done: adopting the map into the running session
+    (closing its EVENT playlist into a VOD one mid-play). The seam between
+    segments muxed from the head and re-anchored ones with absolute `tfdt`,
+    the EVENT playlist's cumulative `EXTINF` against the plan's keyframes, and
+    every rendition and subtitle playlist switching at the same boundary need
+    a device measurement before they can ship, even behind an option.
+
 ### Changed
 
 - **The keyframe sidecar is bound to a proven version of the source.** Its
