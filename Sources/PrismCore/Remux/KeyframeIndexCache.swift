@@ -213,7 +213,14 @@ struct KeyframeIndexCache: Sendable {
     /// and a partial one covering less than the stored partial does not
     /// replace it either: a short second play must not shrink what a longer
     /// first play learned.
-    func store(_ entry: Entry) {
+    ///
+    /// Returns whether the cache now holds, for this identity, an entry at
+    /// least as good as `entry` — `false` only when the write itself failed.
+    /// A caller that *promises* the map to a host (the late index load's
+    /// `.segmentPlanAvailable`) must not promise one an unwritable directory
+    /// swallowed: the successor it invites would miss and stay sequential.
+    @discardableResult
+    func store(_ entry: Entry) -> Bool {
         // The compare-and-write is one critical section: two sessions of the
         // same source ending together could both pass the check below and
         // the shorter one land last (review finding). Process-wide, since
@@ -221,15 +228,16 @@ struct KeyframeIndexCache: Sendable {
         Self.storeLock.lock()
         defer { Self.storeLock.unlock() }
         if !entry.complete, let existing = lookup(identity: entry.identity) {
-            if existing.complete { return }
-            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return }
+            if existing.complete { return true }
+            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
         }
-        guard let data = try? JSONEncoder().encode(entry) else { return }
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
         try? FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true
         )
-        try? data.write(to: fileURL(identity: entry.identity), options: .atomic)
+        do { try data.write(to: fileURL(identity: entry.identity), options: .atomic) } catch { return false }
         prune()
+        return true
     }
 
     private static let storeLock = NSLock()

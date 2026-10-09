@@ -76,12 +76,14 @@ final class LateIndexLoader: @unchecked Sendable {
     func start() {
         thread = ProducerThread(name: "cz.zmrhal.prismcore.late-index") { [self] in
             guard let (keyframes, segments) = load(), !interruptGuard.shouldInterrupt else { return }
-            cache.store(.init(
+            // Announce only what landed: a write the cache swallowed would
+            // send the host to a successor that misses and stays sequential.
+            guard cache.store(.init(
                 identity: target.identity,
                 timeBaseNum: target.timeBase.num,
                 timeBaseDen: target.timeBase.den,
                 keyframePTS: keyframes
-            ))
+            )) else { return }
             onStored(segments)
         }
     }
