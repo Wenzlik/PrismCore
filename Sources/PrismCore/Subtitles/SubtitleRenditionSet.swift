@@ -232,19 +232,45 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// cue an **embedded** stream produces — external files are skipped, the
     /// host handed those in and already owns their text.
     private var cueHandler: (@Sendable (TimedTextCue) -> Void)?
-    /// Everything delivered so far, so a handler registered after cues were
-    /// already produced starts complete instead of mid-film. Bounded by the
-    /// nature of the data: a subtitle track is a few thousand short strings.
-    private var emittedCues: [TimedTextCue] = []
+    /// How much of `emittedCues` survives (see `SubtitleCueHistory`). Fixed
+    /// at construction: a session is single-use, and a policy changed under
+    /// a history already pruned to the old one could promise a replay that
+    /// no longer exists.
+    private let historyPolicy: SubtitleCueHistory
+    /// One retained cue and the dedup key it was admitted under. Kept as a
+    /// pair because they must leave together: a key evicted without its cue
+    /// lets a re-demux deliver a duplicate, and a cue evicted without its
+    /// key leaves the key set growing for ever — the very memory the bound
+    /// exists to cap.
+    private struct HistoryEntry {
+        let key: String
+        let cue: TimedTextCue
+        let bytes: Int
+    }
+    /// Everything delivered so far (under `.bounded`, the newest of it), so a
+    /// handler registered after cues were already produced starts complete
+    /// instead of mid-film. Slots before `emittedStart` are evicted and
+    /// awaiting compaction — a FIFO without a dequeue type, so eviction does
+    /// not shift the whole array once per cue. An evicted slot is `nil`, not
+    /// the old entry: until compaction the dead prefix would otherwise still
+    /// own every evicted text and key, past the bound the stats report.
+    private var emittedCues: [HistoryEntry?] = []
+    private var emittedStart = 0
+    private var emittedBytes = 0
     /// Dedup for the demux revisiting a region (a demand-driven seek re-reads
     /// packets it already converted): the same source cue must not reach the
-    /// host twice, or a replay would double every line.
+    /// host twice, or a replay would double every line. Exactly the keys of
+    /// the retained entries.
     private var emittedKeys: Set<String> = []
+    private var evictedCues = 0
     /// Cues converted before the presentation origin was known — they can't
     /// be rebased onto the played timeline yet, so they wait for
     /// `setTimelineOrigin`. In practice subtitle packets follow the first
-    /// video keyframe, but "in practice" is not an ordering guarantee.
-    private var preOriginCues: [(streamIndex: Int32, cue: SubtitleCue)] = []
+    /// video keyframe, but "in practice" is not an ordering guarantee, so
+    /// under `.bounded` this queue is capped by the same limits.
+    private var preOriginCues: [(streamIndex: Int32, cue: SubtitleCue, bytes: Int)] = []
+    private var preOriginBytes = 0
+    private var droppedBeforeOrigin = 0
     private var timelineOriginSeconds: Double = 0
     /// Kept apart from the origin, and the cues it shifts are stored
     /// unshifted: the origin is a fact about the output (3.2.5 had to pin it
@@ -263,8 +289,28 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         lock.withLock { storedDelaySeconds = SubtitleDelay.normalized(seconds) }
     }
 
-    init(outputDirectory: URL) {
+    init(outputDirectory: URL, cueHistory: SubtitleCueHistory = .complete) {
         self.outputDirectory = outputDirectory
+        self.historyPolicy = cueHistory.normalized
+    }
+
+    /// The entries the history array actually still owns, evicted-but-
+    /// uncompacted slots included — what `historyStats` must not undercount.
+    var heldHistoryForTesting: (cues: Int, bytes: Int) {
+        lock.withLock {
+            let held = emittedCues.compactMap { $0 }
+            return (held.count, held.map(\.bytes).reduce(0, +))
+        }
+    }
+
+    /// What the cue tap holds and what it let go of.
+    var historyStats: SubtitleCueHistoryStats {
+        lock.withLock {
+            SubtitleCueHistoryStats(
+                retainedCues: emittedCues.count - emittedStart, retainedBytes: emittedBytes,
+                evictedCues: evictedCues, droppedBeforeOrigin: droppedBeforeOrigin
+            )
+        }
     }
 
     /// Renditions produced so far, in declaration order — what the caller feeds
@@ -668,12 +714,15 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         lock.withLock {
             timelineOriginSeconds = max(0, seconds)
             for pending in preOriginCues {
+                // Retained or not, the cue reaches the handler: the history
+                // bound limits the replay, never live delivery.
                 if let rebased = rebasedLocked(streamIndex: pending.streamIndex, pending.cue),
                    let delayed = rebased.delayed(by: storedDelaySeconds) {
                     toDeliver.append(delayed)
                 }
             }
             preOriginCues = []
+            preOriginBytes = 0
             handler = cueHandler
         }
         if let handler {
@@ -683,26 +732,29 @@ final class SubtitleRenditionSet: @unchecked Sendable {
 
     // MARK: - Host cue tap
 
-    /// Register (or clear) the host's cue sink. Everything already produced is
-    /// replayed to a new handler first, in production order — a host that
-    /// attaches after `start()` returned must not miss the opening dialogue.
+    /// Register (or clear) the host's cue sink. Everything already produced —
+    /// under `.bounded`, everything still retained — is replayed to a new
+    /// handler first, in production order: a host that attaches after
+    /// `start()` returned must not miss the opening dialogue.
     func setCueHandler(_ handler: (@Sendable (TimedTextCue) -> Void)?) {
         let replay: [TimedTextCue] = lock.withLock {
             cueHandler = handler
-            return handler != nil ? emittedCues.compactMap { $0.delayed(by: storedDelaySeconds) } : []
+            guard handler != nil else { return [] }
+            return emittedCues[emittedStart...].compactMap { $0?.cue.delayed(by: storedDelaySeconds) }
         }
         guard let handler else { return }
         for cue in replay { handler(cue) }
     }
 
     /// Rebase one produced cue onto the played timeline and hand it to the
-    /// host — or hold it until the origin exists.
-    private func emitHostCue(streamIndex: Int32, _ cue: SubtitleCue) {
+    /// host — or hold it until the origin exists. Internal, not private, so
+    /// the history bound can be driven with thousands of cues no fixture holds.
+    func emitHostCue(streamIndex: Int32, _ cue: SubtitleCue) {
         var toDeliver: TimedTextCue?
         var handler: (@Sendable (TimedTextCue) -> Void)?
         lock.withLock {
             guard originSet else {
-                preOriginCues.append((streamIndex, cue))
+                enqueuePreOriginLocked(streamIndex: streamIndex, cue)
                 return
             }
             toDeliver = rebasedLocked(streamIndex: streamIndex, cue)?.delayed(by: storedDelaySeconds)
@@ -718,13 +770,84 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         let start = Swift.max(0, cue.start - timelineOriginSeconds)
         let end = cue.end - timelineOriginSeconds
         guard end > start else { return nil }
-        let key = "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
-        guard emittedKeys.insert(key).inserted else { return nil }
+        let key = Self.historyKey(streamIndex: streamIndex, cue)
+        guard !emittedKeys.contains(key) else { return nil }
         let rebased = TimedTextCue(
             streamIndex: streamIndex, start: start, end: end, text: cue.text, placement: cue.placement
         )
-        emittedCues.append(rebased)
+        retainLocked(HistoryEntry(key: key, cue: rebased, bytes: Self.historyBytes(key: key, text: cue.text)))
         return rebased
+    }
+
+    /// The dedup identity of a produced cue: its source, not its rebased,
+    /// times — so it is known before the origin is, and the pre-origin queue
+    /// can be charged the same bytes the history will be.
+    private static func historyKey(streamIndex: Int32, _ cue: SubtitleCue) -> String {
+        "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+    }
+
+    /// What a cue costs the history: its text plus its key, both as UTF-8 —
+    /// the key holds a second copy of the text, and leaving it out would let
+    /// the real footprint run to twice the bound.
+    private static func historyBytes(key: String, text: String) -> Int {
+        key.utf8.count + text.utf8.count
+    }
+
+    /// Admit one deduplicated cue to the history, evicting the oldest under
+    /// `.bounded`. Caller holds `lock`.
+    private func retainLocked(_ entry: HistoryEntry) {
+        guard case .bounded(let maxCues, let maxBytes) = historyPolicy else {
+            emittedCues.append(entry)
+            emittedKeys.insert(entry.key)
+            emittedBytes += entry.bytes
+            return
+        }
+        // Delivered live by the caller, never kept: retaining it would evict
+        // the whole window and still not fit.
+        guard entry.bytes <= maxBytes else {
+            evictedCues += 1
+            return
+        }
+        while emittedCues.count - emittedStart >= maxCues || emittedBytes + entry.bytes > maxBytes {
+            // Every slot from `emittedStart` on is live; release it now.
+            guard let oldest = emittedCues[emittedStart] else { break }
+            emittedCues[emittedStart] = nil
+            emittedKeys.remove(oldest.key)
+            emittedBytes -= oldest.bytes
+            emittedStart += 1
+            evictedCues += 1
+        }
+        // Compact once the dead prefix outweighs the live window, so the
+        // array stays within twice the bound and eviction stays amortised O(1).
+        if emittedStart > 0, emittedStart >= emittedCues.count - emittedStart {
+            emittedCues.removeFirst(emittedStart)
+            emittedStart = 0
+        }
+        emittedCues.append(entry)
+        emittedKeys.insert(entry.key)
+        emittedBytes += entry.bytes
+    }
+
+    /// Hold a cue until the origin exists, dropping the oldest held under
+    /// `.bounded` — these were never delivered, so every drop is counted.
+    /// Caller holds `lock`.
+    private func enqueuePreOriginLocked(streamIndex: Int32, _ cue: SubtitleCue) {
+        let bytes = Self.historyBytes(key: Self.historyKey(streamIndex: streamIndex, cue), text: cue.text)
+        if case .bounded(let maxCues, let maxBytes) = historyPolicy {
+            // No origin, so it cannot be delivered live either.
+            guard bytes <= maxBytes else {
+                droppedBeforeOrigin += 1
+                return
+            }
+            // removeFirst is O(n); the queue is empty in practice
+            // (subtitles follow the first keyframe), a head index if not.
+            while preOriginCues.count >= maxCues || preOriginBytes + bytes > maxBytes {
+                preOriginBytes -= preOriginCues.removeFirst().bytes
+                droppedBeforeOrigin += 1
+            }
+        }
+        preOriginCues.append((streamIndex, cue, bytes))
+        preOriginBytes += bytes
     }
 
     // MARK: - Production

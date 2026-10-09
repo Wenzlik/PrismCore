@@ -116,6 +116,16 @@ public protocol CancellablePrismCoreInput: PrismCoreInput {
 /// producer's sequential read and a scrub preview's seek would interleave into
 /// garbage, intermittently, on exactly the sources hardest to debug. A factory
 /// makes a shared cursor impossible to express by accident.
+///
+/// **It can be called again in the middle of playback.** A planned session
+/// whose read fails mid-film re-opens its source rather than ending (see
+/// `PlaybackEvent.producerRecovered`), and a re-open is an open: one more
+/// call, up to three a minute, for an instance that starts at byte zero. The
+/// previous instance is released first. So the factory must be callable at
+/// any time from any thread, must hand out an instance that reads the same
+/// bytes as the first one did, and should reconnect rather than return the
+/// broken transport the last instance was using — a factory that hands back
+/// the dead session turns every recovery into a failed one.
 public typealias PrismCoreInputFactory = @Sendable () throws -> any PrismCoreInput
 
 public enum PrismCoreInputError: Error {

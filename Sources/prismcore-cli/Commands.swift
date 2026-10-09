@@ -7,8 +7,10 @@ import PrismCore
 enum ProbeCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var structure = SourceStructureExport.layout
+        var json = false
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
+            if flag == "--json" { json = true; return true }
             guard flag == "--structure" else { return false }
             switch try reader.value(for: flag) {
             case "none": structure = .none
@@ -32,19 +34,31 @@ enum ProbeCommand {
         } catch {
             throw CLIFailure(code: .probeFailed, message: "probe failed: \(PrismCoreError.classify(error))")
         }
+        let decision = Result { try PrismCoreEngine.decide(for: probed.info) }
+        if json {
+            // The report and nothing else on stdout, so it pipes straight
+            // into a parser; a decline is still a verdict and still exits 0.
+            print(try jsonReport(probed, decision: decision))
+            return .ok
+        }
         print(render(probed.info))
         print(render(probed.structure))
         print(StartupCheckpointRun.probeLine(probed.timing))
         print("audio bridge (EAC3 encoder) in this build: \(PrismCoreEngine.isAudioBridgeAvailable ? "yes" : "no")")
         // The verdict is the answer a probe exists for, so a decline is
         // printed as a verdict and exits 0 — the probe itself worked.
-        do {
-            let decision = try PrismCoreEngine.decide(for: probed.info)
-            print("verdict: \(decision.engine.rawValue) — \(decision.reason)")
-        } catch {
-            print("verdict: decline — \(error)")
+        switch decision {
+        case .success(let decision): print("verdict: \(decision.engine.rawValue) — \(decision.reason)")
+        case .failure(let error): print("verdict: decline — \(error)")
         }
         return .ok
+    }
+
+    static func jsonReport(
+        _ probed: ProbedSource, decision: Result<PrismCoreEngine.Decision, any Error>
+    ) throws -> String {
+        let data = try PrismCoreEngine.diagnosticReport(for: probed, decision: decision).jsonData()
+        return String(decoding: data, as: UTF8.self)
     }
 
     static func render(_ info: SourceInfo) -> String {
@@ -109,10 +123,17 @@ enum ProbeCommand {
 enum ServeCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var duration: Duration?
+        var keyframeCache: URL?
+        var reportPath: String?
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
-            guard flag == "--for" else { return false }
-            duration = .seconds(try reader.number(for: flag))
+            switch flag {
+            case "--for": duration = .seconds(try reader.number(for: flag))
+            case "--keyframe-cache":
+                keyframeCache = URL(fileURLWithPath: (try reader.value(for: flag) as NSString).expandingTildeInPath)
+            case "--report": reportPath = try reader.value(for: flag)
+            default: return false
+            }
             return true
         }
         // Armed before the probe: a Ctrl-C during a slow open should still
@@ -120,11 +141,14 @@ enum ServeCommand {
         // Once the URL is out, Ctrl-C is how a serve is *meant* to end, so it
         // exits 0; before that it interrupted a startup, and exits 130.
         let stop = StopSignal(watchStdin: true)
-        return try await withServedSession(reader.options, stop: stop, beforeStart: { session in
+        return try await withServedSession(
+            reader.options, stop: stop, keyframeIndexCacheDirectory: keyframeCache, beforeStart: { session in
             // Registered before `start()` so a throttle during the opening
             // reads is printed too; the stream ends with the session.
             let events = await session.playbackEvents()
             Task { for await event in events { print("event: \(describe(event))") } }
+        }, afterStop: { session in
+            if let reportPath { await writeReport(of: session, to: reportPath) }
         }) { playlist in
             print("serving: \(playlist.absoluteString)")
             print("open it in Safari or QuickTime Player; Enter or Ctrl-C stops the session")
@@ -148,6 +172,12 @@ enum ServeCommand {
         case .originThrottled(let retryAfter):
             return "origin throttled" + (retryAfter.map { ", retry after \(seconds($0))" } ?? "")
         case .originRecovered: return "origin recovered"
+        case .producerRecovered(let attempt, let cause):
+            return "producer recovered (attempt \(attempt)) from: \(cause)"
+        case .producerFailed(let failure):
+            return "producer failed (\(failure.retryability)): \(failure)"
+        case .segmentPlanAvailable(let segments):
+            return "segment plan available (\(segments) segments) for a successor session"
         }
     }
 }
@@ -218,16 +248,21 @@ enum SegVerifyCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var limit: Int?
         var alreadyHLS = false
+        var reportPath: String?
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
             switch flag {
             case "--limit": limit = try reader.number(for: flag)
             case "--hls": alreadyHLS = true
+            case "--report": reportPath = try reader.value(for: flag)
             default: return false
             }
             return true
         }
         let options = reader.options
+        if alreadyHLS, reportPath != nil {
+            throw reader.usage("--report describes a remux session; --hls verifies without one")
+        }
         let stop = StopSignal(watchStdin: false)
         // `-H` belongs to whatever the source URL is: the origin under a
         // remux, the HLS presentation itself under --hls. The playlist a
@@ -247,7 +282,11 @@ enum SegVerifyCommand {
             report = try await verify(options.source!)
         } else {
             report = try await withServedSession(
-                options, stop: stop, beforeStop: { repairs = await $0.timestampRepairs }, verify
+                options, stop: stop, beforeStop: { repairs = await $0.timestampRepairs },
+                afterStop: { session in
+                    if let reportPath { await writeReport(of: session, to: reportPath) }
+                },
+                verify
             )
         }
 

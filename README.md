@@ -74,7 +74,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 | Chapters | Matroska `Chapters` / MP4 chapter tracks reported as `SourceInfo.chapters` and `PrismCoreSession.chapters` (title + start/end seconds) — HLS cannot carry them, so they are the host's to draw as timeline markers and skip controls |
 | Display | tvOS HDMI handshake driven by the engine: `preferredDisplayCriteria` programmed and settled **before** the item is loaded, which is the only ordering tvOS accepts for HDR HLS |
 | Scrub previews | `SeekPreviewService` decodes the keyframe covering any position into a `CGImage` for a custom player HUD — its own context, CPU-only, cached per keyframe, and independent of which engine is playing. The trick-play answer for sources with no server-generated previews |
-| Streaming | HTTP headers ride the demux connection (a Plex token, a WebDAV authorization), reconnect on dropped connections |
+| Streaming | HTTP headers ride the demux connection (a Plex token, a WebDAV authorization), reconnect on dropped connections. A planned session whose source fails mid-film re-opens it and carries on from the segment it was producing (up to three times a minute; see *When the source fails mid-film*) |
 | Custom input | A host that holds the bytes itself — an SMB mount through its own client, a debrid/torrent session, an encrypted store, a file inside a disc image — implements `PrismCoreInput` (`read` / `seek` / `length`) and passes a factory as `input:` to the session, the probe or `SeekPreviewService`. One instance per open, so the probe, the producer and a scrub preview never share a cursor; host errors surface as `PrismCoreInputError`. An input with no `length` is refused (`.notSeekable`) rather than serving a plan it cannot honour. Omit it and the engine reads exactly as before |
 
 ## Quick start
@@ -196,6 +196,45 @@ the remux path a switch also costs a rendition fetch.
   changes. A preferred track this build can neither copy nor bridge is passed
   over, because a rendition AVPlayer cannot play is worse than the wrong
   language.
+
+### How much of the cue tap a session remembers
+
+`setTimedTextCueHandler` streams every embedded cue (text, OCR'd bitmap,
+CEA-608) as the remux produces it, and a handler registered late — or again,
+to pick up a new `setSubtitleDelaySeconds` — is first replayed everything
+produced so far. That replay means the session keeps every cue, and its dedup
+key, for its whole lifetime. For a film that is a few thousand short strings;
+for a long captioned stream, or a disc with many OCR'd tracks, it grows with
+the text. A host that only draws a running overlay can bound it:
+
+```swift
+let session = try PrismCoreSession(
+    url: mkvURL,
+    display: .current(),
+    subtitleCueHistory: .bounded(maxCues: 1_024, maxBytes: 1 << 20)
+)
+let history = session.subtitleCueHistoryStats  // retained cues/bytes, evictions
+```
+
+- **`.complete` is the default** and changes nothing.
+- **Live delivery is never bounded.** Only the replay is: a late handler gets
+  the newest retained cues, with the delay in force now.
+- **The byte bound is UTF-8** of each cue's text *plus* its dedup key (stream,
+  source times, text), so a cue costs a little over twice its text. The oldest
+  cue leaves together with its key.
+- **Dedup covers the retained window only.** Seek back far enough that a
+  region's cues were evicted and they are delivered again — a host opting in
+  must tolerate a repeated cue.
+- **A single cue larger than `maxBytes`** is delivered live and never
+  retained. Cues produced before the presentation origin is known wait in a
+  queue bounded the same way; anything it drops was never delivered.
+- **Nothing is dropped silently**: `evictedCues` counts what is no longer
+  replayable, `droppedBeforeOrigin` what never went out.
+- Both limits are clamped to at least 1, and `Options.subtitleCueHistory`
+  reads back the bound in force. The policy rides `makeSession(changing:)` and
+  both rejection fallbacks. It bounds the cue tap's history, not every byte of
+  subtitle memory: WebVTT renditions are produced as before, and the software
+  path has its own cache (below).
 
 ### Software track menus and captions
 
@@ -326,6 +365,84 @@ vanished mid-session are both `originUnreachable`, because the evidence at the
 failure site is identical — the host knows which it was from whether `start()`
 had returned.
 
+For a bug report, `await session.diagnosticReport()` gathers the rest in one
+`Codable` value: PrismCore and FFmpeg versions (with any ABI mismatch), the
+platform, the source's description and container layout, the routing verdict
+and its reason, the session's options, every startup checkpoint with its time
+and the plan origin (planned or sequential), the probe's phase timings, and
+the run so far: the newest 64 playback events, timestamp repairs, audio
+rendition production, the object-audio and Dolby Vision conversion findings,
+retention evictions and the classified failure. The session keeps the
+checkpoints and events itself, so the report has them even if the host never
+subscribed. A source that never got a session (declined, or sent to the
+software path) gets the same report from its probe:
+`PrismCoreEngine.diagnosticReport(for: probed, decision: Result { try
+PrismCoreEngine.decide(for: probed.info) })`. `jsonData()` writes it with
+sorted keys, so two reports diff line by line. `schemaVersion` names the shape,
+and fields are only ever added.
+
+**What a report leaves out.** It is built to be pasted into a public issue, so it
+never carries HTTP headers (only how many there were), the URL's query string,
+fragment or `user:password@`, the LAN access token, or any path on the
+device's disk: the work directory, `keyframeIndexCacheDirectory` (reported as
+on or off) and sidecar subtitle files are all left out, and a local source is
+named by its file name alone. Error descriptions are also scrubbed of every one
+of those values, because an error can quote the failing URL — and any URL it
+quotes, a redirect target included, loses its credentials, query and fragment
+too. Two things do stay
+in: a remote URL's host and path, which are what a reproduction needs, and the
+track titles, languages and file name the media itself carries. A host whose
+URLs keep a token in the *path* should cut it before sharing.
+
+### When the source fails mid-film
+
+A read that fails after `start()` — a Wi-Fi roam, a host range proxy
+restarting, a 5xx from a media server, a share that blinked — no longer has to
+end the session. In a **planned** session (one with a keyframe plan, which is
+what makes seeking demand-driven) the producer closes the source, waits, opens
+it again exactly the way startup does (`avformat_find_stream_info` included),
+checks that the streams are the same ones (index, codec, time base), and
+re-anchors at the segment it was producing. The partial fragment is dropped and
+that segment is produced again from its keyframe, as for a seek; the timeline,
+the init segment and every rendition — a lazy one already armed included —
+carry on. Fetches that arrive meanwhile are held the way a seek holds them, so
+AVPlayer sees a slow segment, not an error.
+
+- **What is retried**: failures whose `retryability` is `.retryable` (429/503/
+  509, a 5xx, a dropped connection) and `.unknown` (how a host input's own
+  error arrives). `.permanent` ones (404, 403 and the other 4xx) are not: the
+  same request gets the same answer. An `.unknown` failure that recurs right
+  after a successful re-open, before a segment has landed, is not retried
+  either — the source is reachable and the bytes still do not read.
+- **How often**: after 1, 2 and 4 s, and **at most three re-opens in any 60 s**,
+  whatever the classification. `stop()` ends a backoff or a re-open at once.
+- **A demuxer that skips instead of failing is caught too.** Matroska resyncs
+  to the next cluster after a failed read and reports success with a hole
+  behind it; a planned session reads the failure off the I/O context on every
+  packet and repairs the hole instead of serving it.
+- **Sequential sessions** (no plan: a live source, a Matroska whose index did
+  not load) behave as before: the failure ends the remux and the playlist
+  stays valid up to the last segment written.
+- **A host `PrismCoreInput` factory is called again** for each re-open — see
+  `PrismCoreInputFactory`: it must hand out a fresh instance over the same
+  bytes, from any thread, at any time.
+
+`playbackEvents()` reports both outcomes:
+
+```swift
+for await event in session.playbackEvents() {
+    switch event {
+    case .producerRecovered(let attempt, let cause): log("reconnected (\(attempt)/3) after \(cause)")
+    case .producerFailed(let failure):               showError(failure)   // == session.remuxFailure
+    default: break
+    }
+}
+```
+
+`producerFailed` is sent exactly once per session that fails — mid-film or at
+startup, planned or sequential — and never for a `stop()`; `remuxFailure` is
+already set when it arrives. `prismcore-cli serve` prints both.
+
 ## How it works
 
 ```
@@ -360,10 +477,44 @@ turns those fragments into a playlist. Two production modes exist:
 A source whose container carries no usable index (a Matroska without Cues, any
 MPEG-TS) is stuck sequential on its first play — but the producer reads every
 packet anyway, so with `keyframeIndexCacheDirectory` set on the session it
-harvests the keyframe map as a by-product and persists it (keyed by URL sans
-query + size + duration; bounded LRU). The next play of the same source plans
-on that map from its first second, as if the file had an index — and a cache
-hit skips the index-load seek entirely.
+harvests the keyframe map as a by-product and persists it (bounded LRU). The
+next play of the same source plans on that map from its first second, as if the
+file had an index — and a cache hit skips the index-load seek entirely.
+
+A map is only as good as the proof that the file has not changed under it, so
+each one is bound to an identity: the full URL **including its query** (a query
+can select the media, not only carry a token), the byte size, the container
+duration, and the version the open actually read — a local file's mtime, or the
+**strong `ETag`** a remote origin reported through the coordinated HTTP reader
+(`coordinatedHTTP`), together with the URL that served it — after a redirect,
+the target, since a tag is only unique per resource. Only a SHA-256 digest of that is written; the URL and any
+token in it never reach the disk. The scrub preview (`SeekPreviewService`)
+derives the same identity from its own open. A remote source that cannot prove
+its version neither uses a stored map nor stores one, and plans from the source
+every time: an origin or proxy with no `ETag`, only a weak `W/` one, or only
+`Last-Modified`; FFmpeg's own HTTP; and a host `PrismCoreInput` on a non-`file:`
+URL. A file replaced on the server under the same URL (new strong `ETag`), or a
+rotated query token, costs one rebuild rather than a wrong map. Sidecars written by
+3.4.0 and earlier are ignored and rebuilt once.
+
+A source that **has** an index can still play its first play sequentially:
+`SegmentPlan.indexLoadBudget` (3 s) bounds the index-load seek, and behind a
+range proxy one tail request for Matroska Cues can take longer than that on
+its own. When the plan fell back **because the budget ran out** (not for a junk
+or missing index), the session reads the index again in the background once its
+first video segment is out — a second open with its own interrupt guard and a
+60 s budget, cancelled by `stop()`, whose reader takes the origin only while
+the producer has nothing in flight. If that open proves it read the same
+version (the identity above is equal) and the index reaches the end of the
+source, the map is stored as complete right away rather than at EOF, and the
+session reports `PlaybackEvent.segmentPlanAvailable(segments:)`. The running
+session stays sequential; a successor (`makeSession(changing:)` with the same
+cache directory, then a seek to the current time) plans as VOD from the map.
+This runs only where the map can be stored — over `coordinatedHTTP` with a
+strong `ETag` and a `keyframeIndexCacheDirectory` — and only for a container
+whose framing names where its index is (a Matroska SeekHead pointing at its
+Cues); anywhere else the second read would be a scan of the whole file, and the
+EOF harvest gets that map for free.
 
 ### Sequential sessions: EVENT or a sliding window
 
@@ -691,11 +842,15 @@ link) that runs the engine on one source from the command line:
 
 ```
 swift run prismcore-cli probe     <url-or-path>   # SourceInfo, structure, routing verdict + reason
+                                                  # (--json: the diagnostic report, alone on stdout)
 swift run prismcore-cli serve     <url-or-path>   # loopback playlist URL for Safari / QuickTime
 swift run prismcore-cli bench     <url-or-path>   # the startup checkpoint line a host logs
 swift run prismcore-cli segverify <url-or-path>   # decode every served segment on its own
 swift run prismcore-cli validate  <url-or-path>   # Apple's mediastreamvalidator, if installed
 ```
+
+`serve` and `segverify` take `--report FILE` and write the session's diagnostic
+report there on exit, a failed start included.
 
 `validate` is opt-in. It needs Apple's HTTP Live Streaming Tools, and without
 them it prints a notice and exits 0 (unless you pass `--require-validator`).

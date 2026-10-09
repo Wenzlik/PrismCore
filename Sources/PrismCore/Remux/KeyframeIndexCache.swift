@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Libavformat
 
 /// A cross-session sidecar cache of a source's video keyframe timestamps
 /// (issue #34).
@@ -15,18 +17,131 @@ import Foundation
 /// second, as if the file had Cues. A cache hit also skips the index-load
 /// nudge seek entirely, which is a startup win even for well-indexed files.
 ///
-/// Entries are keyed by a stable identity — URL (query stripped: a Plex
-/// token rotates without the media changing), byte size, container duration,
-/// and, for local files, mtime. The identity string is stored *inside* the
-/// entry and checked on lookup, so the filename hash never has to be
-/// collision-free; a mismatch is simply a miss. Storage is bounded LRU by
-/// entry count (a read refreshes the file's mtime), and an entry that no
-/// longer matches its source invalidates itself by never matching again.
+/// Entries are keyed by an `Identity`: the full URL, byte size, container
+/// duration and a `SourceVersion` — a local file's mtime, or a remote
+/// origin's strong `ETag`. A remote source with no strong `ETag` has no
+/// identity at all and never touches the sidecar (see `Identity`). Only a
+/// SHA-256 digest of all that is written, inside the entry and checked on
+/// lookup, so the filename hash never has to be collision-free and a token in
+/// the URL never lands on disk; a mismatch is simply a miss. Storage is
+/// bounded LRU by entry count (a read refreshes the file's mtime), and an
+/// entry that no longer matches its source invalidates itself by never
+/// matching again.
 struct KeyframeIndexCache: Sendable {
 
+    /// The sidecar layout an entry was written in. 2 = keyed by
+    /// `Identity.key`; entries before it (no field) were keyed by a readable
+    /// URL with the query stripped and no version proof, and are misses —
+    /// their key could not match anyway, this says so without relying on it.
+    static let formatVersion = 2
+
+    /// What vouches that the bytes behind an address are the ones a map was
+    /// learned from. Deliberately only two kinds: anything weaker — a weak
+    /// `ETag` (equivalent content, not the same bytes), a `Last-Modified`
+    /// date (one-second resolution: a file replaced within the second keeps
+    /// it) or nothing at all — is no proof, and a map trusted on it plans
+    /// segment cuts and scrub frames from keyframes a replaced file no longer
+    /// has.
+    enum SourceVersion: Equatable, Sendable {
+        /// A local file's modification time.
+        case fileModified(TimeInterval)
+        /// The strong `ETag` an origin reported on the open that read the
+        /// bytes (`ReadInterruptGuard.openedStrongETag`), and the URL whose
+        /// response carried it. A tag is unique per resource only, and after
+        /// a redirect that resource is the target, which the host's URL does
+        /// not name: an address that redirects elsewhere on the next open
+        /// can meet the same tag on a different file.
+        case strongETag(String, servedBy: URL)
+
+        /// The version an opened source can prove, or `nil`.
+        ///
+        /// A `file:` URL proves its version by the file's mtime — whichever
+        /// reader delivered the bytes, the URL names a file this machine can
+        /// stat, which is what local identity always meant. Every other URL
+        /// needs the strong `ETag` the coordinated reader saw; FFmpeg's own
+        /// HTTP and a host-supplied input report none, so they plan from the
+        /// source every time rather than on a map nothing can bind to it.
+        static func observed(sourceURL: URL, strongETag: (tag: String, url: URL)?) -> SourceVersion? {
+            if sourceURL.isFileURL {
+                return ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path))?[
+                    .modificationDate
+                ] as? Date).map { .fileModified($0.timeIntervalSince1970) }
+            }
+            return strongETag.map { .strongETag($0.tag, servedBy: $0.url) }
+        }
+    }
+
+    /// The stable identity of one version of one source.
+    ///
+    /// Its own value with a plain constructor, not a string assembled inside
+    /// the remuxer, so that any independent open of the same source — the
+    /// scrub preview's today — derives it the same way, and two opens can
+    /// prove they read the same version by comparing two of these.
+    struct Identity: Equatable, Sendable {
+        /// Hex SHA-256 over every field, prefixed by the format. The only
+        /// form ever written: the URL keeps its query (a query can select the
+        /// media, not only carry a token), so the clear text may hold a
+        /// credential.
+        let key: String
+
+        /// - Parameters:
+        ///   - sourceURL: the address as the host gave it, query included.
+        ///     A strong `ETag` is only unique per resource, so it never
+        ///     stands without the URL it came from.
+        ///   - sizeBytes / durationMicroseconds: from the opened context —
+        ///     the transport's own size, the container's duration.
+        init(
+            sourceURL: URL, sizeBytes: Int64, durationMicroseconds: Int64,
+            version: SourceVersion
+        ) {
+            let proof: String = switch version {
+            case .fileModified(let mtime): "mtime:\(mtime)"
+            case .strongETag(let tag, let servedBy): "etag:\(servedBy.absoluteString)\u{0}\(tag)"
+            }
+            // NUL-separated: no URL, number or ETag contains one, so two
+            // different field lists cannot run together into one digest (a
+            // proof's own NUL count is fixed by its kind).
+            let canonical = [
+                "v\(KeyframeIndexCache.formatVersion)",
+                sourceURL.absoluteString,
+                String(sizeBytes),
+                // Whole seconds: the byte size already pins the bits, and the
+                // sub-second part of a container duration is demuxer
+                // arithmetic a caller reconstructing the identity shouldn't
+                // have to match.
+                String(durationMicroseconds / 1_000_000),
+                proof,
+            ].joined(separator: "\u{0}")
+            key = SHA256.hash(data: Data(canonical.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        }
+
+        /// The identity of the source `context` was opened on, or `nil` when
+        /// nothing vouches for its version (`SourceVersion.observed`) — the
+        /// caller then neither looks up nor stores, and plans from the source.
+        init?(
+            opened context: UnsafeMutablePointer<AVFormatContext>, sourceURL: URL,
+            interruptGuard: ReadInterruptGuard
+        ) {
+            guard let version = SourceVersion.observed(
+                sourceURL: sourceURL, strongETag: interruptGuard.openedStrongETag
+            ) else { return nil }
+            self.init(
+                sourceURL: sourceURL,
+                sizeBytes: context.pointee.pb.map { avio_size($0) } ?? -1,
+                durationMicroseconds: context.pointee.duration,
+                version: version
+            )
+        }
+    }
+
     struct Entry: Codable, Equatable {
-        /// The full identity the entry was stored under — the collision guard.
+        /// The `Identity.key` the entry was stored under — the collision
+        /// guard.
         var identity: String
+        /// `KeyframeIndexCache.formatVersion` at write time; anything else is
+        /// a miss.
+        var format: Int = KeyframeIndexCache.formatVersion
         /// The video stream's time base the PTS values live on. Checked on
         /// use: the same file demuxes to the same base, so a mismatch means
         /// the identity lied (or the demuxer changed) and the entry is junk.
@@ -47,6 +162,7 @@ struct KeyframeIndexCache: Sendable {
             complete: Bool = true, coveredThroughPTS: Int64? = nil
         ) {
             self.identity = identity
+            self.format = KeyframeIndexCache.formatVersion
             self.timeBaseNum = timeBaseNum
             self.timeBaseDen = timeBaseDen
             self.keyframePTS = keyframePTS
@@ -59,6 +175,8 @@ struct KeyframeIndexCache: Sendable {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             identity = try container.decode(String.self, forKey: .identity)
+            // Absent = written before the field existed (format 1).
+            format = try container.decodeIfPresent(Int.self, forKey: .format) ?? 1
             timeBaseNum = try container.decode(Int32.self, forKey: .timeBaseNum)
             timeBaseDen = try container.decode(Int32.self, forKey: .timeBaseDen)
             keyframePTS = try container.decode([Int64].self, forKey: .keyframePTS)
@@ -72,44 +190,13 @@ struct KeyframeIndexCache: Sendable {
     /// is ~2200 numbers), so the bound is about hygiene, not disk pressure.
     var maxEntries: Int = 64
 
-    /// The stable identity of a source, as seen from an OPENED context.
-    ///
-    /// The URL loses its query — session tokens rotate per play while the
-    /// media stays the same — and gains the byte size and container duration,
-    /// which together pin the actual bits closely enough that a same-path
-    /// re-encode misses. Local files add mtime, the cheap signal a same-size
-    /// in-place edit would otherwise dodge.
-    static func identity(
-        sourceURL: URL,
-        sizeBytes: Int64,
-        durationMicroseconds: Int64
-    ) -> String {
-        var components = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false)
-        components?.query = nil
-        var parts = [
-            components?.url?.absoluteString ?? sourceURL.absoluteString,
-            String(sizeBytes),
-            // Whole seconds: the byte size already pins the bits, and the
-            // sub-second part of a container duration is demuxer arithmetic
-            // a caller reconstructing the identity shouldn't have to match.
-            String(durationMicroseconds / 1_000_000),
-        ]
-        if sourceURL.isFileURL,
-           let mtime = (try? FileManager.default.attributesOfItem(
-               atPath: sourceURL.path
-           ))?[.modificationDate] as? Date {
-            parts.append(String(mtime.timeIntervalSince1970))
-        }
-        return parts.joined(separator: "|")
-    }
-
     /// The stored entry for `identity`, or nil. A hit refreshes the entry's
     /// LRU position.
     func lookup(identity: String) -> Entry? {
         let url = fileURL(identity: identity)
         guard let data = try? Data(contentsOf: url),
               let entry = try? JSONDecoder().decode(Entry.self, from: data),
-              entry.identity == identity
+              entry.identity == identity, entry.format == Self.formatVersion
         else { return nil }
         try? FileManager.default.setAttributes(
             [.modificationDate: Date()], ofItemAtPath: url.path
@@ -126,7 +213,14 @@ struct KeyframeIndexCache: Sendable {
     /// and a partial one covering less than the stored partial does not
     /// replace it either: a short second play must not shrink what a longer
     /// first play learned.
-    func store(_ entry: Entry) {
+    ///
+    /// Returns whether the cache now holds, for this identity, an entry at
+    /// least as good as `entry` — `false` only when the write itself failed.
+    /// A caller that *promises* the map to a host (the late index load's
+    /// `.segmentPlanAvailable`) must not promise one an unwritable directory
+    /// swallowed: the successor it invites would miss and stay sequential.
+    @discardableResult
+    func store(_ entry: Entry) -> Bool {
         // The compare-and-write is one critical section: two sessions of the
         // same source ending together could both pass the check below and
         // the shorter one land last (review finding). Process-wide, since
@@ -134,15 +228,16 @@ struct KeyframeIndexCache: Sendable {
         Self.storeLock.lock()
         defer { Self.storeLock.unlock() }
         if !entry.complete, let existing = lookup(identity: entry.identity) {
-            if existing.complete { return }
-            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return }
+            if existing.complete { return true }
+            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
         }
-        guard let data = try? JSONEncoder().encode(entry) else { return }
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
         try? FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true
         )
-        try? data.write(to: fileURL(identity: entry.identity), options: .atomic)
+        do { try data.write(to: fileURL(identity: entry.identity), options: .atomic) } catch { return false }
         prune()
+        return true
     }
 
     private static let storeLock = NSLock()

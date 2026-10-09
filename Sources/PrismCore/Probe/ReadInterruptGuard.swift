@@ -79,6 +79,25 @@ final class ReadInterruptGuard: @unchecked Sendable {
         input?.cancelInFlightOperation()
     }
 
+    /// Let go of the host input, once its context is closed — and only then:
+    /// the avio callbacks hold it unretained.
+    ///
+    /// For a re-open, which must not wait for the guard itself to go. The
+    /// retired guard outlives its context (the remuxer's variable until the
+    /// new open succeeds, and an adopted context's `ProbedSource` for the
+    /// whole run), and a host input that gives back a connection slot in its
+    /// `deinit` would otherwise still hold it while the factory is asked for
+    /// the next one — a factory that hands out one slot then fails every
+    /// re-open of a source that has long since come back. The coordinated
+    /// HTTP input stays: it has no factory to starve, and `ProbedSource`
+    /// still reports from it (`prewarm`).
+    func releaseHostInput() {
+        lock.withLock {
+            customInput = nil
+            interruptibleInput = nil
+        }
+    }
+
     /// The host's own error behind the last negative avio return code, when a
     /// custom input produced one. Callers use it to re-throw something typed
     /// instead of handing on FFmpeg's `-EIO`.
@@ -137,11 +156,24 @@ final class ReadInterruptGuard: @unchecked Sendable {
     /// expired while the origin was busy throttling us) and this is the cause.
     var originFailure: PrismCoreError? { httpInput?.lastOriginFailure }
 
+    /// The origin's verdict behind the last read that failed into
+    /// libavformat, which a later successful read does not clear (see
+    /// `HTTPRangeInput.lastFailedReadCause`). For a mid-session read
+    /// failure this outranks `originFailure`: the demuxer may have read on
+    /// past the failure before anyone could ask.
+    var failedReadCause: PrismCoreError? { httpInput?.lastFailedReadCause }
+
     func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
-                          headers: [String: String], hints: SourceOpenHints? = nil) throws {
-        let input = HTTPRangeInput(url: url, headers: headers, hints: hints, interrupted: { [weak self] in
-            self?.shouldInterrupt ?? true
-        })
+                          headers: [String: String], hints: SourceOpenHints? = nil,
+                          yieldsToPlayback: Bool = false) throws {
+        // A yielding reader is background work: it has no business adopting
+        // (and spending a verification request on) the prewarmed head that is
+        // there for the open a viewer is waiting on.
+        let input = HTTPRangeInput(
+            url: url, headers: headers, hints: hints,
+            prewarmStore: yieldsToPlayback ? nil : .shared, yieldsToPlayback: yieldsToPlayback,
+            interrupted: { [weak self] in self?.shouldInterrupt ?? true }
+        )
         try input.install(on: context)
         httpInput = input
     }
@@ -153,6 +185,12 @@ final class ReadInterruptGuard: @unchecked Sendable {
     var validatorObservation: HTTPRangeInput.ValidatorObservation? {
         httpInput?.validatorObservation
     }
+
+    /// The strong `ETag` the coordinated reader saw on its first response,
+    /// with the URL that served it (the redirect target, if any). `nil` for a weak tag, a `Last-Modified`-only origin, FFmpeg's own I/O
+    /// and a host-supplied input alike — none of them can vouch that a later
+    /// open reads the same bytes (see `KeyframeIndexCache.Identity`).
+    var openedStrongETag: (tag: String, url: URL)? { httpInput?.openedStrongETag }
 
     /// The byte bound the first read was actually given, when a sizing hint
     /// moved it off the reader's default block.

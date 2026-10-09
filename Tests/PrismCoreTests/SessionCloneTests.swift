@@ -161,6 +161,47 @@ struct SessionCloneTests {
         #expect(cues.first?.text.contains("Ahoj") == true)
     }
 
+    @Test("A bounded cue history reads back clamped and survives the clone and both fallbacks")
+    func subtitleCueHistorySurvivesTheClone() async throws {
+        let source = try fixture("h264_aac_srt.mkv")
+        let session = try PrismCoreSession(
+            url: source, subtitleCueHistory: .bounded(maxCues: 0, maxBytes: 4_096)
+        )
+        // Clamped at construction, so the value read back is the one in force.
+        let bound = SubtitleCueHistory.bounded(maxCues: 1, maxBytes: 4_096)
+        #expect(await session.options.subtitleCueHistory == bound)
+
+        // A clone moving another option keeps the bound…
+        let clone = try await session.makeSession { $0.segmentCacheBytes = nil }
+        #expect(await clone.options.subtitleCueHistory == bound)
+        // …and so do both rejection fallbacks (each counts as its session's
+        // one successor, so each is minted from a session of its own).
+        let muxed = try await clone.makeMuxedFallbackSession()
+        #expect(await muxed.options.subtitleCueHistory == bound)
+        let rejected = try await muxed.makeMasterRejectionFallbackSession()
+        #expect(await rejected.options.subtitleCueHistory == bound)
+
+        // And the bound is the one the successor's tap actually enforces.
+        let playlist = try await rejected.start()
+        defer { Task { await rejected.stop() } }
+        try await waitForFinishedPlaylist(playlist)
+        let stats = rejected.subtitleCueHistoryStats
+        #expect(stats.retainedCues == 1)
+        #expect(stats.evictedCues == 2)
+
+        // Default stays complete, through a clone too.
+        let plain = try PrismCoreSession(url: source)
+        #expect(await plain.options.subtitleCueHistory == .complete)
+        let plainClone = try await plain.makeSession { $0.audioDelaySeconds = 0.1 }
+        #expect(await plainClone.options.subtitleCueHistory == .complete)
+
+        await plain.stop()
+        await plainClone.stop()
+        await session.stop()
+        await clone.stop()
+        await muxed.stop()
+    }
+
     // MARK: - Lifecycle
 
     @Test("A clone never inherits its predecessor's work directory")
