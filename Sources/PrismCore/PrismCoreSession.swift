@@ -223,6 +223,10 @@ public actor PrismCoreSession {
         /// successor gets its own directory, so this budget applies to it
         /// alone — see `makeSession(changing:)` on stopping the predecessor.
         public var segmentCacheBytes: Int?
+        /// How a sequential session (no keyframe plan) publishes its
+        /// playlists — `.event` unless the host opted in. A planned session
+        /// ignores it.
+        public var sequentialPlaylist: SequentialPlaylist
         /// Mux the one best audio track into the variant (v0 shape) instead of
         /// serving a master with renditions.
         public var forceMuxedShape: Bool
@@ -461,6 +465,12 @@ public actor PrismCoreSession {
     ///     enforced when the source got a demand-driven plan — there a deleted
     ///     segment is reproduced on the next fetch, so the budget bounds disk,
     ///     not seekability. `nil` keeps everything for the session's lifetime.
+    ///   - sequentialPlaylist: how a session that gets no keyframe plan
+    ///     publishes its playlists. `.event` (the default) lists every
+    ///     segment for the whole session; `.slidingWindow(seconds:)` lists
+    ///     only what can still be served, so AVPlayer is never offered a
+    ///     segment the budget already deleted. Ignored by a planned session.
+    ///     See `SequentialPlaylist`.
     ///   - forceMuxedShape: skip the master/renditions shape and mux the one
     ///     best audio track into the variant (v0 shape). This is the host's
     ///     fallback when AVPlayer refuses a served master (-11868 / -11848 /
@@ -484,6 +494,7 @@ public actor PrismCoreSession {
         displayIsHDRReady: Bool = false,
         displayIsDolbyVisionCapable: Bool = false,
         segmentCacheBytes: Int? = 1 << 30,
+        sequentialPlaylist: SequentialPlaylist = .event,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
         dialogueBoost: [DialogueBoostLevel] = [],
@@ -502,6 +513,7 @@ public actor PrismCoreSession {
                 isDolbyVisionCapable: displayIsDolbyVisionCapable
             ),
             segmentCacheBytes: segmentCacheBytes,
+            sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
             dialogueBoost: dialogueBoost,
@@ -576,6 +588,7 @@ public actor PrismCoreSession {
         httpHeaders: [String: String] = [:],
         display: DisplayCapabilities,
         segmentCacheBytes: Int? = 1 << 30,
+        sequentialPlaylist: SequentialPlaylist = .event,
         forceMuxedShape: Bool = false,
         probed: ProbedSource? = nil,
         keyframeIndexCacheDirectory: URL? = nil,
@@ -592,6 +605,7 @@ public actor PrismCoreSession {
             httpHeaders: httpHeaders,
             display: display,
             segmentCacheBytes: segmentCacheBytes,
+            sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
             dialogueBoost: dialogueBoost,
@@ -628,6 +642,7 @@ public actor PrismCoreSession {
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
+            sequentialPlaylist: sequentialPlaylist,
             forceMuxed: forceMuxedShape,
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
@@ -688,6 +703,7 @@ public actor PrismCoreSession {
         url: URL,
         httpHeaders: [String: String] = [:],
         segmentCacheBytes: Int? = 1 << 30,
+        sequentialPlaylist: SequentialPlaylist = .event,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
         dialogueBoost: [DialogueBoostLevel] = [],
@@ -703,6 +719,7 @@ public actor PrismCoreSession {
             httpHeaders: httpHeaders,
             display: .current(),
             segmentCacheBytes: segmentCacheBytes,
+            sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
             dialogueBoost: dialogueBoost,
@@ -796,6 +813,7 @@ public actor PrismCoreSession {
             httpHeaders: options.httpHeaders,
             display: options.display,
             segmentCacheBytes: options.segmentCacheBytes,
+            sequentialPlaylist: options.sequentialPlaylist,
             forceMuxedShape: options.forceMuxedShape,
             // No `probed`: this session consumed the probe it was handed, and
             // an already-read context cannot open a second remux.

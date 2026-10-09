@@ -40,7 +40,9 @@ final class AudioRenditionWriter {
     /// Planned (demand-driven) mode: the playlist was written complete
     /// upfront from the segment plan — cuts write FILES only.
     private var plannedMode = false
-    private let playlist: MediaPlaylistWriter
+    /// Read by a sequential session's `SequentialWindow`, which moves the
+    /// front of every playlist together.
+    let playlist: MediaPlaylistWriter
     private var bridge: AudioBridge?
     var onBridgeProgress: ((AudioBridgeProgress) -> Void)?
     private var outputIndex: Int32 = 0

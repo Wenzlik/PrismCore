@@ -35,7 +35,9 @@ final class WebVTTRenditionWriter {
     static let fallbackCueSeconds = 3.0
 
     private let directory: URL
-    private let playlist: MediaPlaylistWriter
+    /// Read by a sequential session's `SequentialWindow`, which moves the
+    /// front of every playlist together.
+    let playlist: MediaPlaylistWriter
     /// Presentation origin in source seconds. Cues and boundaries arrive on the
     /// source's own axis and are printed relative to this.
     private var originSeconds: Double = 0
