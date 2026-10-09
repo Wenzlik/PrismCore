@@ -90,6 +90,10 @@ public actor SeekPreviewService {
     /// How many demux+decode passes ran — the cache's witness in tests.
     private(set) var decodeCount = 0
 
+    /// Whether the open took a harvested map — the identity's witness in
+    /// tests.
+    var usesKeyframeMap: Bool { keyframeMap != nil }
+
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -319,16 +323,16 @@ public actor SeekPreviewService {
         )
 
         // A harvested keyframe map makes position → keyframe a lookup. Shared
-        // by identity with the session that harvested it, so it only ever
-        // matches the exact same bits.
-        if let keyframeCacheDirectory {
+        // by identity with the session that harvested it — derived from THIS
+        // open, so a file replaced since the harvest (same size and length,
+        // new strong ETag) misses instead of pinning wrong frames to scrub
+        // positions. No provable version, no map.
+        if let keyframeCacheDirectory,
+           let identity = KeyframeIndexCache.Identity(
+               opened: context, sourceURL: url, interruptGuard: interruptGuard
+           ) {
             let cache = KeyframeIndexCache(directory: keyframeCacheDirectory)
-            let identity = KeyframeIndexCache.identity(
-                sourceURL: url,
-                sizeBytes: context.pointee.pb.map { avio_size($0) } ?? -1,
-                durationMicroseconds: context.pointee.duration
-            )
-            if let entry = cache.lookup(identity: identity),
+            if let entry = cache.lookup(identity: identity.key),
                entry.timeBaseNum == timeBase.num, entry.timeBaseDen == timeBase.den,
                entry.keyframePTS.count >= 2 {
                 keyframeMap = entry.keyframePTS.sorted()

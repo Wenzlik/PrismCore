@@ -56,6 +56,16 @@ final class HTTPRangeInput {
         failureLock.withLock { observation }
     }
 
+    /// The strong `ETag` of the first response, kept apart from `validator`
+    /// on purpose: that one falls back to `Last-Modified`, and a date is not
+    /// proof of the same bytes (see `strongETag(of:)`). A persistent keyframe
+    /// map binds to this and nothing weaker, so it must never learn which of
+    /// the two the merged validator happened to be. Every later response is
+    /// held to the first one's validator (`fill`), so this vouches for every
+    /// byte the open read.
+    private var firstStrongETag: String?
+    var openedStrongETag: String? { failureLock.withLock { firstStrongETag } }
+
     /// Recently fetched blocks, least-recently-used first.
     ///
     /// More than one on purpose. Startup's read pattern is head → tail → head:
@@ -273,7 +283,7 @@ final class HTTPRangeInput {
             // open unhinted. The mid-session case is the line above, which
             // does throw, because there the old version's headers, blocks and
             // plan are already built and mixing versions fails invisibly.
-            observeFirstResponse(reporting: currentValidator)
+            observeFirstResponse(reporting: currentValidator, strongETag: Self.strongETag(of: response.response))
             // One fill only: every later read is an ordinary block.
             if firstFillSize != nil {
                 firstFillBytes = requestSize
@@ -318,9 +328,10 @@ final class HTTPRangeInput {
         response?.value(forHTTPHeaderField: "ETag").flatMap { $0.hasPrefix("W/") ? nil : $0 }
     }
 
-    private func observeFirstResponse(reporting currentValidator: String?) {
+    private func observeFirstResponse(reporting currentValidator: String?, strongETag: String?) {
         guard !firstResponseSeen else { return }
         firstResponseSeen = true
+        failureLock.withLock { firstStrongETag = strongETag }
         let verdict: ValidatorObservation
         switch (expectedValidator, currentValidator) {
         case (nil, let reported?): verdict = .unchecked(reported)
@@ -386,7 +397,7 @@ final class HTTPRangeInput {
             let reported = Self.validator(of: response.response)
             // This is the first response this reader has seen, whatever
             // happens next, and the hints' validator check is judged on it.
-            observeFirstResponse(reporting: reported)
+            observeFirstResponse(reporting: reported, strongETag: Self.strongETag(of: response.response))
             validator = reported
             length = range.total
             // Judged on the strong ETag only, whatever the entry says: an
