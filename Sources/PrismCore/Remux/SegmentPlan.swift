@@ -43,7 +43,21 @@ struct SegmentPlan: Equatable {
         /// Boundaries sit on indexed keyframes — seeks land exactly.
         case keyframeIndex
         /// Uniform stride fallback — boundaries are time targets.
-        case uniform
+        case uniform(UniformReason)
+    }
+
+    /// Why a plan fell back to the uniform stride. Not cosmetic: only an
+    /// expired budget says the index may exist and simply was not reached in
+    /// time, which is the one case a later, more patient load can fix (the
+    /// remuxer's `LateIndexLoader`). Junk or absent entries would be junk or
+    /// absent again on a second read.
+    enum UniformReason: Equatable {
+        /// The index-load seek ran out of `indexLoadBudget` before returning.
+        case budgetExpired
+        /// Keyframe entries exist but fail a witness (gap or coverage).
+        case untrustedIndex
+        /// No keyframe entries at all.
+        case noIndex
     }
 
     let entries: [Entry]
@@ -149,6 +163,7 @@ struct SegmentPlan: Equatable {
         guard durationSeconds.isFinite, durationSeconds > 0 else { return (nil, false) }
 
         let keyframes: [Int64]
+        var budgetExpired = false
         if let cachedKeyframes {
             keyframes = cachedKeyframes
         } else if indexIsLoadedAtOpen(
@@ -169,7 +184,12 @@ struct SegmentPlan: Equatable {
             // gone; a partial scan leaves the demuxer consistent, just
             // positioned mid-file.
             interruptGuard?.arm(budget: indexLoadBudget)
-            _ = av_seek_frame(input, videoStreamIndex, stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / tick), AVSEEK_FLAG_BACKWARD)
+            let nudgeStarted = ContinuousClock.now
+            _ = av_seek_frame(input, videoStreamIndex, indexLoadTarget(of: stream, durationSeconds: durationSeconds), AVSEEK_FLAG_BACKWARD)
+            // On the clock, not from the seek's return code: an aborted read
+            // can surface as anything from a clean return to `AVERROR_EXIT`,
+            // and only the clock says the budget, not the file, ended it.
+            budgetExpired = interruptGuard != nil && ContinuousClock.now - nudgeStarted >= indexLoadBudget
             // The guard must not outlive the nudge: the seek back to the head is
             // what restores the position the producer starts from, and aborting
             // THAT would leave the read position wherever the scan died. To
@@ -211,10 +231,19 @@ struct SegmentPlan: Equatable {
                 durationSeconds: durationSeconds, tickSeconds: tick,
                 targetSeconds: targetSeconds, firstSegmentSeconds: firstSegmentSeconds
             ),
-            basis: .uniform,
+            basis: .uniform(
+                budgetExpired ? .budgetExpired : (keyframes.isEmpty ? .noIndex : .untrustedIndex)
+            ),
             timeBaseNum: timeBase.num,
             timeBaseDen: timeBase.den
         ), rewound)
+    }
+
+    /// Where the index-load nudge seeks: the stream's end. A Matroska loads
+    /// its Cues to answer it; shared so every open that nudges asks the
+    /// demuxer the same question.
+    static func indexLoadTarget(of stream: UnsafeMutablePointer<AVStream>, durationSeconds: Double) -> Int64 {
+        stream.pointee.duration > 0 ? stream.pointee.duration : Int64(durationSeconds / av_q2d(stream.pointee.time_base))
     }
 
     /// The keyframe timestamps in the stream's index right now.
