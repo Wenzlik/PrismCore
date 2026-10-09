@@ -60,4 +60,14 @@ struct SegmentRetention {
         }
         return victims
     }
+
+    /// Stop accounting `indexes`: they left by another route. A sliding
+    /// window (`SequentialWindow`) drops segments on time as well as on
+    /// bytes, and a segment it dropped that stayed on the books here would
+    /// keep the total over budget long after the playlist let go of it.
+    mutating func forget(_ indexes: [Int]) {
+        for index in indexes {
+            totalBytes -= sizes.removeValue(forKey: index) ?? 0
+        }
+    }
 }
