@@ -249,10 +249,12 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     }
     /// Everything delivered so far (under `.bounded`, the newest of it), so a
     /// handler registered after cues were already produced starts complete
-    /// instead of mid-film. Entries before `emittedStart` are evicted and
+    /// instead of mid-film. Slots before `emittedStart` are evicted and
     /// awaiting compaction — a FIFO without a dequeue type, so eviction does
-    /// not shift the whole array once per cue.
-    private var emittedCues: [HistoryEntry] = []
+    /// not shift the whole array once per cue. An evicted slot is `nil`, not
+    /// the old entry: until compaction the dead prefix would otherwise still
+    /// own every evicted text and key, past the bound the stats report.
+    private var emittedCues: [HistoryEntry?] = []
     private var emittedStart = 0
     private var emittedBytes = 0
     /// Dedup for the demux revisiting a region (a demand-driven seek re-reads
@@ -290,6 +292,15 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     init(outputDirectory: URL, cueHistory: SubtitleCueHistory = .complete) {
         self.outputDirectory = outputDirectory
         self.historyPolicy = cueHistory.normalized
+    }
+
+    /// The entries the history array actually still owns, evicted-but-
+    /// uncompacted slots included — what `historyStats` must not undercount.
+    var heldHistoryForTesting: (cues: Int, bytes: Int) {
+        lock.withLock {
+            let held = emittedCues.compactMap { $0 }
+            return (held.count, held.map(\.bytes).reduce(0, +))
+        }
     }
 
     /// What the cue tap holds and what it let go of.
@@ -729,7 +740,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         let replay: [TimedTextCue] = lock.withLock {
             cueHandler = handler
             guard handler != nil else { return [] }
-            return emittedCues[emittedStart...].compactMap { $0.cue.delayed(by: storedDelaySeconds) }
+            return emittedCues[emittedStart...].compactMap { $0?.cue.delayed(by: storedDelaySeconds) }
         }
         guard let handler else { return }
         for cue in replay { handler(cue) }
@@ -798,7 +809,9 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             return
         }
         while emittedCues.count - emittedStart >= maxCues || emittedBytes + entry.bytes > maxBytes {
-            let oldest = emittedCues[emittedStart]
+            // Every slot from `emittedStart` on is live; release it now.
+            guard let oldest = emittedCues[emittedStart] else { break }
+            emittedCues[emittedStart] = nil
             emittedKeys.remove(oldest.key)
             emittedBytes -= oldest.bytes
             emittedStart += 1
