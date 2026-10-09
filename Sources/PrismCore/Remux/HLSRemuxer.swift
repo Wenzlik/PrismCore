@@ -1733,9 +1733,9 @@ final class HLSRemuxer: @unchecked Sendable {
         /// from where the demuxer is, and a fresh context is at the head).
         ///
         /// Returns normally after a recovery, and also when `cancel()`
-        /// arrived during the backoff or the re-open — the copy loop's own
-        /// check then ends the run. Either way the caller must not use any
-        /// packet it read from the old context.
+        /// arrived during the backoff, the re-open or the re-anchor seek —
+        /// the copy loop's own check then ends the run. Either way the
+        /// caller must not use any packet it read from the old context.
         func recoverSource(from readFailure: any Error, anchor: Int) throws {
             // A `stop()` aborts whatever read or seek it lands in.
             if cancelled.isSet { return }
@@ -1744,6 +1744,12 @@ final class HLSRemuxer: @unchecked Sendable {
             var failure = readFailure
             var reopening = false
             while true {
+                // Checked again on every pass: a `stop()` that aborted the
+                // re-anchor seek after a re-open that worked comes back as
+                // that seek's failure, and with the cap spent the policy
+                // would answer it by throwing the original read failure —
+                // a `.producerFailed` for a session the host ended itself.
+                if cancelled.isSet { return }
                 let classified = reopening ? PrismCoreError.classify(failure) : cause
                 guard let attempt = recovery.nextAttempt(
                     for: classified, at: ProcessInfo.processInfo.systemUptime, reopening: reopening
