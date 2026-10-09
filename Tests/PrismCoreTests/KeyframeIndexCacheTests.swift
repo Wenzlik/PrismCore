@@ -45,27 +45,93 @@ struct KeyframeIndexCacheTests {
         #expect(cache.lookup(identity: "http://nas/other.mkv|1|2") == nil)
     }
 
-    @Test("The identity drops the URL query — a rotated token is the same media")
-    func identityStripsQuery() {
-        let tokenA = KeyframeIndexCache.identity(
-            sourceURL: URL(string: "http://nas:32400/library/parts/9?X-Plex-Token=aaa")!,
-            sizeBytes: 100, durationMicroseconds: 200
+    @Test("The identity keeps the query and binds the version: only the same URL, size, duration and strong ETag match")
+    func identityKeepsQuery() {
+        func identity(
+            _ url: String, size: Int64 = 100, version: KeyframeIndexCache.SourceVersion? = nil
+        ) -> KeyframeIndexCache.Identity {
+            .init(sourceURL: URL(string: url)!, sizeBytes: size, durationMicroseconds: 200_000_000,
+                  version: version ?? .strongETag("\"v1\"", servedBy: URL(string: url)!))
+        }
+        let base = "http://nas:32400/library/parts/9/file.mkv?X-Plex-Token=SECRETTOKEN"
+        #expect(identity(base) == identity(base))
+        // A query can select the media, not only carry a token, so a
+        // different one is a different source; a rotated token costs one
+        // rebuild, never a wrong map.
+        #expect(identity(base) != identity("http://nas:32400/library/parts/9/file.mkv?X-Plex-Token=other"))
+        #expect(identity("http://nas/stream?part=1") != identity("http://nas/stream?part=2"))
+        #expect(identity(base) != identity("http://nas:32400/library/parts/10/file.mkv?X-Plex-Token=SECRETTOKEN"))
+        #expect(identity(base) != identity(base, size: 101))
+        // Replaced on the server at the same size and length: only the
+        // version tells the two apart.
+        #expect(identity(base) != identity(base, version: .strongETag("\"v2\"", servedBy: URL(string: base)!)))
+        // One address redirecting to two resources that happen to share a
+        // tag: the tag is per resource, so the one that served it counts.
+        let play = "http://nas/play"
+        #expect(identity(play, version: .strongETag("\"1\"", servedBy: URL(string: "http://nas/a.ts")!))
+            != identity(play, version: .strongETag("\"1\"", servedBy: URL(string: "http://nas/b.ts")!)))
+        #expect(identity(base, version: .fileModified(1)) != identity(base, version: .fileModified(2)))
+        // The digest is the only form there is: nothing of the URL in the
+        // clear ("S" and "T" are not hex digits, so no digest can spell it).
+        let key = identity(base).key
+        #expect(key.count == 64 && key.allSatisfy(\.isHexDigit), "\(key)")
+        #expect(!key.contains("SECRETTOKEN"))
+    }
+
+    @Test("Only a strong ETag vouches for a remote version; a local file proves its own by mtime")
+    func onlyAStrongETagVouchesForARemoteVersion() throws {
+        let remote = URL(string: "http://nas/movie.mkv")!
+        func version(_ headers: [String: String]) -> KeyframeIndexCache.SourceVersion? {
+            let response = HTTPURLResponse(
+                url: remote, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: headers
+            )
+            return .observed(sourceURL: remote, strongETag: HTTPRangeInput.strongETag(of: response).map { ($0, remote) })
+        }
+        #expect(version(["ETag": "\"v1\""]) == .strongETag("\"v1\"", servedBy: remote))
+        // Equivalent content is not the same bytes, and a date has one-second
+        // resolution — neither is proof a stored map still fits.
+        #expect(version(["ETag": "W/\"v1\""]) == nil)
+        #expect(version(["Last-Modified": "Wed, 07 Oct 2026 10:00:00 GMT"]) == nil)
+        #expect(version(["ETag": "W/\"v1\"", "Last-Modified": "Wed, 07 Oct 2026 10:00:00 GMT"]) == nil)
+        #expect(version([:]) == nil)
+
+        // Local files keep their mtime proof; one that cannot be stat'ed has
+        // none, whatever a transport claimed.
+        let local = try fixture("h264_ac3_30s.ts")
+        if case .fileModified = KeyframeIndexCache.SourceVersion.observed(sourceURL: local, strongETag: nil) {
+        } else {
+            Issue.record("a local file lost its mtime proof")
+        }
+        #expect(KeyframeIndexCache.SourceVersion.observed(
+            sourceURL: URL(fileURLWithPath: "/nonexistent/prismcore/movie.mkv"), strongETag: ("\"v1\"", remote)
+        ) == nil)
+    }
+
+    @Test("A sidecar from before the version binding is a miss, never a crash, and a fresh store replaces it")
+    func legacySidecarIsAMiss() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = KeyframeIndexCache(directory: directory)
+        let key = KeyframeIndexCache.Identity(
+            sourceURL: URL(string: "http://nas/movie.ts")!, sizeBytes: 100,
+            durationMicroseconds: 30_000_000, version: .strongETag("\"v1\"", servedBy: URL(string: "http://nas/movie.ts")!)
+        ).key
+        let file = directory.appendingPathComponent("\(KeyframeIndexCache.fnv1a(key)).json")
+
+        // The format-1 shape (no `format` field) — even under the new key,
+        // which a real old sidecar could not have, it must not be trusted.
+        try Data(#"{"identity":"\#(key)","timeBaseNum":1,"timeBaseDen":1000,"keyframePTS":[0,2000]}"#.utf8)
+            .write(to: file)
+        #expect(cache.lookup(identity: key) == nil)
+        try Data("not a sidecar".utf8).write(to: file)
+        #expect(cache.lookup(identity: key) == nil)
+
+        let entry = KeyframeIndexCache.Entry(
+            identity: key, timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 4000]
         )
-        let tokenB = KeyframeIndexCache.identity(
-            sourceURL: URL(string: "http://nas:32400/library/parts/9?X-Plex-Token=bbb")!,
-            sizeBytes: 100, durationMicroseconds: 200
-        )
-        let otherPath = KeyframeIndexCache.identity(
-            sourceURL: URL(string: "http://nas:32400/library/parts/10?X-Plex-Token=aaa")!,
-            sizeBytes: 100, durationMicroseconds: 200
-        )
-        let otherSize = KeyframeIndexCache.identity(
-            sourceURL: URL(string: "http://nas:32400/library/parts/9?X-Plex-Token=aaa")!,
-            sizeBytes: 101, durationMicroseconds: 200
-        )
-        #expect(tokenA == tokenB)
-        #expect(tokenA != otherPath)
-        #expect(tokenA != otherSize)
+        cache.store(entry)
+        #expect(cache.lookup(identity: key) == entry)
+        #expect(cache.lookup(identity: key)?.format == KeyframeIndexCache.formatVersion)
     }
 
     @Test("The bound prunes least-recently-used entries, and a lookup refreshes")
@@ -401,6 +467,160 @@ struct KeyframeIndexCacheTests {
         if let error = failure.value { throw error }
     }
 
+    // MARK: - Remote sources: the map is bound to the version the open saw
+
+    @Test("Over HTTP the map is bound to the strong ETag: a replaced file misses in the session and the preview, the same version hits")
+    func remoteMapFollowsTheStrongETag() async throws {
+        let cacheDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        let etag = LockedString("\"v1\"")
+        let origin = try ScriptedHTTPServer { request in
+            ScriptedHTTPServer.ranged(media, for: request, validators: ["ETag": etag.value])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+        let url = try #require(URL(string: "movie.ts?token=SECRETTOKEN", relativeTo: root)).absoluteURL
+
+        // Play 1 under "v1": bounded out of the index load, so it runs
+        // sequentially and harvests the map at EOF.
+        let first = HLSRemuxer(
+            sourceURL: url, outputDirectory: output, demand: DemandCoordinator(),
+            keyframeCacheDirectory: cacheDirectory, indexLoadBudget: .zero
+        )
+        first.coordinatedHTTP = true
+        try first.run()
+        let sidecars = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
+            .filter { $0.hasSuffix(".json") }
+        #expect(sidecars.count == 1, "a remote source with a strong ETag stored nothing")
+        let name = try #require(sidecars.first)
+        let text = String(decoding: try Data(contentsOf: cacheDirectory.appendingPathComponent(name)), as: UTF8.self)
+        // The URL carries a credential: neither the name nor the content may.
+        for leak in ["SECRETTOKEN", "movie.ts", "127.0.0.1"] {
+            #expect(!name.contains(leak) && !text.contains(leak), "the sidecar spells \(leak)")
+        }
+
+        // The origin now serves a replacement: same size, same duration (the
+        // very same bytes, even), new strong ETag. Neither consumer may plan
+        // or scrub on v1's map. The preview goes first: the session learns
+        // v2's own map as it plays, which the preview would then rightly take.
+        etag.value = "\"v2\""
+        #expect(try await !Self.previewTakesMap(url, cache: cacheDirectory))
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) != .keyframeIndexCache)
+
+        // The same tag, but weak: equivalent content is no proof either.
+        etag.value = "W/\"v1\""
+        #expect(try await !Self.previewTakesMap(url, cache: cacheDirectory))
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) != .keyframeIndexCache)
+
+        // Back to the version the map was learned from: both take it.
+        etag.value = "\"v1\""
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) == .keyframeIndexCache)
+        #expect(try await Self.previewTakesMap(url, cache: cacheDirectory))
+    }
+
+    @Test("A redirecting address binds the map to the target that served the ETag, not to itself")
+    func redirectTargetBindsTheMap() async throws {
+        let cacheDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        // `/play` redirects to whichever file is current; both carry the same
+        // strong tag, which is legal — a tag is unique per resource only. The
+        // bytes are the same too, so size, duration and time base all agree:
+        // only the target tells the two apart.
+        let target = LockedString("/a.ts")
+        let origin = try ScriptedHTTPServer { request in
+            request.path == "/play"
+                ? .respond(status: 302, headers: ["Location": target.value], body: Data())
+                : ScriptedHTTPServer.ranged(media, for: request, validators: ["ETag": "\"1\""])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+        let url = root.appendingPathComponent("play")
+
+        let first = HLSRemuxer(
+            sourceURL: url, outputDirectory: output, demand: DemandCoordinator(),
+            keyframeCacheDirectory: cacheDirectory, indexLoadBudget: .zero
+        )
+        first.coordinatedHTTP = true
+        try first.run()
+        let sidecars = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
+            .filter { $0.hasSuffix(".json") }
+        #expect(sidecars.count == 1, "the redirected play stored nothing — nothing was exercised")
+
+        // The address now sends opens to B: A's map must not plan or scrub it.
+        target.value = "/b.ts"
+        #expect(try await !Self.previewTakesMap(url, cache: cacheDirectory))
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) != .keyframeIndexCache)
+
+        // A stable redirect keeps its map: back to A, both take it.
+        target.value = "/a.ts"
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) == .keyframeIndexCache)
+        #expect(try await Self.previewTakesMap(url, cache: cacheDirectory))
+    }
+
+    @Test("A remote source with no strong ETag, or read by FFmpeg's own HTTP, never writes the sidecar")
+    func unprovableRemoteVersionStoresNothing() async throws {
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        let cases: [(validators: [String: String], coordinated: Bool)] = [
+            (["ETag": "W/\"v1\""], true),
+            (["Last-Modified": "Wed, 07 Oct 2026 10:00:00 GMT"], true),
+            ([:], true),
+            // A strong ETag the transport never surfaces is no proof either.
+            (["ETag": "\"v1\""], false),
+        ]
+        for (validators, coordinated) in cases {
+            let cacheDirectory = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            let output = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: output) }
+            let origin = try ScriptedHTTPServer { request in
+                ScriptedHTTPServer.ranged(media, for: request, validators: validators)
+            }
+            let root = try await origin.start()
+            defer { origin.stop() }
+
+            // The shape that harvests on a source with a version: sequential
+            // to EOF. Here the harvest has nothing to bind to.
+            let remuxer = HLSRemuxer(
+                sourceURL: root.appendingPathComponent("movie.ts"), outputDirectory: output,
+                demand: DemandCoordinator(), keyframeCacheDirectory: cacheDirectory,
+                indexLoadBudget: .zero
+            )
+            remuxer.coordinatedHTTP = coordinated
+            try remuxer.run()
+            let playlist = try String(contentsOf: output.appendingPathComponent("index.m3u8"), encoding: .utf8)
+            #expect(playlist.contains("#EXT-X-ENDLIST"), "the play did not run to EOF — nothing was exercised")
+            let sidecars = (try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)) ?? []
+            #expect(sidecars.isEmpty, "\(validators) coordinated=\(coordinated) stored \(sidecars)")
+        }
+    }
+
+    private static func sessionPlanOrigin(_ url: URL, cache: URL) async throws -> SegmentPlanOrigin? {
+        let session = try PrismCoreSession(
+            url: url, keyframeIndexCacheDirectory: cache, coordinatedHTTP: true
+        )
+        let checkpoints = try await session.startupCheckpoints()
+        async let origin = planOrigin(of: checkpoints)
+        _ = try await session.start()
+        await session.stop()
+        return await origin
+    }
+
+    private static func previewTakesMap(_ url: URL, cache: URL) async throws -> Bool {
+        let service = SeekPreviewService(
+            url: url, keyframeIndexCacheDirectory: cache, coordinatedHTTP: true
+        )
+        _ = try await service.thumbnail(at: 10)
+        let takes = await service.usesKeyframeMap
+        await service.close()
+        return takes
+    }
+
     @Test("A partial entry never replaces a complete one, nor a longer partial; old entries decode as complete")
     func partialStoreRules() throws {
         let directory = try makeTempDirectory()
@@ -422,6 +642,18 @@ struct KeyframeIndexCacheTests {
         let decoded = try JSONDecoder().decode(KeyframeIndexCache.Entry.self, from: legacy)
         #expect(decoded.complete)
         #expect(decoded.coveredThroughPTS == nil)
+    }
+}
+
+/// A value the scripted origin's handler reads on its own queue while the
+/// test changes it — the "file replaced on the server" switch.
+private final class LockedString: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String
+    init(_ value: String) { stored = value }
+    var value: String {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
     }
 }
 

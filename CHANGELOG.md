@@ -39,6 +39,27 @@ source-compatible.)
 - `PrismCoreVersion.current` (`3.4.0`). A test fails while it disagrees with
   the newest version heading here.
 
+### Changed
+
+- **The keyframe sidecar is bound to a proven version of the source.** Its
+  identity used to be the URL without its query, the byte size and the
+  duration (plus mtime for a local file), so a remote file replaced at the same
+  size and length kept the old map — segment cuts and scrub frames planned on
+  keyframes the new file does not have — and two media selected only by query
+  shared one. The identity now keeps the full URL and adds the version the open
+  read: a local file's mtime, or the strong `ETag` the coordinated HTTP reader
+  saw on its first response together with the URL that served it (after a
+  redirect, the target: an address redirecting to two files that share a tag
+  must not share a map). A remote source with no strong `ETag` (none, a
+  weak `W/` one, `Last-Modified` only), read by FFmpeg's own HTTP, or through a
+  host `PrismCoreInput` on a non-`file:` URL, neither uses nor writes a map and
+  plans from the source. Only a SHA-256 digest is stored, never the URL or a
+  token in it, and entries carry a format version: every existing sidecar is a
+  miss once and is rebuilt. The cost is fewer hits — a rotated query token or
+  an origin without `ETag` now pays the index load (or the sequential first
+  play) every time. The remuxer's plan and `SeekPreviewService` derive the same
+  identity from their own opens. No API change.
+
 ## [3.4.0] — 2026-10-07
 
 Audio renditions that re-encode are no longer produced for the whole film

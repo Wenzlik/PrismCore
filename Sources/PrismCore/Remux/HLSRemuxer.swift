@@ -868,14 +868,16 @@ final class HLSRemuxer: @unchecked Sendable {
 
         // The source's identity for the keyframe cache — from the opened
         // context, so the size is the transport's own answer (HTTP and file
-        // alike) and the duration is the container's.
-        let cacheIdentity: String? = keyframeCache.map { _ in
-            KeyframeIndexCache.identity(
-                sourceURL: sourceURL,
-                sizeBytes: input.pointee.pb.map { avio_size($0) } ?? -1,
-                durationMicroseconds: input.pointee.duration
-            )
-        }
+        // alike) and the duration is the container's, and bound to the
+        // version this open actually read (a local mtime, or the strong ETag
+        // of the guard's reader). `nil` when nothing vouches for the version:
+        // a remote source then neither trusts a stored map nor writes one,
+        // because a map from a since-replaced file of the same size and
+        // length would cut segments on keyframes the new file does not have.
+        let cacheIdentity: String? = keyframeCache == nil ? nil
+            : KeyframeIndexCache.Identity(
+                opened: input, sourceURL: sourceURL, interruptGuard: interruptGuard
+            )?.key
         // A previous play's harvested keyframe map, when its time base still
         // matches the stream's. It replaces the demuxer index in the plan —
         // and skips the index-load seek, so a cache hit starts faster than
