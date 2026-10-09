@@ -8,6 +8,21 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.0] — 2026-10-09
+
+Field reports, self-healing playback and a bounded sequential session
+(#125–#130). A host can take one `Codable` diagnostic report of any playback;
+a planned session that hits a mid-film read failure re-opens the source and
+carries on instead of ending, and tells the host either way; a sequential
+session can play from a sliding HLS window so a seek back past the cache
+budget no longer meets a 404; a first play whose index missed the startup
+budget learns it in the background; the remux cue history can be bounded; and
+the keyframe sidecar is tied to a proven version of the source. A minor: new
+API (`diagnosticReport()`, `Options.sequentialPlaylist`, `SubtitleCueHistory`,
+`PlaybackEvent.producerRecovered` / `.producerFailed` /
+`.segmentPlanAvailable`), nothing removed. Not yet confirmed on a device: the
+sliding window's moving start under AVPlayer and AirPlay.
+
 ### Added
 
 - **A sliding HLS window for sequential sessions** —
@@ -60,7 +75,7 @@ source-compatible.)
 - `prismcore-cli probe --json` prints the report alone on stdout.
   `serve --report FILE` and `segverify --report FILE` write it on every exit,
   including a failed start.
-- `PrismCoreVersion.current` (`3.4.0`). A test fails while it disagrees with
+- `PrismCoreVersion.current` (`3.5.0`). A test fails while it disagrees with
   the newest version heading here.
 
 - **A first play that lost its index to the startup budget loads it in the
@@ -2901,7 +2916,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...HEAD
+[3.5.0]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...3.5.0
 [3.4.0]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...3.4.0
 [3.3.0]: https://github.com/Wenzlik/PrismCore/compare/3.2.7...3.3.0
 [3.2.7]: https://github.com/Wenzlik/PrismCore/compare/3.2.6...3.2.7
