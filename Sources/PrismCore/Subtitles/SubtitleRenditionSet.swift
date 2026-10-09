@@ -736,8 +736,9 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     }
 
     /// Rebase one produced cue onto the played timeline and hand it to the
-    /// host — or hold it until the origin exists.
-    private func emitHostCue(streamIndex: Int32, _ cue: SubtitleCue) {
+    /// host — or hold it until the origin exists. Internal, not private, so
+    /// the history bound can be driven with thousands of cues no fixture holds.
+    func emitHostCue(streamIndex: Int32, _ cue: SubtitleCue) {
         var toDeliver: TimedTextCue?
         var handler: (@Sendable (TimedTextCue) -> Void)?
         lock.withLock {
