@@ -35,6 +35,19 @@ public enum PlaybackEvent: Sendable, Equatable {
     /// The first good response from a throttled origin. Shared like
     /// `originThrottled`.
     case originRecovered
+
+    /// This session is playing sequentially because the source's seek index
+    /// did not load within the startup budget, and a background load has now
+    /// read it in full and stored it in the keyframe index cache. A successor
+    /// (`makeSession(changing:)`, same `keyframeIndexCacheDirectory`) plans
+    /// from that map: a VOD playlist of `segments` entries, seekable
+    /// anywhere, where this session can only grow its EVENT playlist.
+    ///
+    /// Only ever sent once the map is stored — never for a source whose
+    /// version cannot be proven (see `keyframeIndexCacheDirectory`), because
+    /// a successor of that source would face the same budget and most
+    /// likely play sequentially again. This session itself does not change.
+    case segmentPlanAvailable(segments: Int)
 }
 
 /// Where the engine's components drop `PlaybackEvent`s. Exists from session

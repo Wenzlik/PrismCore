@@ -148,6 +148,18 @@ final class HLSRemuxer: @unchecked Sendable {
     var coordinatedHTTP = false
     private let activeGuardLock = NSLock()
     private var activeGuard: ReadInterruptGuard?
+    /// The background index load of a session whose plan ran out of budget
+    /// (see `LateIndexLoader`). Under `activeGuardLock`, so a `cancel()` and a
+    /// launch cannot cross: the launch checks the flag in the same critical
+    /// section the cancel takes after setting it.
+    private var lateIndexLoader: LateIndexLoader?
+
+    /// The late index load's thread, once launched. Test seam.
+    var lateIndexLoadThread: ProducerThread? { activeGuardLock.withLock { lateIndexLoader?.thread } }
+
+    /// Where runtime events go (`.segmentPlanAvailable`). Written once by the
+    /// session before the producer thread exists, like `onStartupPhase`.
+    var events: PlaybackEventSink?
 
     /// How a selected audio stream reaches the output.
     enum AudioRouteMode: Equatable {
@@ -585,7 +597,10 @@ final class HLSRemuxer: @unchecked Sendable {
 
     func cancel() {
         cancelled.set()
-        activeGuardLock.withLock { activeGuard?.cancel() }
+        activeGuardLock.withLock {
+            activeGuard?.cancel()
+            lateIndexLoader?.cancel()
+        }
         // A producer parked at EOF is asleep on the coordinator, not spinning —
         // setting the flag is not enough to get its thread back.
         demand?.wake()
@@ -599,6 +614,10 @@ final class HLSRemuxer: @unchecked Sendable {
         // A producer that has finished (or died) makes no progress by design;
         // its error, if any, is the host's signal, not a stall report.
         defer { setProducerIdle(true) }
+        // A producer that is done — EOF, error or cancel — takes the late
+        // index load down with it: at EOF the harvest has stored the same map
+        // from every packet, and otherwise nobody is left to plan from it.
+        defer { activeGuardLock.withLock { lateIndexLoader?.cancel() } }
         var input: UnsafeMutablePointer<AVFormatContext>?
 
         // Adopt the routing probe's context when the host handed one over —
@@ -987,6 +1006,44 @@ final class HLSRemuxer: @unchecked Sendable {
                     timeBaseDen: timeBase.den,
                     keyframePTS: indexed.sorted()
                 ))
+            }
+        }
+
+        // A plan that lost only to the clock can still be had: the index is
+        // probably there, and the budget was what ran out. Read it again in
+        // the background — once production is under way, never before (see
+        // `launchLateIndexLoad`) — and store it as soon as it is in, rather
+        // than at EOF. Only where the result can be stored: a version proof
+        // (the identity) over the coordinated reader. A local file whose read
+        // outlasted the budget was scanning a file with no index; doing that
+        // again next to the producer on the same mount buys nothing the
+        // harvest will not have for free. Positive evidence of no index skips
+        // it too — an empty table at open is not that evidence (AGENTS.md).
+        let lateIndexTarget: LateIndexLoader.Target? = {
+            guard plannedPlan == nil, builtPlan?.basis == .uniform(.budgetExpired),
+                  keyframeCache != nil, let cacheIdentity,
+                  interruptGuard.usesCoordinatedHTTP,
+                  let pb = input.pointee.pb, pb.pointee.seekable != 0,
+                  probed?.structure.indexLocation != IndexLocation.none,
+                  probed?.structure.index?.completeness != .absent
+            else { return nil }
+            return LateIndexLoader.Target(
+                sourceURL: sourceURL, httpHeaders: httpHeaders, videoStreamIndex: videoIndex,
+                timeBase: input.pointee.streams[Int(videoIndex)]!.pointee.time_base,
+                segmentSeconds: segmentSeconds, firstSegmentSeconds: firstSegmentSeconds,
+                identity: cacheIdentity
+            )
+        }()
+        func launchLateIndexLoad() {
+            guard let lateIndexTarget, let keyframeCache else { return }
+            let loader = LateIndexLoader(target: lateIndexTarget, cache: keyframeCache) { [events] segments in
+                PrismCoreLog.notice("late index load: stored a \(segments)-segment keyframe map")
+                events?.yield(.segmentPlanAvailable(segments: segments))
+            }
+            activeGuardLock.withLock {
+                guard !cancelled.isSet, lateIndexLoader == nil else { return }
+                lateIndexLoader = loader
+                loader.start()
             }
         }
 
@@ -1485,6 +1542,10 @@ final class HLSRemuxer: @unchecked Sendable {
             if !didAnnounceFirstSegment {
                 didAnnounceFirstSegment = true
                 onStartupPhase?(.firstVideoSegmentWritten(index: segmentIndex))
+                // After the segment `start()` waits for, never before: the
+                // second open's requests would otherwise queue with the
+                // producer's on the way to the first playable byte.
+                launchLateIndexLoad()
             }
             // Same wall-time window, so rendition segment N covers variant
             // segment N — cut only when a media segment really landed.
