@@ -2126,6 +2126,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
                 residentSegments.markProduced(index: segmentIndex)
+                // The tail segment is progress too: without it, a recovery
+                // that healed into the last segment leaves the next `.unknown`
+                // failure — anywhere, after a seek back — read as the same
+                // bytes failing again.
+                recovery.noteProgress()
                 recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count, renditionBytes: 0)
                 // A source shorter than the first target never reaches
                 // `emitSegment`, so this is where ITS first segment lands —

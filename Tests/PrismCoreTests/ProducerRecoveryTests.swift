@@ -189,6 +189,53 @@ struct ProducerRecoveryTests {
         await session.stop()
     }
 
+    @Test("A recovery that healed into the last segment still counts it as progress")
+    func lastSegmentCountsAsProgress() async throws {
+        // Keyframes every 2 s, ~42 KB/s. The first instance is held past
+        // startup and before the middle (~9 s), so nothing behind the last
+        // segment is produced; the second fails inside the middle one
+        // (~15.5 s), which only a seek back after EOF reads.
+        let factory = FlakyInputFactory(
+            media: try Data(contentsOf: try fixture("h264_aac_30s.mkv")),
+            behaviours: [.gate(at: 400_000), .fail(at: 650_000)]
+        )
+        let session = try PrismCoreSession(url: URL(string: "prismcore-test://tail.mkv")!, input: factory.make)
+        let events = EventLog(await session.playbackEvents())
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        await waitUntil { factory.gated }
+        #expect(factory.gated, "production never reached the gate")
+
+        let master = String(decoding: try await URLSession.uncached.data(from: playlist).0, as: UTF8.self)
+        let variantPath = try #require(master.split(separator: "\n").first { $0.hasSuffix(".m3u8") })
+        let variant = URL(string: String(variantPath), relativeTo: playlist)!.absoluteURL
+        let segments = String(decoding: try await URLSession.uncached.data(from: variant).0, as: UTF8.self)
+            .split(separator: "\n").filter { $0.hasSuffix(".m4s") }.map(String.init)
+        let base = variant.deletingLastPathComponent()
+
+        // Jump to the end while the read is held, then let it fail: the
+        // re-open re-anchors there and the tail lands at EOF — the one cut
+        // that is not `emitSegment`'s.
+        let lastURL = base.appendingPathComponent(try #require(segments.last))
+        async let tail = URLSession.uncached.data(from: lastURL)
+        try await Task.sleep(for: .milliseconds(200))
+        factory.openGate()
+        #expect(try await tail.0.range(of: Data("mdat".utf8)) != nil)
+        await waitUntil { events.contains(where: Self.isRecovered) }
+        #expect(events.snapshot.filter(Self.isRecovered).count == 1, "\(events.snapshot)")
+
+        // Back into the skipped middle: fails again before its first cut.
+        // The tail landed in between, so this is a new failure, not the
+        // same bytes again — re-opened, not given up on.
+        let (media, _) = try await URLSession.uncached.data(
+            from: base.appendingPathComponent(segments[segments.count / 2]))
+        #expect(media.range(of: Data("mdat".utf8)) != nil)
+        await waitUntil { events.snapshot.filter(Self.isRecovered).count >= 2 || events.contains(where: Self.isFailed) }
+        #expect(events.snapshot.filter(Self.isRecovered).count == 2, "\(events.snapshot)")
+        #expect(!events.contains(where: Self.isFailed), "\(events.snapshot)")
+        #expect(factory.made == 3)
+    }
+
     @Test("Bytes that fail on every open are given up on after one re-open")
     func deterministicFailureIsNotRetried() async throws {
         let factory = FlakyInputFactory(
