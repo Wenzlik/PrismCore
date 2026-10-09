@@ -138,10 +138,16 @@ final class ReadInterruptGuard: @unchecked Sendable {
     var originFailure: PrismCoreError? { httpInput?.lastOriginFailure }
 
     func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
-                          headers: [String: String], hints: SourceOpenHints? = nil) throws {
-        let input = HTTPRangeInput(url: url, headers: headers, hints: hints, interrupted: { [weak self] in
-            self?.shouldInterrupt ?? true
-        })
+                          headers: [String: String], hints: SourceOpenHints? = nil,
+                          yieldsToPlayback: Bool = false) throws {
+        // A yielding reader is background work: it has no business adopting
+        // (and spending a verification request on) the prewarmed head that is
+        // there for the open a viewer is waiting on.
+        let input = HTTPRangeInput(
+            url: url, headers: headers, hints: hints,
+            prewarmStore: yieldsToPlayback ? nil : .shared, yieldsToPlayback: yieldsToPlayback,
+            interrupted: { [weak self] in self?.shouldInterrupt ?? true }
+        )
         try input.install(on: context)
         httpInput = input
     }
@@ -153,6 +159,12 @@ final class ReadInterruptGuard: @unchecked Sendable {
     var validatorObservation: HTTPRangeInput.ValidatorObservation? {
         httpInput?.validatorObservation
     }
+
+    /// The strong `ETag` the coordinated reader saw on its first response,
+    /// with the URL that served it (the redirect target, if any). `nil` for a weak tag, a `Last-Modified`-only origin, FFmpeg's own I/O
+    /// and a host-supplied input alike — none of them can vouch that a later
+    /// open reads the same bytes (see `KeyframeIndexCache.Identity`).
+    var openedStrongETag: (tag: String, url: URL)? { httpInput?.openedStrongETag }
 
     /// The byte bound the first read was actually given, when a sizing hint
     /// moved it off the reader's default block.

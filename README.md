@@ -365,6 +365,35 @@ vanished mid-session are both `originUnreachable`, because the evidence at the
 failure site is identical — the host knows which it was from whether `start()`
 had returned.
 
+For a bug report, `await session.diagnosticReport()` gathers the rest in one
+`Codable` value: PrismCore and FFmpeg versions (with any ABI mismatch), the
+platform, the source's description and container layout, the routing verdict
+and its reason, the session's options, every startup checkpoint with its time
+and the plan origin (planned or sequential), the probe's phase timings, and
+the run so far: the newest 64 playback events, timestamp repairs, audio
+rendition production, the object-audio and Dolby Vision conversion findings,
+retention evictions and the classified failure. The session keeps the
+checkpoints and events itself, so the report has them even if the host never
+subscribed. A source that never got a session (declined, or sent to the
+software path) gets the same report from its probe:
+`PrismCoreEngine.diagnosticReport(for: probed, decision: Result { try
+PrismCoreEngine.decide(for: probed.info) })`. `jsonData()` writes it with
+sorted keys, so two reports diff line by line. `schemaVersion` names the shape,
+and fields are only ever added.
+
+**What a report leaves out.** It is built to be pasted into a public issue, so it
+never carries HTTP headers (only how many there were), the URL's query string,
+fragment or `user:password@`, the LAN access token, or any path on the
+device's disk: the work directory, `keyframeIndexCacheDirectory` (reported as
+on or off) and sidecar subtitle files are all left out, and a local source is
+named by its file name alone. Error descriptions are also scrubbed of every one
+of those values, because an error can quote the failing URL — and any URL it
+quotes, a redirect target included, loses its credentials, query and fragment
+too. Two things do stay
+in: a remote URL's host and path, which are what a reproduction needs, and the
+track titles, languages and file name the media itself carries. A host whose
+URLs keep a token in the *path* should cut it before sharing.
+
 ## How it works
 
 ```
@@ -398,10 +427,44 @@ turns those fragments into a playlist. Two production modes exist:
 A source whose container carries no usable index (a Matroska without Cues, any
 MPEG-TS) is stuck sequential on its first play — but the producer reads every
 packet anyway, so with `keyframeIndexCacheDirectory` set on the session it
-harvests the keyframe map as a by-product and persists it (keyed by URL sans
-query + size + duration; bounded LRU). The next play of the same source plans
-on that map from its first second, as if the file had an index — and a cache
-hit skips the index-load seek entirely.
+harvests the keyframe map as a by-product and persists it (bounded LRU). The
+next play of the same source plans on that map from its first second, as if the
+file had an index — and a cache hit skips the index-load seek entirely.
+
+A map is only as good as the proof that the file has not changed under it, so
+each one is bound to an identity: the full URL **including its query** (a query
+can select the media, not only carry a token), the byte size, the container
+duration, and the version the open actually read — a local file's mtime, or the
+**strong `ETag`** a remote origin reported through the coordinated HTTP reader
+(`coordinatedHTTP`), together with the URL that served it — after a redirect,
+the target, since a tag is only unique per resource. Only a SHA-256 digest of that is written; the URL and any
+token in it never reach the disk. The scrub preview (`SeekPreviewService`)
+derives the same identity from its own open. A remote source that cannot prove
+its version neither uses a stored map nor stores one, and plans from the source
+every time: an origin or proxy with no `ETag`, only a weak `W/` one, or only
+`Last-Modified`; FFmpeg's own HTTP; and a host `PrismCoreInput` on a non-`file:`
+URL. A file replaced on the server under the same URL (new strong `ETag`), or a
+rotated query token, costs one rebuild rather than a wrong map. Sidecars written by
+3.4.0 and earlier are ignored and rebuilt once.
+
+A source that **has** an index can still play its first play sequentially:
+`SegmentPlan.indexLoadBudget` (3 s) bounds the index-load seek, and behind a
+range proxy one tail request for Matroska Cues can take longer than that on
+its own. When the plan fell back **because the budget ran out** (not for a junk
+or missing index), the session reads the index again in the background once its
+first video segment is out — a second open with its own interrupt guard and a
+60 s budget, cancelled by `stop()`, whose reader takes the origin only while
+the producer has nothing in flight. If that open proves it read the same
+version (the identity above is equal) and the index reaches the end of the
+source, the map is stored as complete right away rather than at EOF, and the
+session reports `PlaybackEvent.segmentPlanAvailable(segments:)`. The running
+session stays sequential; a successor (`makeSession(changing:)` with the same
+cache directory, then a seek to the current time) plans as VOD from the map.
+This runs only where the map can be stored — over `coordinatedHTTP` with a
+strong `ETag` and a `keyframeIndexCacheDirectory` — and only for a container
+whose framing names where its index is (a Matroska SeekHead pointing at its
+Cues); anywhere else the second read would be a scan of the whole file, and the
+EOF harvest gets that map for free.
 
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and by
 an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
@@ -665,11 +728,15 @@ link) that runs the engine on one source from the command line:
 
 ```
 swift run prismcore-cli probe     <url-or-path>   # SourceInfo, structure, routing verdict + reason
+                                                  # (--json: the diagnostic report, alone on stdout)
 swift run prismcore-cli serve     <url-or-path>   # loopback playlist URL for Safari / QuickTime
 swift run prismcore-cli bench     <url-or-path>   # the startup checkpoint line a host logs
 swift run prismcore-cli segverify <url-or-path>   # decode every served segment on its own
 swift run prismcore-cli validate  <url-or-path>   # Apple's mediastreamvalidator, if installed
 ```
+
+`serve` and `segverify` take `--report FILE` and write the session's diagnostic
+report there on exit, a failed start included.
 
 `validate` is opt-in. It needs Apple's HTTP Live Streaming Tools, and without
 them it prints a notice and exits 0 (unless you pass `--require-validator`).

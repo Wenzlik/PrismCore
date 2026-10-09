@@ -113,9 +113,9 @@ struct ProbedSourceReuseTests {
         defer { try? FileManager.default.removeItem(at: cacheDirectory) }
         let probe2 = try SourceProbe.open(url: source)
         let ctx2 = try #require(probe2.peekContextForTesting())
-        let identity = KeyframeIndexCache.identity(
-            sourceURL: source, sizeBytes: avio_size(ctx2.pointee.pb), durationMicroseconds: ctx2.pointee.duration
-        )
+        let identity = try #require(KeyframeIndexCache.Identity(
+            opened: ctx2, sourceURL: source, interruptGuard: probe2.interruptGuard
+        )).key
         let timeBase = ctx2.pointee.streams[0]!.pointee.time_base
         KeyframeIndexCache(directory: cacheDirectory).store(.init(
             identity: identity, timeBaseNum: timeBase.num, timeBaseDen: timeBase.den,

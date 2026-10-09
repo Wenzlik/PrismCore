@@ -71,10 +71,15 @@ final class ScriptedHTTPServer: @unchecked Sendable {
     }
 
     /// `body`, or the sub-range a `Range: bytes=a-b` / `bytes=a-` asks for,
-    /// answered the way an origin that honours ranges does.
-    static func ranged(_ body: Data, for request: Request, type: String = "application/octet-stream") -> Reply {
+    /// answered the way an origin that honours ranges does. `validators` (an
+    /// `ETag`, a `Last-Modified`) ride on every answer, as a real origin's do.
+    static func ranged(
+        _ body: Data, for request: Request, type: String = "application/octet-stream",
+        validators: [String: String] = [:]
+    ) -> Reply {
         guard let range = request.headers["range"], range.hasPrefix("bytes=") else {
-            return .respond(status: 200, headers: ["Content-Type": type, "Accept-Ranges": "bytes"], body: body)
+            return .respond(status: 200, headers: ["Content-Type": type, "Accept-Ranges": "bytes"]
+                .merging(validators) { $1 }, body: body)
         }
         let bounds = range.dropFirst("bytes=".count).split(separator: "-", omittingEmptySubsequences: false)
         let start = bounds.first.flatMap { Int($0) } ?? 0
@@ -85,7 +90,7 @@ final class ScriptedHTTPServer: @unchecked Sendable {
         return .respond(status: 206, headers: [
             "Content-Type": type,
             "Content-Range": "bytes \(start)-\(end)/\(body.count)",
-        ], body: body.subdata(in: start..<(end + 1)))
+        ].merging(validators) { $1 }, body: body.subdata(in: start..<(end + 1)))
     }
 
     static func text(_ text: String) -> Reply {

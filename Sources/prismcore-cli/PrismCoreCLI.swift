@@ -38,7 +38,10 @@ struct PrismCoreCLI {
           -v, --verbose                libav* warnings and engine notices on stderr
 
         probe:      --structure none|layout|full   (default layout)
+                    --json                         the diagnostic report as JSON, alone on stdout
         serve:      --for SECONDS                  stop on its own after SECONDS
+                    --keyframe-cache DIR           persist keyframe maps (and load a late index)
+                    --report FILE                  write the session's diagnostic report (JSON) on exit
         validate:   --require-validator            exit 69 when the validator is missing
                     --out DIR                      where the report goes (default ./prismcore-validation)
                     -- ARGS…                       passed to mediastreamvalidator verbatim
@@ -48,6 +51,7 @@ struct PrismCoreCLI {
         segverify:  --limit N                      check at most N segments per playlist
                     --hls                          the source already is an HLS playlist; verify
                                                    it directly instead of remuxing
+                    --report FILE                  as for serve (not with --hls)
 
         Exit status: 0 ok, 1 check failed, 2 source unreadable, 3 source routes away from
         the remux path, 64 usage, 66 no such file, 69 a check could not be made (validator
