@@ -469,9 +469,10 @@ turns those fragments into a playlist. Two production modes exist:
   `tfdt` carries absolute time and the produced segment sits exactly where the
   playlist promised. After EOF the producer parks and keeps answering demand for
   segments a re-anchor skipped.
-- **Sequential** — an EVENT playlist growing head-to-EOF. Used when no trustworthy
-  plan exists (live, unknown duration, junk index) and for the muxed-with-bridge
-  shape, where re-anchoring would reset an encoder mid-fragment.
+- **Sequential** — an EVENT playlist growing head-to-EOF (or, opted in, a
+  sliding window — see below). Used when no trustworthy plan exists (live,
+  unknown duration, junk index) and for the muxed-with-bridge shape, where
+  re-anchoring would reset an encoder mid-fragment.
 
 A source whose container carries no usable index (a Matroska without Cues, any
 MPEG-TS) is stuck sequential on its first play — but the producer reads every
@@ -514,6 +515,70 @@ strong `ETag` and a `keyframeIndexCacheDirectory` — and only for a container
 whose framing names where its index is (a Matroska SeekHead pointing at its
 Cues); anywhere else the second read would be a scan of the whole file, and the
 EOF harvest gets that map for free.
+
+### Sequential sessions: EVENT or a sliding window
+
+A sequential segment cannot be produced a second time — there is no plan to
+re-anchor on — so the byte budget (`segmentCacheBytes`) deletes old files
+behind the playhead and they are gone. By default the playlist does not say
+so: it is `EXT-X-PLAYLIST-TYPE:EVENT`, which may never lose an entry, so it
+keeps offering the deleted segments and a seek back to one is a 404 AVPlayer
+counts as a failed segment. A host can ask for a window that tells the truth
+instead:
+
+```swift
+let session = try PrismCoreSession(
+    url: sourceURL,
+    display: .current(),
+    sequentialPlaylist: .slidingWindow(seconds: 300)   // default: .event
+)
+```
+
+It decides nothing about a planned session (its VOD playlist lists the whole
+source), and clones and both rejection fallbacks carry it. In the window:
+
+- **Shape.** Every media playlist — the variant, each audio and subtitle
+  rendition — is written without `PLAYLIST-TYPE` from its first version, and
+  entries leave the front: `EXT-X-MEDIA-SEQUENCE` advances by one per entry
+  removed, segment names and media timestamps never change, and
+  `TARGETDURATION` stays the longest entry ever listed. There are no
+  discontinuities in this output, so no `EXT-X-DISCONTINUITY-SEQUENCE`.
+- **Size.** At each cut the front moves to `seconds` of content before the
+  segment AVPlayer fetched last, and further if the budget evicted beyond
+  that — never past that segment itself, never so far that a playlist lists
+  less than three target durations, and not at all before the first fetch.
+- **One instant for every playlist.** All playlists drop the same stretch of
+  time. An audio rendition folds a boundary that carried no audio into its
+  next entry (and numbers its own files), so where its entry straddles the
+  cut the cut moves back to that entry's start, for everyone. Media sequence
+  numbers may therefore differ between renditions by those folds; the
+  playlist timeline is what lines them up. A rendition whose first audio
+  arrives after the window has moved starts on the window's front: its first
+  entry covers only the stretch still listed elsewhere, not the whole time
+  before it. That entry still sets its `TARGETDURATION`, and so its three
+  target durations of minimum window, for the rest of the session. A
+  rendition that stops delivering (an audio track ending early) no longer
+  holds the window back once its last entry falls behind the variant's own
+  three-target floor: its entries leave with everyone else's and, if it
+  resumes, it rejoins on the front the same way.
+- **Unlink after a grace period.** A segment leaves the playlists first. Its
+  files — `.m4s` and `.vtt` alike — are deleted only after its own duration
+  plus the longest any of the session's playlists has been (RFC 8216
+  §6.2.2's rule, rounded up), so a client still reading an older manifest is
+  not handed a 404. The period is checked at the next cut, not on a timer:
+  while the producer is parked (a paused player) or finished, removed files
+  wait, and whatever is still waiting at EOF goes with `stop()`.
+- **The budget is soft.** It counts what the playlists offer. Files in their
+  grace period are on disk on top of it, and the three-target-duration floor
+  can keep an evicted segment listed (and on disk) a little longer. A
+  playlist holds `seconds` plus the up to 30 s the producer runs ahead, and
+  the grace period is about as long again, so size the budget for roughly
+  twice `seconds` plus a minute at the source's bitrate; a smaller one wins
+  over `seconds` and the window shrinks toward the segment fetched last.
+- **EOF** closes whatever window is left with `EXT-X-ENDLIST`.
+
+A segment that has left the window and been deleted still answers 404 — what
+changed is that no current manifest offers it any more.
 
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and by
 an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a

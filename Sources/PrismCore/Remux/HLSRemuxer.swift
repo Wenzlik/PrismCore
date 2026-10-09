@@ -298,6 +298,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Disk budget for produced segments, planned mode only (`nil` keeps
     /// everything). See `SegmentRetention` for the policy.
     private let segmentCacheBytes: Int?
+    /// How the playlists of a sequential (unplanned) run are published. A
+    /// planned run never reads it. See `SequentialWindow`.
+    private let sequentialPlaylist: PrismCoreSession.SequentialPlaylist
     /// Skip the renditions shape even when a master is possible — the host's
     /// answer to AVPlayer refusing a master (-11868/-11848/-1002): a fresh
     /// session with the one best audio track muxed into the variant.
@@ -342,6 +345,12 @@ final class HLSRemuxer: @unchecked Sendable {
     /// so "cancel mid-file" can only be made deterministic from inside the
     /// cut path. `nil` in production.
     var onSegmentLanded: ((Int) -> Void)?
+
+    /// The clock a sliding window's grace period runs on (seconds, any
+    /// monotonic origin). A test seam like `onSegmentLanded` — set before
+    /// `run()`, read on the producer thread — so the period can be stepped
+    /// over instead of slept through.
+    var windowClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     /// The session's startup-checkpoint sink, called on the producer thread as
     /// each stage is reached. `nil` unless a host registered for them, and a
@@ -565,6 +574,7 @@ final class HLSRemuxer: @unchecked Sendable {
         displayIsDolbyVisionCapable: Bool = false,
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
+        sequentialPlaylist: PrismCoreSession.SequentialPlaylist = .event,
         forceMuxed: Bool = false,
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
@@ -594,6 +604,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
         self.demand = demand
         self.segmentCacheBytes = segmentCacheBytes
+        self.sequentialPlaylist = sequentialPlaylist
         self.forceMuxed = forceMuxed
         self.dialogueBoost = dialogueBoost
         self.preferredAudioLanguage = preferredAudioLanguage
@@ -1428,6 +1439,20 @@ final class HLSRemuxer: @unchecked Sendable {
             demand.setProducing(index: 0)
         }
 
+        // A sequential run that opted into a sliding window. Built here, after
+        // the plan was decided and before the first cut writes any playlist:
+        // the mode is a promise made by the very first manifest (an EVENT
+        // playlist may never lose an entry), so it cannot be switched on
+        // later. Never for a planned run, whose VOD playlist lists the film.
+        let window: SequentialWindow? = {
+            guard plannedPlan == nil, case .slidingWindow(let seconds) = sequentialPlaylist else { return nil }
+            return SequentialWindow(
+                seconds: seconds,
+                video: playlist,
+                renditions: renditions.map(\.playlist) + subtitles.mediaPlaylists
+            )
+        }()
+
         // Segmentation state, tracked on the INPUT video stream's time base
         // (the packet still carries it when the cut decision is made).
         let videoTimeBase = input.pointee.streams[Int(videoIndex)]!.pointee.time_base
@@ -1498,6 +1523,9 @@ final class HLSRemuxer: @unchecked Sendable {
         // 404 AVPlayer treats as a failed segment. Accepted, and documented,
         // against the alternative — a sequential remux of a 50 GB film wrote
         // all 50 GB to the device before this. Never ahead of the playhead.
+        // A sliding window (`SequentialWindow`) is the way out of that 404:
+        // the budget's victims leave the playlists first and their files go
+        // only after the grace period.
         var retention: SegmentRetention? = (plannedPlan != nil || demand != nil)
             ? segmentCacheBytes.map { SegmentRetention(budgetBytes: $0) }
             : nil
@@ -1516,20 +1544,26 @@ final class HLSRemuxer: @unchecked Sendable {
         /// Record a landed segment's disk cost (variant + every rendition
         /// file of the same index, as their cuts reported it — no `stat`)
         /// and delete whatever the policy evicts.
-        func recordAndEvict(index: Int, videoBytes: Int, renditionBytes: Int) {
-            guard retention != nil else { return }
-            // Indexes with an outstanding demand serve are off limits — the
-            // fetch that re-anchored production here is still waiting for its
-            // file, and production has usually run several segments past it
-            // by the time this records (issue #43). In the sequential shape
-            // everything from the playhead on is off limits too.
-            var protected = demand?.demandProtectedIndexes ?? []
-            if plannedPlan == nil, let playhead = demand?.playheadIndex, playhead <= index {
-                for ahead in playhead...index { protected.insert(ahead) }
+        func recordAndEvict(index: Int, videoBytes: Int, renditionBytes: Int) throws {
+            var victims: [Int] = []
+            if retention != nil {
+                // Indexes with an outstanding demand serve are off limits — the
+                // fetch that re-anchored production here is still waiting for its
+                // file, and production has usually run several segments past it
+                // by the time this records (issue #43). In the sequential shape
+                // everything from the playhead on is off limits too.
+                var protected = demand?.demandProtectedIndexes ?? []
+                if plannedPlan == nil, let playhead = demand?.playheadIndex, playhead <= index {
+                    for ahead in playhead...index { protected.insert(ahead) }
+                }
+                victims = retention!.record(
+                    index: index, bytes: videoBytes + renditionBytes, producing: index, protected: protected
+                )
             }
-            let victims = retention!.record(
-                index: index, bytes: videoBytes + renditionBytes, producing: index, protected: protected
-            )
+            if let window {
+                try slide(window, budgetCutIndex: victims.max())
+                return
+            }
             guard !victims.isEmpty else { return }
             residentSegments.retire(victims)
             let directories = [outputDirectory] + renditions.map {
@@ -1538,6 +1572,43 @@ final class HLSRemuxer: @unchecked Sendable {
             unlinkQueue.async { [residentSegments] in
                 for victim in victims {
                     residentSegments.unlinkRetired(index: victim, directories: directories)
+                }
+            }
+        }
+
+        /// Move a sliding window's front and unlink what has outlived its
+        /// grace period. The playlists are rewritten BEFORE anything is
+        /// retired, and nothing is unlinked that a manifest still offers: a
+        /// 404 for a URL the current playlist lists is the failure this mode
+        /// exists to remove. The grace period is checked here, at a cut, and
+        /// not on a timer: while the producer is parked (a paused player) or
+        /// finished, removed files simply wait — disk the budget did not plan
+        /// for, but never a file pulled from under a slow client.
+        func slide(_ window: SequentialWindow, budgetCutIndex: Int?) throws {
+            // Read after the rewrites (an autoclosure): a deadline taken
+            // before them would start the grace period early by however long
+            // the atomic writes took.
+            if let retired = try window.slide(
+                playheadIndex: demand?.playheadIndex, budgetCutIndex: budgetCutIndex, now: windowClock()
+            ) {
+                // Off the books once off the playlist: the budget measures
+                // what is offered, and the grace period is the soft part.
+                retention?.forget(retired.videoIndexes)
+                residentSegments.retire(retired.videoIndexes)
+            }
+            let due = window.takeDue(now: windowClock())
+            guard !due.isEmpty else { return }
+            unlinkQueue.async { [residentSegments, outputDirectory] in
+                for retired in due {
+                    for index in retired.videoIndexes {
+                        residentSegments.unlinkRetired(index: index, directories: [outputDirectory])
+                    }
+                    // Audio fragments AND WebVTT segments, by the names their
+                    // playlists listed — `unlinkRetired` knows only the
+                    // variant's `.m4s` naming.
+                    for file in retired.renditionFiles {
+                        try? FileManager.default.removeItem(at: file)
+                    }
                 }
             }
         }
@@ -1669,7 +1740,7 @@ final class HLSRemuxer: @unchecked Sendable {
             residentSegments.markProduced(index: segmentIndex - 1)
             recovery.noteProgress()
             demand?.setProducing(index: segmentIndex)
-            recordAndEvict(index: segmentIndex - 1, videoBytes: media.count, renditionBytes: renditionBytes)
+            try recordAndEvict(index: segmentIndex - 1, videoBytes: media.count, renditionBytes: renditionBytes)
             // Refreshed per segment rather than once at EOF: a host that wants to
             // log "Dolby Vision engaged" can read it as soon as playback starts,
             // and a session that is cancelled halfway still leaves a real count.
@@ -2196,7 +2267,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 // failure — anywhere, after a seek back — read as the same
                 // bytes failing again.
                 recovery.noteProgress()
-                recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count, renditionBytes: 0)
+                try recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count, renditionBytes: 0)
                 // A source shorter than the first target never reaches
                 // `emitSegment`, so this is where ITS first segment lands —
                 // and the readiness gate is waiting on exactly this write.

@@ -76,6 +76,7 @@ struct SessionCloneTests {
             httpHeaders: ["Authorization": "Bearer t"],
             display: DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
             segmentCacheBytes: 64 << 20,
+            sequentialPlaylist: .slidingWindow(seconds: 120),
             keyframeIndexCacheDirectory: cache,
             dialogueBoost: [.medium],
             audioDelaySeconds: 0.25
@@ -86,6 +87,9 @@ struct SessionCloneTests {
         let after = await clone.options
         #expect(after.segmentCacheBytes == 8 << 20)
         #expect(before.segmentCacheBytes == 64 << 20)  // the predecessor is untouched
+        // Decided before the first playlist is written, so a clone (and with
+        // it both rejection fallbacks) has to arrive already carrying it.
+        #expect(after.sequentialPlaylist == .slidingWindow(seconds: 120))
         // Everything else identical — the whole point of cloning rather than
         // asking the host to restate what it already said once.
         var expected = before
@@ -233,13 +237,24 @@ struct SessionCloneTests {
 
     @Test("The rejection fallbacks count as that session's one successor")
     func fallbacksGoThroughTheSameDoor() async throws {
-        let session = try PrismCoreSession(url: try fixture("h264_aac.mkv"))
+        let session = try PrismCoreSession(
+            url: try fixture("h264_aac.mkv"), sequentialPlaylist: .slidingWindow(seconds: 60)
+        )
         let fallback = try await session.makeMuxedFallbackSession()
         #expect(await fallback.options.forceMuxedShape)
+        #expect(await fallback.options.sequentialPlaylist == .slidingWindow(seconds: 60))
         await #expect(throws: PrismCoreSession.SessionError.self) {
             _ = try await session.makeSession { $0.forceMuxedShape = false }
         }
         await session.stop()
         await fallback.stop()
+
+        let rejected = try PrismCoreSession(
+            url: try fixture("h264_aac.mkv"), sequentialPlaylist: .slidingWindow(seconds: 60)
+        )
+        let tiered = try await rejected.makeMasterRejectionFallbackSession()
+        #expect(await tiered.options.sequentialPlaylist == .slidingWindow(seconds: 60))
+        await rejected.stop()
+        await tiered.stop()
     }
 }

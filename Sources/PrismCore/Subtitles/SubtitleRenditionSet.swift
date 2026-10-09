@@ -1008,6 +1008,13 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         for bitmap in hostOnlyBitmaps.values { bitmap.reanchor() }
     }
 
+    /// Every rendition's media playlist, for a sequential session's
+    /// `SequentialWindow`. Producer thread only, like `flushSegment`: the
+    /// track list is settled by `prepare`, before the first packet.
+    var mediaPlaylists: [MediaPlaylistWriter] {
+        tracks.map(\.writer.playlist)
+    }
+
     /// `EXT-X-ENDLIST` on every rendition playlist.
     func finish() throws {
         for track in tracks {

@@ -253,5 +253,39 @@ struct SeekSteadyStateTests {
         #EXT-X-ENDLIST
 
         """)
+
+        // The sliding shape over the same entries: no type from the very
+        // first write, the front leaves on a boundary, the sequence counts
+        // what left, TARGETDURATION remembers the longest entry ever listed
+        // and the names that stay are the names that were written.
+        let slidingRoot = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: slidingRoot) }
+        let sliding = MediaPlaylistWriter(directory: slidingRoot)
+        sliding.slides = true
+        try sliding.appendSegment(duration: 2.0, file: "seg00000.m4s")
+        try sliding.appendSegment(duration: 6.04, file: "seg00001.m4s")
+        try sliding.appendSegment(duration: 7.2, file: "seg00002.m4s")
+        try sliding.appendSegment(duration: 3.0, file: "seg00003.m4s")
+        let first = try String(contentsOf: slidingRoot.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        #expect(!first.contains("PLAYLIST-TYPE"))
+        #expect(first.contains("#EXT-X-MEDIA-SEQUENCE:0\n"))
+        // 8.04 is the end of seg00001; anything short of a boundary keeps
+        // the entry it falls in.
+        #expect(try sliding.removeEntries(endingBy: 8.0).map(\.file) == ["seg00000.m4s"])
+        #expect(try sliding.removeEntries(endingBy: 15.24).map(\.file) == ["seg00001.m4s", "seg00002.m4s"])
+        try sliding.finish()
+        let slid = try String(contentsOf: slidingRoot.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        #expect(slid == """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-TARGETDURATION:8
+        #EXT-X-MEDIA-SEQUENCE:3
+        #EXT-X-INDEPENDENT-SEGMENTS
+        #EXT-X-MAP:URI="init.mp4"
+        #EXTINF:3.00000,
+        seg00003.m4s
+        #EXT-X-ENDLIST
+
+        """)
     }
 }
