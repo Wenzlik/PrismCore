@@ -8,6 +8,29 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **A host-supplied identity for the keyframe sidecar** —
+  `SourceCacheIdentity(namespace:item:etag:)`, passed as
+  `keyframeIndexCacheIdentity` on every session initializer (and carried by
+  clones in `Options`), on `SeekPreviewService`, and as
+  `--cache-identity SERVER:ITEM:ETAG` on `prismcore-cli serve` / `bench`.
+  The sidecar was keyed by the URL, which a host's localhost range proxy
+  changes on every launch (random port, fresh token), so a map learned
+  yesterday never matched today. With an identity the key is the cache
+  format version, the namespace (server), the item, the host's **strong**
+  `ETag` from its server's metadata, the byte size and the container
+  duration — no URL, and no transport proof, so it also works over FFmpeg's
+  own HTTP and a host input, not only `coordinatedHTTP`. A weak (`W/…`) or
+  empty `ETag`, or an empty namespace or item, turns the cache off for the
+  source rather than falling back to the URL; fields are length-prefixed so
+  no two identities can share a key. Without an identity nothing changes.
+  The background late index load still runs only over `coordinatedHTTP`.
+  Covered by `hostIdentityKey`, `hostIdentitySurvivesAProxyRestart` (a hit
+  after a restarted proxy on a new port and token, misses on a new ETag,
+  item or server, over FFmpeg's HTTP with no ETag on the wire) and
+  `weakHostIdentityStoresNothing`.
+
 ## [3.5.0] — 2026-10-09
 
 Field reports, self-healing playback and a bounded sequential session

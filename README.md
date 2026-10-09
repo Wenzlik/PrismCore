@@ -497,6 +497,37 @@ URL. A file replaced on the server under the same URL (new strong `ETag`), or a
 rotated query token, costs one rebuild rather than a wrong map. Sidecars written by
 3.4.0 and earlier are ignored and rebuilt once.
 
+**A host that knows what it is playing can name it.** The URL-based identity
+cannot survive an address that changes while the bytes do not — a localhost
+range proxy on a new port with a new token after every app launch is a miss
+every time. `keyframeIndexCacheIdentity` keys the map on the host's own name
+for the source instead: a namespace (the server), the item, and a **strong
+`ETag`** the host has from its server's metadata.
+
+```swift
+let session = try PrismCoreSession(
+    url: proxyURL,                                 // port and token change per launch
+    display: .current(),
+    keyframeIndexCacheDirectory: cachesDirectory,
+    keyframeIndexCacheIdentity: SourceCacheIdentity(
+        namespace: serverID, item: itemID, etag: item.etag
+    )
+)
+// The scrub preview must be given the same identity to share the map.
+let preview = SeekPreviewService(
+    url: proxyURL, keyframeIndexCacheDirectory: cachesDirectory,
+    keyframeIndexCacheIdentity: SourceCacheIdentity(namespace: serverID, item: itemID, etag: item.etag)
+)
+```
+
+With it set, the URL and whatever the transport reports stop counting: it works
+over FFmpeg's own HTTP and a host `PrismCoreInput` as well as `coordinatedHTTP`.
+The key still includes the cache format version, the byte size and the
+container duration. A weak (`W/…`) or empty `ETag`, or an empty namespace or
+item, turns the cache off for that source — it does not fall back to the URL.
+The host vouches for the tag, so it must change whenever the file does. A
+session without it behaves exactly as before; a clone carries it.
+
 A source that **has** an index can still play its first play sequentially:
 `SegmentPlan.indexLoadBudget` (3 s) bounds the index-load seek, and behind a
 range proxy one tail request for Matroska Cues can take longer than that on
@@ -510,8 +541,8 @@ source, the map is stored as complete right away rather than at EOF, and the
 session reports `PlaybackEvent.segmentPlanAvailable(segments:)`. The running
 session stays sequential; a successor (`makeSession(changing:)` with the same
 cache directory, then a seek to the current time) plans as VOD from the map.
-This runs only where the map can be stored — over `coordinatedHTTP` with a
-strong `ETag` and a `keyframeIndexCacheDirectory` — and only for a container
+This runs only where the map can be stored, over `coordinatedHTTP` (with a
+strong `ETag` or a host identity) and a `keyframeIndexCacheDirectory`, and only for a container
 whose framing names where its index is (a Matroska SeekHead pointing at its
 Cues); anywhere else the second read would be a scan of the whole file, and the
 EOF harvest gets that map for free.

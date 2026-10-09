@@ -613,9 +613,137 @@ struct KeyframeIndexCacheTests {
         }
     }
 
-    private static func sessionPlanOrigin(_ url: URL, cache: URL) async throws -> SegmentPlanOrigin? {
+    // MARK: - Host identity: the host names the source, not its address
+
+    @Test("A host identity keys on server, item and strong ETag — never the URL — and a weak or empty one keys nothing")
+    func hostIdentityKey() throws {
+        func key(_ url: String, _ host: SourceCacheIdentity?, size: Int64 = 100) -> String? {
+            KeyframeIndexCache.SourceVersion.observed(
+                sourceURL: URL(string: url)!, strongETag: ("\"reader\"", URL(string: url)!), host: host
+            ).map {
+                KeyframeIndexCache.Identity(
+                    sourceURL: URL(string: url)!, sizeBytes: size, durationMicroseconds: 200_000_000, version: $0
+                ).key
+            }
+        }
+        let etag = "\"2049-12345-5400000000-1760000000-1760000000\""
+        let item = SourceCacheIdentity(namespace: "server-a", item: "42", etag: etag)
+        // A localhost proxy on a new port with a new token: the same source.
+        let first = try #require(key("http://127.0.0.1:50111/stream?t=AAA", item))
+        #expect(key("http://127.0.0.1:61234/stream?t=BBB", item) == first)
+        #expect(first.count == 64 && first.allSatisfy(\.isHexDigit))
+        // Everything the host names is part of the key; so are size and duration.
+        #expect(key("http://x/", .init(namespace: "server-a", item: "42", etag: "\"other\"")) != first)
+        #expect(key("http://x/", .init(namespace: "server-a", item: "43", etag: etag)) != first)
+        #expect(key("http://x/", .init(namespace: "server-b", item: "42", etag: etag)) != first)
+        #expect(key("http://x/", item, size: 101) != first)
+        // Not the URL-keyed identity of the same address and reader tag.
+        #expect(key("http://127.0.0.1:50111/stream?t=AAA", nil) != first)
+        // Field boundaries cannot be shifted to forge another item's key.
+        #expect(key("http://x/", .init(namespace: "a\u{0}b", item: "c", etag: etag))
+            != key("http://x/", .init(namespace: "a", item: "b\u{0}c", etag: etag)))
+        // No proof, no key — and no falling back to the URL or the reader's
+        // strong tag, which is the key the host is replacing.
+        for bad in ["W/\"v1\"", "w/\"v1\"", "", "   "] {
+            #expect(key("http://x/", .init(namespace: "server-a", item: "42", etag: bad)) == nil, "\(bad)")
+        }
+        #expect(key("http://x/", .init(namespace: "", item: "42", etag: etag)) == nil)
+        #expect(key("http://x/", .init(namespace: "server-a", item: "", etag: etag)) == nil)
+    }
+
+    @Test("Over FFmpeg's own HTTP, a host identity survives a restarted proxy and misses on a new ETag, item or server")
+    func hostIdentitySurvivesAProxyRestart() async throws {
+        let cacheDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        // The host's range proxy as it is today: no ETag of its own, a random
+        // port and a fresh token per launch.
+        func proxy() async throws -> (ScriptedHTTPServer, URL) {
+            let server = try ScriptedHTTPServer { request in
+                ScriptedHTTPServer.ranged(media, for: request, validators: [:])
+            }
+            let root = try await server.start()
+            let url = try #require(URL(string: "stream?token=\(UUID().uuidString)", relativeTo: root)).absoluteURL
+            return (server, url)
+        }
+        let item = SourceCacheIdentity(namespace: "server-a", item: "42", etag: "\"1-2-3-4-5\"")
+
+        // Launch 1: sequential to EOF, harvesting under the host's name.
+        let (first, firstURL) = try await proxy()
+        let remuxer = HLSRemuxer(
+            sourceURL: firstURL, outputDirectory: output, demand: DemandCoordinator(),
+            keyframeCacheDirectory: cacheDirectory, hostCacheIdentity: item, indexLoadBudget: .zero
+        )
+        try remuxer.run()
+        first.stop()
+        let sidecars = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
+            .filter { $0.hasSuffix(".json") }
+        #expect(sidecars.count == 1, "the host-named play stored nothing — nothing was exercised")
+
+        // Launch 2: another port, another token, the same item.
+        let (second, secondURL) = try await proxy()
+        defer { second.stop() }
+        #expect(secondURL != firstURL)
+        // Without the host's name this address is a stranger — unchanged behaviour.
+        #expect(try await Self.sessionPlanOrigin(secondURL, cache: cacheDirectory, coordinatedHTTP: false)
+            != .keyframeIndexCache)
+        #expect(try await Self.previewTakesMap(secondURL, cache: cacheDirectory, identity: item, coordinatedHTTP: false))
+        #expect(try await Self.sessionPlanOrigin(
+            secondURL, cache: cacheDirectory, identity: item, coordinatedHTTP: false
+        ) == .keyframeIndexCache)
+
+        // The file changed on the server, or it is another item or server:
+        // the map is not theirs.
+        for other in [
+            SourceCacheIdentity(namespace: "server-a", item: "42", etag: "\"1-2-3-4-6\""),
+            SourceCacheIdentity(namespace: "server-a", item: "43", etag: item.etag),
+            SourceCacheIdentity(namespace: "server-b", item: "42", etag: item.etag),
+        ] {
+            #expect(try await !Self.previewTakesMap(secondURL, cache: cacheDirectory, identity: other, coordinatedHTTP: false))
+            #expect(try await Self.sessionPlanOrigin(
+                secondURL, cache: cacheDirectory, identity: other, coordinatedHTTP: false
+            ) != .keyframeIndexCache, "\(other)")
+        }
+    }
+
+    @Test("A host identity with a weak or empty ETag never writes the sidecar, even over a reader with a strong one")
+    func weakHostIdentityStoresNothing() async throws {
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        let origin = try ScriptedHTTPServer { request in
+            ScriptedHTTPServer.ranged(media, for: request, validators: ["ETag": "\"reader-strong\""])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+        for etag in ["W/\"1-2-3\"", ""] {
+            let cacheDirectory = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+            let output = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: output) }
+            let remuxer = HLSRemuxer(
+                sourceURL: root.appendingPathComponent("movie.ts"), outputDirectory: output,
+                demand: DemandCoordinator(), keyframeCacheDirectory: cacheDirectory,
+                hostCacheIdentity: SourceCacheIdentity(namespace: "server-a", item: "42", etag: etag),
+                indexLoadBudget: .zero
+            )
+            // The coordinated reader WOULD vouch with its strong tag; the
+            // host's identity decides alone.
+            remuxer.coordinatedHTTP = true
+            try remuxer.run()
+            let playlist = try String(contentsOf: output.appendingPathComponent("index.m3u8"), encoding: .utf8)
+            #expect(playlist.contains("#EXT-X-ENDLIST"), "the play did not run to EOF — nothing was exercised")
+            let sidecars = (try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)) ?? []
+            #expect(sidecars.isEmpty, "etag \(etag) stored \(sidecars)")
+        }
+    }
+
+    private static func sessionPlanOrigin(
+        _ url: URL, cache: URL, identity: SourceCacheIdentity? = nil, coordinatedHTTP: Bool = true
+    ) async throws -> SegmentPlanOrigin? {
         let session = try PrismCoreSession(
-            url: url, keyframeIndexCacheDirectory: cache, coordinatedHTTP: true
+            url: url, keyframeIndexCacheDirectory: cache, keyframeIndexCacheIdentity: identity,
+            coordinatedHTTP: coordinatedHTTP
         )
         let checkpoints = try await session.startupCheckpoints()
         async let origin = planOrigin(of: checkpoints)
@@ -624,9 +752,12 @@ struct KeyframeIndexCacheTests {
         return await origin
     }
 
-    private static func previewTakesMap(_ url: URL, cache: URL) async throws -> Bool {
+    private static func previewTakesMap(
+        _ url: URL, cache: URL, identity: SourceCacheIdentity? = nil, coordinatedHTTP: Bool = true
+    ) async throws -> Bool {
         let service = SeekPreviewService(
-            url: url, keyframeIndexCacheDirectory: cache, coordinatedHTTP: true
+            url: url, keyframeIndexCacheDirectory: cache, keyframeIndexCacheIdentity: identity,
+            coordinatedHTTP: coordinatedHTTP
         )
         _ = try await service.thumbnail(at: 10)
         let takes = await service.usesKeyframeMap

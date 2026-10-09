@@ -319,6 +319,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
     private let keyframeCache: KeyframeIndexCache?
+    /// The host's name for the source, keying `keyframeCache` in place of
+    /// the URL (`SourceCacheIdentity`). `nil` keeps the URL-based identity.
+    private let hostCacheIdentity: SourceCacheIdentity?
     /// The plan's index-load seek budget, passed through to
     /// `SegmentPlan.build`. A knob for tests: a zero budget reproduces the
     /// field shape — the scan bounded out, the index never loaded — on a
@@ -582,6 +585,7 @@ final class HLSRemuxer: @unchecked Sendable {
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
+        hostCacheIdentity: SourceCacheIdentity? = nil,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
         landed: ProductionSignal? = nil,
         subtitleCueHistory: SubtitleCueHistory = .complete
@@ -593,6 +597,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.inputFactory = input ?? probed?.inputFactory
         self.landed = landed
         self.keyframeCache = keyframeCacheDirectory.map { KeyframeIndexCache(directory: $0) }
+        self.hostCacheIdentity = hostCacheIdentity
         self.indexLoadBudget = indexLoadBudget
         self.sourceURL = sourceURL
         self.httpHeaders = httpHeaders
@@ -982,9 +987,11 @@ final class HLSRemuxer: @unchecked Sendable {
         // a remote source then neither trusts a stored map nor writes one,
         // because a map from a since-replaced file of the same size and
         // length would cut segments on keyframes the new file does not have.
+        // A host identity replaces the URL and the reader's proof alike.
         let cacheIdentity: String? = keyframeCache == nil ? nil
             : KeyframeIndexCache.Identity(
-                opened: input, sourceURL: sourceURL, interruptGuard: interruptGuard
+                opened: input, sourceURL: sourceURL, interruptGuard: interruptGuard,
+                host: hostCacheIdentity
             )?.key
         // A previous play's harvested keyframe map, when its time base still
         // matches the stream's. It replaces the demuxer index in the plan —
@@ -1120,7 +1127,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 sourceURL: sourceURL, httpHeaders: httpHeaders, videoStreamIndex: videoIndex,
                 timeBase: input.pointee.streams[Int(videoIndex)]!.pointee.time_base,
                 segmentSeconds: segmentSeconds, firstSegmentSeconds: firstSegmentSeconds,
-                identity: cacheIdentity
+                identity: cacheIdentity, hostIdentity: hostCacheIdentity
             )
         }()
         func launchLateIndexLoad() {

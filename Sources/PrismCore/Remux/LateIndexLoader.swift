@@ -24,7 +24,8 @@ import Libavutil
 ///
 /// Never stored unless the open proves it read the **same version** as the
 /// producer's: the two identities must be equal (`KeyframeIndexCache.Identity`
-/// — URL, size, duration, strong `ETag` and the URL that served it). A file
+/// — URL, size, duration, strong `ETag` and the URL that served it, or the
+/// host's `SourceCacheIdentity` with size and duration). A file
 /// replaced between the two opens yields different digests and nothing is
 /// written. And the map must pass what a map stored by the producer passes:
 /// `keyframePlan`'s witnesses and `indexCoversThroughEnd` — a scan the budget
@@ -54,6 +55,9 @@ final class LateIndexLoader: @unchecked Sendable {
         /// `Identity.key` of the producer's open — the version the map must
         /// come from.
         let identity: String
+        /// The host's name for the source, when the producer's identity was
+        /// derived from it — this open must derive its own the same way.
+        let hostIdentity: SourceCacheIdentity?
     }
 
     private let target: Target
@@ -124,7 +128,8 @@ final class LateIndexLoader: @unchecked Sendable {
         guard avformat_open_input(&context, target.sourceURL.absoluteString, nil, &options) >= 0,
               let input = context,
               let identity = KeyframeIndexCache.Identity(
-                  opened: input, sourceURL: target.sourceURL, interruptGuard: interruptGuard
+                  opened: input, sourceURL: target.sourceURL, interruptGuard: interruptGuard,
+                  host: target.hostIdentity
               ), identity.key == target.identity,
               target.videoStreamIndex < input.pointee.nb_streams,
               let stream = input.pointee.streams[Int(target.videoStreamIndex)],

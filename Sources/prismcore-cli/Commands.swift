@@ -124,6 +124,7 @@ enum ServeCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var duration: Duration?
         var keyframeCache: URL?
+        var cacheIdentity: SourceCacheIdentity?
         var reportPath: String?
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
@@ -131,6 +132,7 @@ enum ServeCommand {
             case "--for": duration = .seconds(try reader.number(for: flag))
             case "--keyframe-cache":
                 keyframeCache = URL(fileURLWithPath: (try reader.value(for: flag) as NSString).expandingTildeInPath)
+            case "--cache-identity": cacheIdentity = try reader.cacheIdentity(for: flag)
             case "--report": reportPath = try reader.value(for: flag)
             default: return false
             }
@@ -142,7 +144,8 @@ enum ServeCommand {
         // exits 0; before that it interrupted a startup, and exits 130.
         let stop = StopSignal(watchStdin: true)
         return try await withServedSession(
-            reader.options, stop: stop, keyframeIndexCacheDirectory: keyframeCache, beforeStart: { session in
+            reader.options, stop: stop, keyframeIndexCacheDirectory: keyframeCache,
+            keyframeIndexCacheIdentity: cacheIdentity, beforeStart: { session in
             // Registered before `start()` so a throttle during the opening
             // reads is printed too; the stream ends with the session.
             let events = await session.playbackEvents()
@@ -188,12 +191,14 @@ enum BenchCommand {
     static func run(_ arguments: [String]) async throws -> ExitCode {
         var runs = 1
         var keyframeCache: URL?
+        var cacheIdentity: SourceCacheIdentity?
         var reader = ArgumentReader(arguments)
         try reader.parse { flag, reader in
             switch flag {
             case "--runs": runs = try reader.number(for: flag)
             case "--keyframe-cache":
                 keyframeCache = URL(fileURLWithPath: (try reader.value(for: flag) as NSString).expandingTildeInPath)
+            case "--cache-identity": cacheIdentity = try reader.cacheIdentity(for: flag)
             default: return false
             }
             return true
@@ -214,7 +219,8 @@ enum BenchCommand {
                     budget: options.budget ?? .seconds(20),
                     coordinatedHTTP: options.coordinatedHTTP,
                     display: options.display,
-                    keyframeIndexCacheDirectory: keyframeCache
+                    keyframeIndexCacheDirectory: keyframeCache,
+                    keyframeIndexCacheIdentity: cacheIdentity
                 )
             } catch {
                 throw CLIFailure(code: .probeFailed, message: "probe failed: \(PrismCoreError.classify(error))")

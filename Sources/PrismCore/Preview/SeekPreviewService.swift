@@ -62,6 +62,9 @@ public actor SeekPreviewService {
     /// same directory, same identity, so a file that played once resolves
     /// scrub positions without touching the demuxer.
     private let keyframeCacheDirectory: URL?
+    /// The host's name for the source (`SourceCacheIdentity`) — must be the
+    /// session's, or the two derive different keys and the map is not shared.
+    private let cacheIdentity: SourceCacheIdentity?
 
     private var input: UnsafeMutablePointer<AVFormatContext>?
     private var interruptGuard: ReadInterruptGuard?
@@ -99,6 +102,7 @@ public actor SeekPreviewService {
         httpHeaders: [String: String] = [:],
         maxDimension: Int = 320,
         keyframeIndexCacheDirectory: URL? = nil,
+        keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil
     ) {
@@ -108,6 +112,7 @@ public actor SeekPreviewService {
         self.coordinatedHTTP = coordinatedHTTP
         self.maxDimension = max(32, maxDimension)
         self.keyframeCacheDirectory = keyframeIndexCacheDirectory
+        self.cacheIdentity = keyframeIndexCacheIdentity
     }
 
     deinit {
@@ -329,7 +334,7 @@ public actor SeekPreviewService {
         // positions. No provable version, no map.
         if let keyframeCacheDirectory,
            let identity = KeyframeIndexCache.Identity(
-               opened: context, sourceURL: url, interruptGuard: interruptGuard
+               opened: context, sourceURL: url, interruptGuard: interruptGuard, host: cacheIdentity
            ) {
             let cache = KeyframeIndexCache(directory: keyframeCacheDirectory)
             if let entry = cache.lookup(identity: identity.key),
