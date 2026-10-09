@@ -8,6 +8,28 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **`SubtitleCueHistory`: an opt-in bound on the remux cue tap's replay
+  history.** The tap kept every produced cue and its dedup key for the
+  session's lifetime (so a late `setTimedTextCueHandler` starts complete), and
+  queued pre-origin cues without limit — memory that grows with the text a
+  long captioned stream or a many-track disc carries. New
+  `PrismCoreSession.Options.subtitleCueHistory` (an initializer parameter on
+  every builder) takes `.complete` — the default, exactly today's behaviour —
+  or `.bounded(maxCues:maxBytes:)`, which keeps the newest cues only. Each cue
+  is evicted together with its key (a key left behind is the leak the bound
+  exists to stop; a key evicted alone is a duplicate cue), the byte bound
+  charges text plus key as UTF-8, and the pre-origin queue is capped the same
+  way. Live delivery is never bounded; a single cue over `maxBytes` goes out
+  live and is not retained. The contract a host takes on: the replay is the
+  retained window, and dedup is too — a seek back past evicted cues delivers
+  them again. Bounds below 1 are clamped rather than trapped on (a memory knob
+  should not crash a player), and read back as in force. The policy rides
+  `makeSession(changing:)` and both master-rejection fallbacks.
+  `subtitleCueHistoryStats` reports retained cues and bytes, `evictedCues` and
+  `droppedBeforeOrigin`, so truncation is never silent.
+
 ## [3.4.0] — 2026-10-07
 
 Audio renditions that re-encode are no longer produced for the whole film

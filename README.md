@@ -197,6 +197,45 @@ the remux path a switch also costs a rendition fetch.
   over, because a rendition AVPlayer cannot play is worse than the wrong
   language.
 
+### How much of the cue tap a session remembers
+
+`setTimedTextCueHandler` streams every embedded cue (text, OCR'd bitmap,
+CEA-608) as the remux produces it, and a handler registered late — or again,
+to pick up a new `setSubtitleDelaySeconds` — is first replayed everything
+produced so far. That replay means the session keeps every cue, and its dedup
+key, for its whole lifetime. For a film that is a few thousand short strings;
+for a long captioned stream, or a disc with many OCR'd tracks, it grows with
+the text. A host that only draws a running overlay can bound it:
+
+```swift
+let session = try PrismCoreSession(
+    url: mkvURL,
+    display: .current(),
+    subtitleCueHistory: .bounded(maxCues: 1_024, maxBytes: 1 << 20)
+)
+let history = session.subtitleCueHistoryStats  // retained cues/bytes, evictions
+```
+
+- **`.complete` is the default** and changes nothing.
+- **Live delivery is never bounded.** Only the replay is: a late handler gets
+  the newest retained cues, with the delay in force now.
+- **The byte bound is UTF-8** of each cue's text *plus* its dedup key (stream,
+  source times, text), so a cue costs a little over twice its text. The oldest
+  cue leaves together with its key.
+- **Dedup covers the retained window only.** Seek back far enough that a
+  region's cues were evicted and they are delivered again — a host opting in
+  must tolerate a repeated cue.
+- **A single cue larger than `maxBytes`** is delivered live and never
+  retained. Cues produced before the presentation origin is known wait in a
+  queue bounded the same way; anything it drops was never delivered.
+- **Nothing is dropped silently**: `evictedCues` counts what is no longer
+  replayable, `droppedBeforeOrigin` what never went out.
+- Both limits are clamped to at least 1, and `Options.subtitleCueHistory`
+  reads back the bound in force. The policy rides `makeSession(changing:)` and
+  both rejection fallbacks. It bounds the cue tap's history, not every byte of
+  subtitle memory: WebVTT renditions are produced as before, and the software
+  path has its own cache (below).
+
 ### Software track menus and captions
 
 `SoftwarePlaybackPipeline` publishes the probe's metadata on the live player.
