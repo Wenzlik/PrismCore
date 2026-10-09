@@ -298,6 +298,10 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var retryAfterSeconds: Double?
             /// The segment count of a plan a late index load stored.
             public var segments: Int?
+            /// A producer recovery's re-open count inside its 60 s window.
+            public var attempt: Int?
+            /// The failure a producer recovered from, or the one it died of.
+            public var failure: Failure?
         }
 
         public struct TimestampRepairs: Sendable, Equatable, Codable {
@@ -694,6 +698,10 @@ extension SessionDiagnosticReport.Runtime.Event {
             kind = "originRecovered"
         case .segmentPlanAvailable(let segments):
             (kind, self.segments) = ("segmentPlanAvailable", segments)
+        case .producerRecovered(let attempt, let cause):
+            (kind, self.attempt, failure) = ("producerRecovered", attempt, redaction.failure(cause))
+        case .producerFailed(let error):
+            (kind, failure) = ("producerFailed", redaction.failure(error))
         }
     }
 }

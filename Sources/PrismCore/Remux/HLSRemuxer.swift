@@ -157,7 +157,8 @@ final class HLSRemuxer: @unchecked Sendable {
     /// The late index load's thread, once launched. Test seam.
     var lateIndexLoadThread: ProducerThread? { activeGuardLock.withLock { lateIndexLoader?.thread } }
 
-    /// Where runtime events go (`.segmentPlanAvailable`). Written once by the
+    /// Where runtime events go (`.segmentPlanAvailable`, `.producerRecovered`,
+    /// `.producerFailed`). Written once by the
     /// session before the producer thread exists, like `onStartupPhase`.
     var events: PlaybackEventSink?
 
@@ -332,6 +333,9 @@ final class HLSRemuxer: @unchecked Sendable {
 
     /// Set by `cancel()`; checked once per packet in the copy loop.
     private let cancelled = LockedFlag()
+    /// What a recovery backoff sleeps on, so `cancel()` ends the sleep
+    /// instead of a `stop()` waiting out up to four seconds of it.
+    private let backoffWake = NSCondition()
 
     /// Called on the producer thread after each variant segment file lands,
     /// with its index. A test seam: a 30 s fixture produces in milliseconds,
@@ -605,6 +609,138 @@ final class HLSRemuxer: @unchecked Sendable {
         // A producer parked at EOF is asleep on the coordinator, not spinning —
         // setting the flag is not enough to get its thread back.
         demand?.wake()
+        // Under the condition's lock, after the flag: a sleeper that checked
+        // the flag before it was set is already waiting by the time this
+        // lock is ours, so the broadcast cannot be lost.
+        backoffWake.lock()
+        backoffWake.broadcast()
+        backoffWake.unlock()
+    }
+
+    /// Sleep out a recovery backoff. `false` when `cancel()` ended it.
+    private func sleepUnlessCancelled(_ delay: Duration) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: delay.seconds)
+        backoffWake.lock()
+        defer { backoffWake.unlock() }
+        while !cancelled.isSet, Date() < deadline {
+            _ = backoffWake.wait(until: deadline)
+        }
+        return !cancelled.isSet
+    }
+
+    /// Open the source ourselves: the startup fallback when no probe context
+    /// was handed over, and every re-open after a read failure. One path for
+    /// both, so a re-open cannot drift from what startup does — the guard
+    /// installed before `avformat_open_input` and published before it too,
+    /// the bounded budget, and `avformat_find_stream_info`, which is never
+    /// skipped (it fills fields the muxer needs; see AGENTS.md).
+    ///
+    /// Returns `nil` when a `cancel()` ended the open; the context is closed
+    /// by then. On success the guard is published as `activeGuard`.
+    private func openSourceContext() throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
+        // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
+        // authorization) on the demux connection itself, under the shared
+        // read caps (see `SourceOpenTuning`).
+        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
+        defer { av_dict_free(&openOptions) }
+
+        let interruptGuard = ReadInterruptGuard()
+        var input = interruptGuard.makeContext()
+        // Host-supplied bytes take `pb`; the coordinated HTTP reader is
+        // the fallback for sources the host does NOT carry itself.
+        if let inputFactory, let input {
+            do { try interruptGuard.installCustomInput(on: input, factory: inputFactory) }
+            catch { avformat_free_context(input); throw error }
+        } else if coordinatedHTTP, ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? ""), let input {
+            do { try interruptGuard.installHTTPInput(on: input, url: sourceURL, headers: httpHeaders) }
+            catch { avformat_free_context(input); throw error }
+        }
+        // Published BEFORE the open, not after it. `cancel()` can only
+        // reach a guard it can see, and until 3.1.0 this one became
+        // visible only once the open had returned — so a `stop()` that
+        // landed during the open bounced off, and the thread kept the
+        // whole `probeBudget` (10 s) for itself no matter who asked it to
+        // come back. Measured on `ErrorTaxonomyTests.starvedStartupIsTheBudget`
+        // (an origin that withholds the first byte for 3 s): the teardown
+        // took 2.3 s before this line and 4 ms after it.
+        //
+        // This is also the only way the host-input hook can reach an open
+        // that parked inside `read` — `installCustomInput` ran a few lines
+        // up, but the guard nobody can see cancels nobody.
+        activeGuardLock.withLock {
+            activeGuard = interruptGuard
+            if cancelled.isSet { interruptGuard.cancel() }
+        }
+        // Bounded like the probe's open, and for the same reason: a
+        // server that accepts and then starves the reads would otherwise
+        // pin this producer forever — the session's startup timeout fires,
+        // but the blocked thread never comes back. On expiry the open
+        // throws and the session surfaces a startup error instead.
+        interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
+        let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
+        do {
+            try FFmpegError.check(
+                avformat_open_input(&input, sourceSpec, nil, &openOptions),
+                "avformat_open_input"
+            )
+            guard let opened = input else { throw Failure.openProducedNoContext }
+            try FFmpegError.check(
+                avformat_find_stream_info(opened, nil), "avformat_find_stream_info"
+            )
+            // `find_stream_info` swallows an aborted read and returns
+            // success with half-filled parameters, so an expired budget is
+            // read off the guard, not the return code.
+            if interruptGuard.shouldInterrupt {
+                throw FFmpegError(code: swift_AVERROR_EXIT(), operation: "avformat_find_stream_info")
+            }
+        } catch {
+            // Closed while its guard is still alive (the callback runs on
+            // the teardown reads), and unpublished: nothing owns this
+            // context any more, and a `cancel()` arriving later must not
+            // find a guard whose reads have already been closed.
+            avformat_close_input(&input)
+            activeGuardLock.withLock { activeGuard = nil }
+            // A cancellation is not a source failure, wherever it lands.
+            // Now that the guard is visible during the open, a `stop()`
+            // can abort the open itself — and `run()` already returns
+            // normally for a cancel anywhere in the copy loop, so it
+            // returns normally for this one too. Reporting it as an
+            // unopenable source would turn every teardown-during-startup
+            // into a spurious error in the host's log.
+            if cancelled.isSet { return nil }
+            // Over the coordinated reader every transport verdict reaches
+            // libavformat as an errno, so the guard holds the only copy of
+            // what the origin actually said (see `ReadInterruptGuard`).
+            throw interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error
+        }
+        interruptGuard.disarm()
+        guard let input else { throw Failure.openProducedNoContext }
+        return (input, interruptGuard)
+    }
+
+    /// One stream as a re-opened context has to repeat it: everything
+    /// production already committed to — which output stream a packet goes
+    /// to, which decoder a bridge built, which time base the plan's PTS and
+    /// every rescale are in. A source that changed any of them under the
+    /// same URL is a different source, and re-anchoring onto it would mux
+    /// one file's packets into another's init segment.
+    struct StreamSignature: Equatable {
+        let mediaType: AVMediaType
+        let codecID: AVCodecID
+        let timeBaseNum: Int32
+        let timeBaseDen: Int32
+    }
+
+    static func streamSignatures(of context: UnsafeMutablePointer<AVFormatContext>) -> [StreamSignature] {
+        (0..<Int(context.pointee.nb_streams)).map { index in
+            let stream = context.pointee.streams[index]!.pointee
+            return StreamSignature(
+                mediaType: stream.codecpar.pointee.codec_type,
+                codecID: stream.codecpar.pointee.codec_id,
+                timeBaseNum: stream.time_base.num,
+                timeBaseDen: stream.time_base.den
+            )
+        }
     }
 
     /// Runs the whole demux → remux loop synchronously; call on a **dedicated
@@ -619,7 +755,9 @@ final class HLSRemuxer: @unchecked Sendable {
         // index load down with it: at EOF the harvest has stored the same map
         // from every packet, and otherwise nobody is left to plan from it.
         defer { activeGuardLock.withLock { lateIndexLoader?.cancel() } }
-        var input: UnsafeMutablePointer<AVFormatContext>?
+        // The context production reads from. Owned here, and replaced when a
+        // read failure re-opens the source (`recoverSource`).
+        var openedInput: UnsafeMutablePointer<AVFormatContext>?
 
         // Adopt the routing probe's context when the host handed one over —
         // the source is already open and already analysed, so this whole
@@ -635,7 +773,8 @@ final class HLSRemuxer: @unchecked Sendable {
         // a context after `avformat_open_input` (issue #39), so an adopted
         // context brings the probe's guard along and a self-opened one gets
         // its own before the open.
-        let interruptGuard: ReadInterruptGuard
+        // A `var` because a re-open replaces it along with the context.
+        var interruptGuard: ReadInterruptGuard
         // The probe left an adopted context wherever its reads ended — the
         // interlace verification decodes a dozen frames. Production starts at
         // the head, but the rewind is deferred until the plan is built: the
@@ -644,82 +783,14 @@ final class HLSRemuxer: @unchecked Sendable {
         // spent to arrive where the next call was going anyway.
         var needsRewindToHead = false
         if let adopted = probed?.consumeContext(), let probed {
-            input = adopted
+            openedInput = adopted
             interruptGuard = probed.interruptGuard
             needsRewindToHead = true
             adoptedInfo = probed.info
         } else {
-            // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
-            // authorization) on the demux connection itself, under the shared
-            // read caps (see `SourceOpenTuning`).
-            var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-            defer { av_dict_free(&openOptions) }
-
-            interruptGuard = ReadInterruptGuard()
-            input = interruptGuard.makeContext()
-            // Host-supplied bytes take `pb`; the coordinated HTTP reader is
-            // the fallback for sources the host does NOT carry itself.
-            if let inputFactory, let input {
-                do { try interruptGuard.installCustomInput(on: input, factory: inputFactory) }
-                catch { avformat_free_context(input); throw error }
-            } else if coordinatedHTTP, ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? ""), let input {
-                do { try interruptGuard.installHTTPInput(on: input, url: sourceURL, headers: httpHeaders) }
-                catch { avformat_free_context(input); throw error }
-            }
-            // Published BEFORE the open, not after it. `cancel()` can only
-            // reach a guard it can see, and until 3.1.0 this one became
-            // visible only once the open had returned — so a `stop()` that
-            // landed during the open bounced off, and the thread kept the
-            // whole `probeBudget` (10 s) for itself no matter who asked it to
-            // come back. Measured on `ErrorTaxonomyTests.starvedStartupIsTheBudget`
-            // (an origin that withholds the first byte for 3 s): the teardown
-            // took 2.3 s before this line and 4 ms after it.
-            //
-            // This is also the only way the host-input hook can reach an open
-            // that parked inside `read` — `installCustomInput` ran a few lines
-            // up, but the guard nobody can see cancels nobody.
-            activeGuardLock.withLock {
-                activeGuard = interruptGuard
-                if cancelled.isSet { interruptGuard.cancel() }
-            }
-            // Bounded like the probe's open, and for the same reason: a
-            // server that accepts and then starves the reads would otherwise
-            // pin this producer forever — the session's startup timeout fires,
-            // but the blocked thread never comes back. On expiry the open
-            // throws and the session surfaces a startup error instead.
-            interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
-            let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
-            do {
-                try FFmpegError.check(
-                    avformat_open_input(&input, sourceSpec, nil, &openOptions),
-                    "avformat_open_input"
-                )
-                guard let opened = input else { throw Failure.openProducedNoContext }
-                try FFmpegError.check(
-                    avformat_find_stream_info(opened, nil), "avformat_find_stream_info"
-                )
-            } catch {
-                // The guard is unpublished on the way out: nothing owns this
-                // context any more, and a `cancel()` arriving later must not
-                // find a guard whose reads have already been closed.
-                activeGuardLock.withLock { activeGuard = nil }
-                // A cancellation is not a source failure, wherever it lands.
-                // Now that the guard is visible during the open, a `stop()`
-                // can abort the open itself — and `run()` already returns
-                // normally for a cancel anywhere in the copy loop, so it
-                // returns normally for this one too. Reporting it as an
-                // unopenable source would turn every teardown-during-startup
-                // into a spurious error in the host's log.
-                if cancelled.isSet {
-                    avformat_close_input(&input)
-                    return
-                }
-                // Over the coordinated reader every transport verdict reaches
-                // libavformat as an errno, so the guard holds the only copy of
-                // what the origin actually said (see `ReadInterruptGuard`).
-                throw interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error
-            }
-            interruptGuard.disarm()
+            guard let opened = try openSourceContext() else { return }
+            openedInput = opened.context
+            interruptGuard = opened.guard
             adoptedInfo = nil
         }
         activeGuardLock.withLock {
@@ -730,11 +801,17 @@ final class HLSRemuxer: @unchecked Sendable {
         // ownership, and an unconsumed one never had this context. The guard
         // outlives the close — its callback runs on the teardown reads too.
         defer {
-            avformat_close_input(&input)
+            avformat_close_input(&openedInput)
             activeGuardLock.withLock { activeGuard = nil }
             withExtendedLifetime(interruptGuard) {}
         }
-        guard let input else { throw Failure.openProducedNoContext }
+        // A `var`, and captured by reference everywhere below on purpose: a
+        // re-open swaps it, and every closure that reaches the source — the
+        // video stream's `configure`, `reanchor`, the bridge rebuild — must
+        // see the new context, never the freed one.
+        guard var input = openedInput else { throw Failure.openProducedNoContext }
+        // What a re-opened context must match (see `StreamSignature`).
+        let sourceStreams = Self.streamSignatures(of: input)
         // Open + `find_stream_info` are behind us. On a remote origin this is
         // usually where most of a slow startup went, which is why it is the
         // first thing a host is told about.
@@ -1384,6 +1461,27 @@ final class HLSRemuxer: @unchecked Sendable {
         /// Post-reanchor: discard packets until the anchor keyframe arrives
         /// (a BACKWARD seek may land at an earlier keyframe than requested).
         var droppingUntilPTS: Int64?
+        /// Re-opens after a read failure, planned sessions only (see
+        /// `ProducerRecoveryPolicy`).
+        var recovery = ProducerRecoveryPolicy()
+
+        /// What a failed read or seek on the source really was. Neither a
+        /// host-supplied input nor the coordinated reader can tell
+        /// libavformat more than an errno — it arrives as `-EIO` either
+        /// way — so the guard is asked first.
+        ///
+        /// The order is most-specific-first and it matters: the host's own
+        /// thrown error (an expired debrid token, a dropped SMB mount) is
+        /// the only thing that names WHICH transport gave up, the origin's
+        /// classification is the next best, and the libav* code is the
+        /// consequence of whichever of them happened. Same order as the
+        /// opening paths, so a failure reads identically to a host whether
+        /// it lands at startup or an hour into a film.
+        func sourceFailure(code: Int32, operation: String) -> any Error {
+            if let host = interruptGuard.customInputFailure { return host }
+            if let origin = interruptGuard.failedReadCause ?? interruptGuard.originFailure { return origin }
+            return FFmpegError(code: code, operation: operation)
+        }
 
         /// The planned end of segment `index` — the next entry's start — or
         /// "never" past the last entry (EOF closes it).
@@ -1569,6 +1667,7 @@ final class HLSRemuxer: @unchecked Sendable {
             // written after it, and clearing early would let an
             // `audioN/segNNNNN.m4s` fetch be answered with the old offset.
             residentSegments.markProduced(index: segmentIndex - 1)
+            recovery.noteProgress()
             demand?.setProducing(index: segmentIndex)
             recordAndEvict(index: segmentIndex - 1, videoBytes: media.count, renditionBytes: renditionBytes)
             // Refreshed per segment rather than once at EOF: a host that wants to
@@ -1584,10 +1683,13 @@ final class HLSRemuxer: @unchecked Sendable {
         func reanchor(to anchor: Int) throws {
             guard let plannedPlan else { return }
             let target = plannedPlan.entries[anchor].startPTS
-            try FFmpegError.check(
-                av_seek_frame(input, videoIndex, target, AVSEEK_FLAG_BACKWARD),
-                "av_seek_frame"
-            )
+            // A seek is a read: over HTTP it is a Range request to the same
+            // origin the copy loop reads from, so its failure is a source
+            // failure and goes to recovery like one (`reanchorRecovering`).
+            let sought = av_seek_frame(input, videoIndex, target, AVSEEK_FLAG_BACKWARD)
+            if sought < 0 {
+                throw SourceReadFailure(underlying: sourceFailure(code: sought, operation: "av_seek_frame"))
+            }
             // A re-anchor rebuilds every muxer, which is the one moment a new
             // audio offset can be taken up: the shift moves audio dts, and
             // applying it inside a running fragment would step dts backwards —
@@ -1683,6 +1785,98 @@ final class HLSRemuxer: @unchecked Sendable {
             harvestRunExtendsCoverage = harvestCoveredThrough.map { target <= $0 } ?? true
         }
 
+        /// A read or seek on the source failed: re-open it and re-anchor
+        /// production at `anchor`, or rethrow when the policy says the
+        /// failure will not heal (and always in the sequential shape, which
+        /// has no plan to re-anchor on — its EVENT playlist can only grow
+        /// from where the demuxer is, and a fresh context is at the head).
+        ///
+        /// Returns normally after a recovery, and also when `cancel()`
+        /// arrived during the backoff, the re-open or the re-anchor seek —
+        /// the copy loop's own check then ends the run. Either way the
+        /// caller must not use any packet it read from the old context.
+        func recoverSource(from readFailure: any Error, anchor: Int) throws {
+            // A `stop()` aborts whatever read or seek it lands in.
+            if cancelled.isSet { return }
+            guard plannedPlan != nil, demand != nil else { throw readFailure }
+            let cause = PrismCoreError.classify(readFailure)
+            var failure = readFailure
+            var reopening = false
+            while true {
+                // Checked again on every pass: a `stop()` that aborted the
+                // re-anchor seek after a re-open that worked comes back as
+                // that seek's failure, and with the cap spent the policy
+                // would answer it by throwing the original read failure —
+                // a `.producerFailed` for a session the host ended itself.
+                if cancelled.isSet { return }
+                let classified = reopening ? PrismCoreError.classify(failure) : cause
+                guard let attempt = recovery.nextAttempt(
+                    for: classified, at: ProcessInfo.processInfo.systemUptime, reopening: reopening
+                ) else {
+                    // The failure production actually hit, not a re-open's:
+                    // that is the one the host's remedy is for. A permanent
+                    // answer to the re-open (a 404 now) outranks it, though.
+                    throw reopening && classified.retryability == .permanent ? failure : readFailure
+                }
+                PrismCoreLog.notice(
+                    "source read failed (\(classified)); re-opening, attempt \(attempt.number)"
+                        + " of \(ProducerRecoveryPolicy.maxAttempts) in \(Int(attempt.delay.seconds)) s"
+                )
+                // Idle while it waits: the backoff is deliberate, not a
+                // stall, and a waiting serve must not be told otherwise.
+                guard idle({ sleepUnlessCancelled(attempt.delay) }) else { return }
+                reopening = true
+                // The old context goes first, with its guard still alive for
+                // the teardown reads. Nothing below may touch it again: every
+                // writer, rendition and bridge is rebuilt from the new one by
+                // `reanchor`, and the bridges copied their parameters when
+                // they were built, so no `AVStream` of the old context
+                // survives this line anywhere.
+                let retiredGuard = interruptGuard
+                activeGuardLock.withLock { activeGuard = nil }
+                avformat_close_input(&openedInput)
+                // Closed, so its host input can go — before the factory is
+                // asked for the next one (`releaseHostInput` says why).
+                retiredGuard.releaseHostInput()
+                let reopened: (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)
+                do {
+                    guard let opened = try openSourceContext() else { return }
+                    reopened = opened
+                } catch {
+                    failure = error
+                    continue
+                }
+                openedInput = reopened.context
+                interruptGuard = reopened.guard
+                input = reopened.context
+                guard Self.streamSignatures(of: input) == sourceStreams else {
+                    // Not the source the plan, the init segment and the
+                    // renditions were built from. Reported as the failure
+                    // production hit, exactly as before this existed.
+                    PrismCoreLog.notice("re-opened source no longer has the same streams; giving up")
+                    throw readFailure
+                }
+                do {
+                    try reanchor(to: anchor)
+                } catch let seek as SourceReadFailure {
+                    failure = seek.underlying
+                    continue
+                }
+                recovery.noteRecovered()
+                events?.yield(.producerRecovered(attempt: attempt.number, cause: cause))
+                return
+            }
+        }
+
+        /// `reanchor`, with a failing seek treated as the read failure it is.
+        func reanchorRecovering(to anchor: Int) throws {
+            do {
+                try reanchor(to: anchor)
+            } catch let seek as SourceReadFailure {
+                try recoverSource(from: seek.underlying, anchor: anchor)
+            }
+        }
+
         var packet = av_packet_alloc()
         defer { av_packet_free(&packet) }
         guard let packet else { return }
@@ -1704,32 +1898,40 @@ final class HLSRemuxer: @unchecked Sendable {
                 // `PrismCoreInput` — would otherwise live until the film ends.
                 // That is how 3.2.1 reached Jetsam on an Apple TV.
                 let readResult = autoreleasepool { av_read_frame(input, packet) }
-                if readResult == swift_AVERROR_EOF() {
+                // A demuxer does not always report a failed read. Matroska
+                // resyncs to the next cluster and reads on, so the call
+                // succeeds with a hole behind it — measured on the 30 s
+                // fixture over HTTP: pictures from 24.6 s to 26 s gone, and
+                // no error until the true end, which then answers `-EIO`.
+                // The context's I/O latches the failure, so a planned session
+                // reads it there, per packet, and repairs the hole instead of
+                // muxing it. The sequential shape keeps its old behaviour: it
+                // cannot repair anything, and the latched error still ends it
+                // at the end.
+                let latchedReadError = plannedPlan != nil ? input.pointee.pb?.pointee.error ?? 0 : 0
+                if readResult == swift_AVERROR_EOF(), latchedReadError >= 0 {
                     reachedEOF = true
                     break
                 }
-                if readResult < 0 {
+                if readResult < 0 || latchedReadError < 0 {
+                    if readResult >= 0 { av_packet_unref(packet) }
+                    // A `stop()` aborts the read it lands in; that is the
+                    // teardown, not a failure of the source.
+                    if cancelled.isSet { break }
                     // Transient read errors on network sources: the reconnect
-                    // options above handle the socket; anything that still
-                    // surfaces here ends the remux (the playlists stay valid up
-                    // to the last written segment).
-                    // An origin that went away mid-session is the most common
-                    // way to arrive here, and neither a host-supplied input
-                    // nor the coordinated reader can tell libavformat more
-                    // than an errno — it arrives as `-EIO` either way, so ask
-                    // the guard what it really was before reporting a symptom.
-                    //
-                    // The order is most-specific-first and it matters: the
-                    // host's own thrown error (an expired debrid token, a
-                    // dropped SMB mount) is the only thing that names WHICH
-                    // transport gave up, the origin's classification is the
-                    // next best, and the libav* code is the consequence of
-                    // whichever of them happened. Same order as the opening
-                    // paths, so a failure reads identically to a host whether
-                    // it lands at startup or an hour into a film.
-                    throw interruptGuard.customInputFailure
-                        ?? interruptGuard.originFailure
-                        ?? FFmpegError(code: readResult, operation: "av_read_frame")
+                    // options above handle the socket, and what still
+                    // surfaces here re-opens the source in a planned session
+                    // (`recoverSource`). Anything the policy will not retry
+                    // — and every failure of a sequential one — ends the
+                    // remux; the playlists stay valid up to the last written
+                    // segment.
+                    let failure = sourceFailure(
+                        code: readResult < 0 && readResult != swift_AVERROR_EOF() ? readResult : latchedReadError,
+                        operation: "av_read_frame"
+                    )
+                    let producing = min(segmentIndex, (plannedPlan?.entries.count ?? 1) - 1)
+                    try recoverSource(from: failure, anchor: producing)
+                    continue
                 }
                 let readTimeBase = input.pointee.streams[Int(packet.pointee.stream_index)]!.pointee.time_base
                 countSourceBytes(
@@ -1749,7 +1951,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan != nil, let request = demand?.takeAnchorRequestDetailed(),
                    request.index != segmentIndex || request.forced,
                    request.index >= 0, request.index < (plannedPlan?.entries.count ?? 0) {
-                    try reanchor(to: request.index)
+                    try reanchorRecovering(to: request.index)
                     // The packet in hand was read at the OLD position. Were it
                     // a keyframe past the anchor (a backward seek from further
                     // on), the discard check below would take it for the
@@ -1989,6 +2191,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
                 residentSegments.markProduced(index: segmentIndex)
+                // The tail segment is progress too: without it, a recovery
+                // that healed into the last segment leaves the next `.unknown`
+                // failure — anywhere, after a seek back — read as the same
+                // bytes failing again.
+                recovery.noteProgress()
                 recordAndEvict(index: segmentIndex, videoBytes: finalSegment.count, renditionBytes: 0)
                 // A source shorter than the first target never reaches
                 // `emitSegment`, so this is where ITS first segment lands —
@@ -2060,7 +2267,10 @@ final class HLSRemuxer: @unchecked Sendable {
                 idle { demand?.waitForAnchorRequest(isCancelled: { [cancelled] in cancelled.isSet }) }
             }
             guard let anchor = idleAnchor else { break produce }
-            try reanchor(to: anchor)
+            try reanchorRecovering(to: anchor)
+            // A recovery that a `stop()` cut short leaves the muxer that EOF
+            // already finished, and the top of this loop would cut it again.
+            if cancelled.isSet { break produce }
         }
     }
 
@@ -2682,6 +2892,13 @@ final class HLSRemuxer: @unchecked Sendable {
         }
         return 25_000_000
     }
+}
+
+/// A seek on the source that failed, told apart from a failure of the
+/// output side (a muxer, a bridge) that `reanchor` can also throw — only the
+/// first one is something a re-open can repair.
+private struct SourceReadFailure: Error {
+    let underlying: any Error
 }
 
 /// Tiny lock-protected flag — the cancel signal crossing from the session

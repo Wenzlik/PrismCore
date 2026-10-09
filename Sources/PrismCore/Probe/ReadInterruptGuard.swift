@@ -79,6 +79,25 @@ final class ReadInterruptGuard: @unchecked Sendable {
         input?.cancelInFlightOperation()
     }
 
+    /// Let go of the host input, once its context is closed — and only then:
+    /// the avio callbacks hold it unretained.
+    ///
+    /// For a re-open, which must not wait for the guard itself to go. The
+    /// retired guard outlives its context (the remuxer's variable until the
+    /// new open succeeds, and an adopted context's `ProbedSource` for the
+    /// whole run), and a host input that gives back a connection slot in its
+    /// `deinit` would otherwise still hold it while the factory is asked for
+    /// the next one — a factory that hands out one slot then fails every
+    /// re-open of a source that has long since come back. The coordinated
+    /// HTTP input stays: it has no factory to starve, and `ProbedSource`
+    /// still reports from it (`prewarm`).
+    func releaseHostInput() {
+        lock.withLock {
+            customInput = nil
+            interruptibleInput = nil
+        }
+    }
+
     /// The host's own error behind the last negative avio return code, when a
     /// custom input produced one. Callers use it to re-throw something typed
     /// instead of handing on FFmpeg's `-EIO`.
@@ -136,6 +155,13 @@ final class ReadInterruptGuard: @unchecked Sendable {
     /// code is the consequence (`-EIO`, or the `AVERROR_EXIT` of a budget that
     /// expired while the origin was busy throttling us) and this is the cause.
     var originFailure: PrismCoreError? { httpInput?.lastOriginFailure }
+
+    /// The origin's verdict behind the last read that failed into
+    /// libavformat, which a later successful read does not clear (see
+    /// `HTTPRangeInput.lastFailedReadCause`). For a mid-session read
+    /// failure this outranks `originFailure`: the demuxer may have read on
+    /// past the failure before anyone could ask.
+    var failedReadCause: PrismCoreError? { httpInput?.lastFailedReadCause }
 
     func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
                           headers: [String: String], hints: SourceOpenHints? = nil,

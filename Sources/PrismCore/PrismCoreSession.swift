@@ -1612,10 +1612,16 @@ public actor PrismCoreSession {
     }
 
     private func watchForTerminalError(_ producer: ProducerThread) {
-        Task { [weak self] in
+        Task { [weak self, events] in
             await producer.join()
             if let failure = producer.failureIfAny {
+                // Recorded first: a host that reads `remuxFailure` on the
+                // event must find it set. One producer per session and one
+                // watcher per producer is what makes this exactly once; a
+                // `stop()` returns the producer normally and has already
+                // closed the stream anyway.
                 await self?.record(error: failure)
+                events.yield(.producerFailed(PrismCoreError.classify(failure)))
             }
         }
     }
