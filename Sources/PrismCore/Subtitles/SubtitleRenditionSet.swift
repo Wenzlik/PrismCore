@@ -839,7 +839,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                 droppedBeforeOrigin += 1
                 return
             }
-            // ponytail: removeFirst is O(n); the queue is empty in practice
+            // removeFirst is O(n); the queue is empty in practice
             // (subtitles follow the first keyframe), a head index if not.
             while preOriginCues.count >= maxCues || preOriginBytes + bytes > maxBytes {
                 preOriginBytes -= preOriginCues.removeFirst().bytes
