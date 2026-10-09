@@ -8,6 +8,63 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **A planned session heals a mid-film read failure instead of ending.** Until
+  now any read error that survived the transport's own retries ended the
+  remux, and the host's only remedy was a new session: a new probe (a full
+  bite each through a host range proxy), a new display handshake and a seek
+  back, for an origin that was often answering again a second later. Now the
+  producer closes the source, backs off (1, 2, 4 s), re-opens it through the
+  same path startup uses — a fresh `ReadInterruptGuard` installed and
+  published before `avformat_open_input`, the bounded open budget, and
+  `avformat_find_stream_info`, which is not skipped — checks that the stream
+  set is unchanged (index, codec, time base) and re-anchors at the segment it
+  was producing, exactly as a demand seek does (partial fragment dropped,
+  fresh muxers, so `TimestampSanitizer` and `LeadingDTSBackfill` start over).
+  Renditions, a lazy one already armed included, and the muxed bridge are
+  rebuilt from the new context; a bridge copies its stream parameters when it
+  is built, so nothing keeps a pointer into the closed one. Statistics
+  (`sourceBytesRead`, timestamp repairs) carry on across the re-open.
+  `.retryable` and `.unknown` failures are retried, `.permanent` ones never;
+  an `.unknown` failure that recurs before a segment lands after a successful
+  re-open ends it at once (the bytes, not the link); and there are **at most
+  three re-opens in any 60 s**. `stop()` ends a backoff or a re-open at once.
+  A failing seek (a demand re-anchor whose Range request fails) is recovered
+  the same way. Sequential sessions are unchanged. See the README's *When the
+  source fails mid-film*.
+- **`PlaybackEvent.producerRecovered(attempt:cause:)`** — production carried
+  on after a failure; `attempt` counts re-opens in the current 60 s window.
+- **`PlaybackEvent.producerFailed(_:)`** — the push signal that the producer
+  is gone, sent exactly once per failed session (startup included, never for a
+  `stop()`), after `remuxFailure` is set to the same classification. Before
+  this a host learned of a dead producer only from an AVPlayer stall and a
+  poll. `prismcore-cli serve` prints both events.
+
+### Changed
+
+- **A host `PrismCoreInputFactory` can be called again mid-playback**, once
+  per re-open, and must hand out a fresh instance over the same bytes.
+- `PlaybackEvent`'s `Equatable` conformance is now written out: the new
+  cases carry a `PrismCoreError`, which is not `Equatable`, and are compared
+  by its `description`.
+
+### Fixed
+
+- **A failed read that Matroska skipped over is no longer served as a hole.**
+  After a failed read the demuxer resyncs to the next cluster and returns
+  packets as if nothing happened (measured over HTTP on the 30 s fixture:
+  pictures from 24.6 s to 26 s missing, 687 of 720 decoded, no error until the
+  true end). A planned session now reads the failure the I/O context latched,
+  per packet, and recovers instead. The coordinated HTTP reader also keeps the
+  origin's verdict for the read that failed into libavformat, which the
+  successful fill inside the same resync used to clear — the cause used to
+  arrive as a bare `-EIO`.
+- The fallback open closes the context when `avformat_find_stream_info`
+  fails, instead of leaking it, and treats an open whose budget expired during
+  the analysis as failed (`find_stream_info` swallows aborted reads and
+  returns success with half-filled parameters).
+
 ## [3.4.0] — 2026-10-07
 
 Audio renditions that re-encode are no longer produced for the whole film

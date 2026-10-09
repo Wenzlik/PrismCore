@@ -74,7 +74,7 @@ Shipping something on PrismCore? Open an issue and it gets listed here.
 | Chapters | Matroska `Chapters` / MP4 chapter tracks reported as `SourceInfo.chapters` and `PrismCoreSession.chapters` (title + start/end seconds) — HLS cannot carry them, so they are the host's to draw as timeline markers and skip controls |
 | Display | tvOS HDMI handshake driven by the engine: `preferredDisplayCriteria` programmed and settled **before** the item is loaded, which is the only ordering tvOS accepts for HDR HLS |
 | Scrub previews | `SeekPreviewService` decodes the keyframe covering any position into a `CGImage` for a custom player HUD — its own context, CPU-only, cached per keyframe, and independent of which engine is playing. The trick-play answer for sources with no server-generated previews |
-| Streaming | HTTP headers ride the demux connection (a Plex token, a WebDAV authorization), reconnect on dropped connections |
+| Streaming | HTTP headers ride the demux connection (a Plex token, a WebDAV authorization), reconnect on dropped connections. A planned session whose source fails mid-film re-opens it and carries on from the segment it was producing (up to three times a minute; see *When the source fails mid-film*) |
 | Custom input | A host that holds the bytes itself — an SMB mount through its own client, a debrid/torrent session, an encrypted store, a file inside a disc image — implements `PrismCoreInput` (`read` / `seek` / `length`) and passes a factory as `input:` to the session, the probe or `SeekPreviewService`. One instance per open, so the probe, the producer and a scrub preview never share a cursor; host errors surface as `PrismCoreInputError`. An input with no `length` is refused (`.notSeekable`) rather than serving a plan it cannot honour. Omit it and the engine reads exactly as before |
 
 ## Quick start
@@ -325,6 +325,55 @@ situations they share one case: an origin that never answered and one that
 vanished mid-session are both `originUnreachable`, because the evidence at the
 failure site is identical — the host knows which it was from whether `start()`
 had returned.
+
+### When the source fails mid-film
+
+A read that fails after `start()` — a Wi-Fi roam, a host range proxy
+restarting, a 5xx from a media server, a share that blinked — no longer has to
+end the session. In a **planned** session (one with a keyframe plan, which is
+what makes seeking demand-driven) the producer closes the source, waits, opens
+it again exactly the way startup does (`avformat_find_stream_info` included),
+checks that the streams are the same ones (index, codec, time base), and
+re-anchors at the segment it was producing. The partial fragment is dropped and
+that segment is produced again from its keyframe, as for a seek; the timeline,
+the init segment and every rendition — a lazy one already armed included —
+carry on. Fetches that arrive meanwhile are held the way a seek holds them, so
+AVPlayer sees a slow segment, not an error.
+
+- **What is retried**: failures whose `retryability` is `.retryable` (429/503/
+  509, a 5xx, a dropped connection) and `.unknown` (how a host input's own
+  error arrives). `.permanent` ones (404, 403 and the other 4xx) are not: the
+  same request gets the same answer. An `.unknown` failure that recurs right
+  after a successful re-open, before a segment has landed, is not retried
+  either — the source is reachable and the bytes still do not read.
+- **How often**: after 1, 2 and 4 s, and **at most three re-opens in any 60 s**,
+  whatever the classification. `stop()` ends a backoff or a re-open at once.
+- **A demuxer that skips instead of failing is caught too.** Matroska resyncs
+  to the next cluster after a failed read and reports success with a hole
+  behind it; a planned session reads the failure off the I/O context on every
+  packet and repairs the hole instead of serving it.
+- **Sequential sessions** (no plan: a live source, a Matroska whose index did
+  not load) behave as before: the failure ends the remux and the playlist
+  stays valid up to the last segment written.
+- **A host `PrismCoreInput` factory is called again** for each re-open — see
+  `PrismCoreInputFactory`: it must hand out a fresh instance over the same
+  bytes, from any thread, at any time.
+
+`playbackEvents()` reports both outcomes:
+
+```swift
+for await event in session.playbackEvents() {
+    switch event {
+    case .producerRecovered(let attempt, let cause): log("reconnected (\(attempt)/3) after \(cause)")
+    case .producerFailed(let failure):               showError(failure)   // == session.remuxFailure
+    default: break
+    }
+}
+```
+
+`producerFailed` is sent exactly once per session that fails — mid-film or at
+startup, planned or sequential — and never for a `stop()`; `remuxFailure` is
+already set when it arrives. `prismcore-cli serve` prints both.
 
 ## How it works
 
