@@ -89,6 +89,43 @@ struct LateIndexLoadTests {
         #expect(play.thread.failureIfAny == nil)
     }
 
+    @Test("A late load whose store fails announces nothing — the successor would miss and stay sequential")
+    func unwritableCacheAnnouncesNothing() async throws {
+        let scratch = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        // The cache path is a regular file, so every store is refused.
+        let cache = scratch.appendingPathComponent("not-a-directory")
+        try Data("x".utf8).write(to: cache)
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        // The same shape as the stored-before-EOF test, which proves this
+        // load reaches its store: only the cache differs.
+        let bytes = try media("h264_aac_30s.mkv")
+        let tailStalled = LockedFlag()
+        let origin = try ScriptedHTTPServer { request in
+            if (Self.range(request) ?? 0) > 0, !tailStalled.isSet {
+                tailStalled.set()
+                return .stall
+            }
+            return ScriptedHTTPServer.ranged(bytes, for: request, validators: ["ETag": "\"v1\""])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+
+        let play = HeldPlay(url: root.appendingPathComponent("movie.mkv"), cache: cache, output: output,
+                            indexLoadBudget: .milliseconds(300))
+        defer { play.release() }
+        #expect(await until { play.isHeld })
+        let loader = try #require(play.remuxer.lateIndexLoadThread, "the late load never launched — nothing was exercised")
+        #expect(await loader.join(within: .seconds(20)))
+        // The event is delivered through a stream; give it time to arrive.
+        #expect(await until(.milliseconds(500)) { play.segmentPlanAvailable != nil } == false)
+
+        play.release()
+        await play.thread.join()
+        #expect(play.thread.failureIfAny == nil)
+    }
+
     @Test("No version proof, or no duration: the late load never starts, and nothing is stored or announced")
     func unprovableOrUnplannableSourceDoesNotLoad() async throws {
         let cases: [(fixture: String, validators: [String: String])] = [
