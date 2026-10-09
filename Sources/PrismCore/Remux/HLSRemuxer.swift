@@ -1427,16 +1427,18 @@ final class HLSRemuxer: @unchecked Sendable {
         /// finished, removed files simply wait — disk the budget did not plan
         /// for, but never a file pulled from under a slow client.
         func slide(_ window: SequentialWindow, budgetCutIndex: Int?) throws {
-            let now = windowClock()
+            // Read after the rewrites (an autoclosure): a deadline taken
+            // before them would start the grace period early by however long
+            // the atomic writes took.
             if let retired = try window.slide(
-                playheadIndex: demand?.playheadIndex, budgetCutIndex: budgetCutIndex, now: now
+                playheadIndex: demand?.playheadIndex, budgetCutIndex: budgetCutIndex, now: windowClock()
             ) {
                 // Off the books once off the playlist: the budget measures
                 // what is offered, and the grace period is the soft part.
                 retention?.forget(retired.videoIndexes)
                 residentSegments.retire(retired.videoIndexes)
             }
-            let due = window.takeDue(now: now)
+            let due = window.takeDue(now: windowClock())
             guard !due.isEmpty else { return }
             unlinkQueue.async { [residentSegments, outputDirectory] in
                 for retired in due {

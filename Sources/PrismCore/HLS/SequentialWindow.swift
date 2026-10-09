@@ -82,7 +82,10 @@ final class SequentialWindow {
     /// - `budgetCutIndex`: the newest segment the byte budget wants gone; it
     ///   can move the front further than `seconds` would, never past the
     ///   playhead's own segment.
-    func slide(playheadIndex: Int?, budgetCutIndex: Int?, now: TimeInterval) throws -> Retired? {
+    /// - `now`: read only once every playlist has been rewritten — the grace
+    ///   period runs from when the URL actually left, and atomic rewrites of
+    ///   several playlists are not free.
+    func slide(playheadIndex: Int?, budgetCutIndex: Int?, now: @autoclosure () -> TimeInterval) throws -> Retired? {
         guard let playheadIndex, let playhead = video.span(ofSequence: playheadIndex) else { return nil }
         var cut = playhead.start - seconds
         if let budgetCutIndex, let victim = video.span(ofSequence: budgetCutIndex) {
@@ -134,7 +137,7 @@ final class SequentialWindow {
         // still be working through it. The longest any playlist has EVER
         // been bounds that from above for every segment in the batch.
         let longestPlaylist = writers.map(\.longestListedSeconds).max() ?? 0
-        pending.append((now + longestSegment + longestPlaylist, retired))
+        pending.append((now() + longestSegment + longestPlaylist, retired))
         return retired
     }
 

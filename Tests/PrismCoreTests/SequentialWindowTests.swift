@@ -211,6 +211,20 @@ struct SequentialWindowTests {
         #expect(presentation.window.takeDue(now: 1_000).isEmpty)
     }
 
+    @Test("The grace period runs from when the last playlist was rewritten, not from before")
+    func graceRunsFromPublication() throws {
+        let presentation = try Presentation(seconds: 10)
+        for _ in 0..<20 { try presentation.cut(2) }
+        // The clock reads 103 only once the subtitle playlist — written last —
+        // no longer lists the removed entries: the rewrites took 3 s.
+        _ = try #require(try presentation.window.slide(
+            playheadIndex: 19, budgetCutIndex: nil,
+            now: (try? presentation.text("subs0"))?.contains("#EXT-X-MEDIA-SEQUENCE:14\n") == true ? 103 : 100
+        ))
+        #expect(presentation.window.takeDue(now: 144.9).isEmpty)
+        #expect(presentation.window.takeDue(now: 145).count == 1)
+    }
+
     @Test("EOF closes whatever window is left with ENDLIST, still without a type")
     func endOfSourceEndsTheWindow() throws {
         let presentation = try Presentation(seconds: 4)
