@@ -550,13 +550,15 @@ struct Redaction: Sendable {
     /// a separator too ("/Users/alice/My Movies/x.srt"), but not past a `:`
     /// or `,`, so "<path>: Input/output error" keeps its error.
     ///
-    /// Not a path: a `/` inside a word ("AC3/DTS"), before a space
-    /// ("5.1 / 2.0"), or after `:` or `/` — that is a URL, which `scrub`
-    /// already cut to scheme, host and path. `file://` is the one URL whose
-    /// path is a disk path, so it goes too.
+    /// A path glued to a label by `:` goes too ("subtitle:/Users/…",
+    /// "x:C:\…"). Not a path: a `/` inside a word ("AC3/DTS"), before a
+    /// space ("5.1 / 2.0"), or a `://` — that is a URL, which `scrub` already
+    /// cut to scheme, host and path; a path needs a non-`/` right after its
+    /// first `/`, and the second `/` follows a `/`. `file://` is the one URL
+    /// whose path is a disk path, so it goes too.
     func freeText(_ text: String) -> String {
         scrub(text).replacing(
-            #/(^|[^\w.:/]|file://)(?:/[^\s/"'<>]+/|[A-Za-z]:[\\/]|\\\\)(?:[^\s"'<>]*[^\s"'<>:,;])?(?: [^\s"'<>]*[\\/][^\s"'<>]*[^\s"'<>:,;])*/#
+            #/(^|[^\w./]|file://)(?:/[^\s/"'<>]+/|[A-Za-z]:[\\/]|\\\\)(?:[^\s"'<>]*[^\s"'<>:,;])?(?: [^\s"'<>]*[\\/][^\s"'<>]*[^\s"'<>:,;])*/#
         ) { "\($0.1)<redacted>" }
     }
 

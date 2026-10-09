@@ -249,6 +249,25 @@ struct SessionDiagnosticReportTests {
         #expect(failure.description.contains("https://cdn.example/a/b.mkv"))
     }
 
+    /// A path glued to a label by `:` is still a path; only `://` makes a URL.
+    @Test("A path right after a colon is cut, a URL is kept")
+    func scrubsPathAfterColon() throws {
+        let url = try #require(URL(string: "https://origin.example/movie.mkv"))
+        let redaction = Redaction(url: url, httpHeaders: [:])
+        let cases = [
+            "subtitle:/Users/alice/private/movie.srt": "subtitle:<redacted>",
+            "Error:/Users/alice/x.mkv": "Error:<redacted>",
+            #"x:C:\Users\alice\y.srt"#: "x:<redacted>",
+            "https://cdn.example/path/movie.mkv?sig=abc": "https://cdn.example/path/movie.mkv?<redacted>",
+            "file:///Users/alice/x.mkv": "file://<redacted>",
+            "/Users/alice/x.mkv: Input/output error": "<redacted>: Input/output error",
+            "Commentary AC3/DTS 5.1 / 2.0": "Commentary AC3/DTS 5.1 / 2.0",
+        ]
+        for (text, expected) in cases {
+            #expect(redaction.freeText(text) == expected)
+        }
+    }
+
     // MARK: - Without a session
 
     @Test("A software-routed source gets a report from its probe alone")

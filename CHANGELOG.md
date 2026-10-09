@@ -31,7 +31,8 @@ source-compatible.)
   values, and any URL they quote — a redirect target included — loses its
   credentials, query and fragment. Error descriptions and track titles and
   languages, which the muxer wrote, also lose any absolute path — POSIX,
-  Windows drive or UNC — even one the session never knew.
+  Windows drive or UNC — even one the session never knew or one glued to a
+  label by `:`.
 - `prismcore-cli probe --json` prints the report alone on stdout.
   `serve --report FILE` and `segverify --report FILE` write it on every exit,
   including a failed start.
