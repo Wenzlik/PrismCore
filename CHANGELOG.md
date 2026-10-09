@@ -33,37 +33,31 @@ source-compatible.)
   A failing seek (a demand re-anchor whose Range request fails) is recovered
   the same way. Sequential sessions are unchanged. See the README's *When the
   source fails mid-film*.
+  - It also catches a failed read that Matroska skips over. After a failed
+    read the demuxer resyncs to the next cluster and returns packets as if
+    nothing happened (measured over HTTP on the 30 s fixture: pictures from
+    24.6 s to 26 s missing, 687 of 720 decoded, no error until the true end).
+    A planned session reads the failure the I/O context latched, per packet,
+    and recovers instead of serving the hole. The coordinated HTTP reader now
+    keeps the origin's verdict for the read that failed into libavformat,
+    which the successful fill inside that same resync used to clear — the
+    cause used to arrive as a bare `-EIO`.
+  - The open path it shares with startup closes the context when
+    `avformat_find_stream_info` fails, instead of leaking it, and treats an
+    open whose budget expired during the analysis as failed
+    (`find_stream_info` swallows aborted reads and returns success with
+    half-filled parameters).
+  - **A host `PrismCoreInputFactory` can now be called again mid-playback**,
+    once per re-open, and must hand out a fresh instance over the same bytes.
 - **`PlaybackEvent.producerRecovered(attempt:cause:)`** — production carried
   on after a failure; `attempt` counts re-opens in the current 60 s window.
 - **`PlaybackEvent.producerFailed(_:)`** — the push signal that the producer
   is gone, sent exactly once per failed session (startup included, never for a
   `stop()`), after `remuxFailure` is set to the same classification. Before
   this a host learned of a dead producer only from an AVPlayer stall and a
-  poll. `prismcore-cli serve` prints both events.
-
-### Changed
-
-- **A host `PrismCoreInputFactory` can be called again mid-playback**, once
-  per re-open, and must hand out a fresh instance over the same bytes.
-- `PlaybackEvent`'s `Equatable` conformance is now written out: the new
-  cases carry a `PrismCoreError`, which is not `Equatable`, and are compared
-  by its `description`.
-
-### Fixed
-
-- **A failed read that Matroska skipped over is no longer served as a hole.**
-  After a failed read the demuxer resyncs to the next cluster and returns
-  packets as if nothing happened (measured over HTTP on the 30 s fixture:
-  pictures from 24.6 s to 26 s missing, 687 of 720 decoded, no error until the
-  true end). A planned session now reads the failure the I/O context latched,
-  per packet, and recovers instead. The coordinated HTTP reader also keeps the
-  origin's verdict for the read that failed into libavformat, which the
-  successful fill inside the same resync used to clear — the cause used to
-  arrive as a bare `-EIO`.
-- The fallback open closes the context when `avformat_find_stream_info`
-  fails, instead of leaking it, and treats an open whose budget expired during
-  the analysis as failed (`find_stream_info` swallows aborted reads and
-  returns success with half-filled parameters).
+  poll. `prismcore-cli serve` prints both events. `PlaybackEvent`'s
+  `Equatable` is now written out: the new cases carry a `PrismCoreError`,
+  which is not `Equatable`, and compare it by `description`.
 
 ## [3.4.0] — 2026-10-07
 
