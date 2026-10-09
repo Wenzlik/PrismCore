@@ -2,6 +2,51 @@ import CryptoKit
 import Foundation
 import Libavformat
 
+/// The host's own name for one version of one source, keying the keyframe
+/// sidecar (`keyframeIndexCacheDirectory`) instead of the address the engine
+/// was handed.
+///
+/// The URL-based identity cannot survive an address that changes between
+/// launches while the bytes stay put — a host's localhost range proxy on a
+/// fresh port with a fresh token is exactly that, so every app restart was a
+/// cache miss. A host that knows which item it is playing, and holds a strong
+/// validator for it from its own server's metadata, says so here, and the
+/// sidecar then binds to *that*: the address, the transport and its `ETag`
+/// stop mattering, so it works over FFmpeg's own HTTP and a host input as
+/// well as the coordinated reader.
+///
+/// - `namespace`: whose `item` it is — a server ID, so two servers' item
+///   numbers never meet.
+/// - `item`: the item (or media part) on that server.
+/// - `etag`: a **strong** validator of the item's bytes, as the server
+///   reports it. A weak one (`W/…`) or an empty one is no proof of the same
+///   bytes, so it turns the sidecar off for the source — never back to the
+///   URL, which is the key the host is replacing.
+///
+/// The host vouches for it, so it must change whenever the bytes do: a map
+/// trusted on a stale tag plans segment cuts on keyframes the new file does
+/// not have. The byte size and container duration of the open still go into
+/// the key beside it.
+public struct SourceCacheIdentity: Sendable, Equatable {
+    public var namespace: String
+    public var item: String
+    public var etag: String
+
+    public init(namespace: String, item: String, etag: String) {
+        self.namespace = namespace
+        self.item = item
+        self.etag = etag
+    }
+
+    /// Whether this identity can key a sidecar at all. Empty parts would let
+    /// different items share a key; a weak or empty tag vouches for nothing.
+    var vouchesForBytes: Bool {
+        let tag = etag.trimmingCharacters(in: .whitespaces)
+        return !namespace.isEmpty && !item.isEmpty && !tag.isEmpty
+            && !tag.lowercased().hasPrefix("w/")
+    }
+}
+
 /// A cross-session sidecar cache of a source's video keyframe timestamps
 /// (issue #34).
 ///
@@ -19,7 +64,9 @@ import Libavformat
 ///
 /// Entries are keyed by an `Identity`: the full URL, byte size, container
 /// duration and a `SourceVersion` — a local file's mtime, or a remote
-/// origin's strong `ETag`. A remote source with no strong `ETag` has no
+/// origin's strong `ETag` — or, when the host names the source itself
+/// (`SourceCacheIdentity`), that name and its strong `ETag` in place of the
+/// URL and the transport's proof. A remote source with no strong `ETag` has no
 /// identity at all and never touches the sidecar (see `Identity`). Only a
 /// SHA-256 digest of all that is written, inside the entry and checked on
 /// lookup, so the filename hash never has to be collision-free and a token in
@@ -52,6 +99,10 @@ struct KeyframeIndexCache: Sendable {
         /// not name: an address that redirects elsewhere on the next open
         /// can meet the same tag on a different file.
         case strongETag(String, servedBy: URL)
+        /// The host's name and strong `ETag` for the source. Replaces the
+        /// URL in the key, not only the proof: the point is an address that
+        /// changes between launches (see `SourceCacheIdentity`).
+        case host(SourceCacheIdentity)
 
         /// The version an opened source can prove, or `nil`.
         ///
@@ -61,7 +112,14 @@ struct KeyframeIndexCache: Sendable {
         /// needs the strong `ETag` the coordinated reader saw; FFmpeg's own
         /// HTTP and a host-supplied input report none, so they plan from the
         /// source every time rather than on a map nothing can bind to it.
-        static func observed(sourceURL: URL, strongETag: (tag: String, url: URL)?) -> SourceVersion? {
+        ///
+        /// A host identity, when given, decides alone: a weak or empty tag in
+        /// it is `nil` rather than a fall back to the URL, because the host
+        /// supplying one is saying the URL is not the source's name.
+        static func observed(
+            sourceURL: URL, strongETag: (tag: String, url: URL)?, host: SourceCacheIdentity? = nil
+        ) -> SourceVersion? {
+            if let host { return host.vouchesForBytes ? .host(host) : nil }
             if sourceURL.isFileURL {
                 return ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path))?[
                     .modificationDate
@@ -97,13 +155,21 @@ struct KeyframeIndexCache: Sendable {
             let proof: String = switch version {
             case .fileModified(let mtime): "mtime:\(mtime)"
             case .strongETag(let tag, let servedBy): "etag:\(servedBy.absoluteString)\u{0}\(tag)"
+            // Length-prefixed: host strings may hold a NUL, and
+            // ("a\u{0}b", "c") must not key like ("a", "b\u{0}c").
+            case .host(let host):
+                "host:" + [host.namespace, host.item, host.etag].map { "\($0.utf8.count):\($0)" }.joined()
             }
+            // A host-named source is keyed without its address — the one
+            // thing that changes across launches. Empty, never a URL's
+            // spelling, so it cannot meet a URL-keyed canonical.
+            let address: String = if case .host = version { "" } else { sourceURL.absoluteString }
             // NUL-separated: no URL, number or ETag contains one, so two
             // different field lists cannot run together into one digest (a
             // proof's own NUL count is fixed by its kind).
             let canonical = [
                 "v\(KeyframeIndexCache.formatVersion)",
-                sourceURL.absoluteString,
+                address,
                 String(sizeBytes),
                 // Whole seconds: the byte size already pins the bits, and the
                 // sub-second part of a container duration is demuxer
@@ -121,10 +187,10 @@ struct KeyframeIndexCache: Sendable {
         /// caller then neither looks up nor stores, and plans from the source.
         init?(
             opened context: UnsafeMutablePointer<AVFormatContext>, sourceURL: URL,
-            interruptGuard: ReadInterruptGuard
+            interruptGuard: ReadInterruptGuard, host: SourceCacheIdentity? = nil
         ) {
             guard let version = SourceVersion.observed(
-                sourceURL: sourceURL, strongETag: interruptGuard.openedStrongETag
+                sourceURL: sourceURL, strongETag: interruptGuard.openedStrongETag, host: host
             ) else { return nil }
             self.init(
                 sourceURL: sourceURL,

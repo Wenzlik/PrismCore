@@ -29,6 +29,7 @@ func withServedSession<T>(
     _ options: SourceOptions,
     stop: StopSignal,
     keyframeIndexCacheDirectory: URL? = nil,
+    keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
     afterProbe: () -> Void = {},
     beforeStart: (PrismCoreSession) async -> Void = { _ in },
     beforeStop: (PrismCoreSession) async -> Void = { _ in },
@@ -53,6 +54,7 @@ func withServedSession<T>(
         display: options.display,
         probed: probed,
         keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+        keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
         coordinatedHTTP: options.coordinatedHTTP
     )
     await beforeStart(session)

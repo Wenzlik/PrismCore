@@ -67,6 +67,7 @@ package struct StartupCheckpointRun: Sendable {
         coordinatedHTTP: Bool,
         display: DisplayCapabilities = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
         keyframeIndexCacheDirectory: URL? = nil,
+        keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
         prewarm: Bool = false
     ) async throws -> StartupCheckpointRun {
         let prewarmOutcome: SourcePrewarmOutcome? = prewarm
@@ -81,6 +82,7 @@ package struct StartupCheckpointRun: Sendable {
             display: display,
             probed: probed,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
             coordinatedHTTP: coordinatedHTTP
         )
         let checkpoints = try await session.startupCheckpoints()

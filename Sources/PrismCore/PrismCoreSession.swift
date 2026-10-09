@@ -233,6 +233,10 @@ public actor PrismCoreSession {
         /// serving a master with renditions.
         public var forceMuxedShape: Bool
         public var keyframeIndexCacheDirectory: URL?
+        /// The host's name for the source in that cache. Not settable through
+        /// a clone, for `sourceURL`'s reason: it names the title, and a
+        /// successor is the same title.
+        public private(set) var keyframeIndexCacheIdentity: SourceCacheIdentity?
         public var dialogueBoost: [DialogueBoostLevel]
         /// Which audio rendition is marked DEFAULT, and which track dialogue
         /// boost derives from. No match leaves the source's own order standing.
@@ -497,6 +501,13 @@ public actor PrismCoreSession {
     ///     harvests every keyframe it reads anyway; the next play of the same
     ///     source plans on that map — full demand-driven seeking, as if the
     ///     file had an index. `nil` (the default) turns persistence off.
+    ///   - keyframeIndexCacheIdentity: the host's own name for the source in
+    ///     that cache — server, item and a strong `ETag` from its metadata
+    ///     (`SourceCacheIdentity`). Keys the map instead of the URL and the
+    ///     transport's `ETag`, so it survives an address that changes between
+    ///     launches (a local proxy's port and token) and needs no
+    ///     `coordinatedHTTP`. A weak or empty `ETag` turns the cache off for
+    ///     the source. `nil` (the default) keeps the URL-based identity.
     ///   - dialogueBoost: extra "Dialogue Boost" audio renditions to derive
     ///     from the default track, one per level. See the `dialogueBoost`
     ///     doc on the primary initializer.
@@ -509,6 +520,7 @@ public actor PrismCoreSession {
         sequentialPlaylist: SequentialPlaylist = .event,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
+        keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
@@ -529,6 +541,7 @@ public actor PrismCoreSession {
             sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
@@ -611,6 +624,7 @@ public actor PrismCoreSession {
         forceMuxedShape: Bool = false,
         probed: ProbedSource? = nil,
         keyframeIndexCacheDirectory: URL? = nil,
+        keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
@@ -628,6 +642,7 @@ public actor PrismCoreSession {
             sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
@@ -676,6 +691,7 @@ public actor PrismCoreSession {
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
+            hostCacheIdentity: keyframeIndexCacheIdentity,
             landed: landed,
             subtitleCueHistory: configuration.subtitleCueHistory
         )
@@ -734,6 +750,7 @@ public actor PrismCoreSession {
         sequentialPlaylist: SequentialPlaylist = .event,
         forceMuxedShape: Bool = false,
         keyframeIndexCacheDirectory: URL? = nil,
+        keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
@@ -751,6 +768,7 @@ public actor PrismCoreSession {
             sequentialPlaylist: sequentialPlaylist,
             forceMuxedShape: forceMuxedShape,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
+            keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
@@ -849,6 +867,7 @@ public actor PrismCoreSession {
             // an already-read context cannot open a second remux.
             probed: nil,
             keyframeIndexCacheDirectory: options.keyframeIndexCacheDirectory,
+            keyframeIndexCacheIdentity: options.keyframeIndexCacheIdentity,
             dialogueBoost: options.dialogueBoost,
             preferredAudioLanguage: options.preferredAudioLanguage,
             preferredSubtitleLanguage: options.preferredSubtitleLanguage,

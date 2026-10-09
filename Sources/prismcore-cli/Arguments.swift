@@ -109,6 +109,15 @@ struct ArgumentReader {
         return parsed
     }
 
+    /// `SERVER:ITEM:ETAG`, split on the first two colons only — an ETag is
+    /// the server's opaque string and may hold anything.
+    mutating func cacheIdentity(for flag: String) throws -> SourceCacheIdentity {
+        let raw = try value(for: flag)
+        let parts = raw.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3 else { throw usage("\(flag) wants SERVER:ITEM:ETAG, got \"\(raw)\"") }
+        return SourceCacheIdentity(namespace: parts[0], item: parts[1], etag: parts[2])
+    }
+
     func usage(_ message: String) -> CLIFailure { CLIFailure(code: .usage, message: message) }
 
     /// A URL when it has a scheme, a path otherwise — checked up front, so a

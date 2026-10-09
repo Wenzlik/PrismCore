@@ -41,6 +41,8 @@ struct PrismCoreCLI {
                     --json                         the diagnostic report as JSON, alone on stdout
         serve:      --for SECONDS                  stop on its own after SECONDS
                     --keyframe-cache DIR           persist keyframe maps (and load a late index)
+                    --cache-identity SERVER:ITEM:ETAG  key those maps by the host's name for the
+                                                   source instead of its URL (strong ETag only)
                     --report FILE                  write the session's diagnostic report (JSON) on exit
         validate:   --require-validator            exit 69 when the validator is missing
                     --out DIR                      where the report goes (default ./prismcore-validation)
@@ -48,6 +50,7 @@ struct PrismCoreCLI {
                     Tools: $PRISMCORE_MEDIASTREAMVALIDATOR / $PRISMCORE_HLSREPORT, else PATH
         bench:      --runs N                       repeat and print the spread (default 1)
                     --keyframe-cache DIR           persist harvested keyframe maps
+                    --cache-identity SERVER:ITEM:ETAG  as for serve
         segverify:  --limit N                      check at most N segments per playlist
                     --hls                          the source already is an HLS playlist; verify
                                                    it directly instead of remuxing
