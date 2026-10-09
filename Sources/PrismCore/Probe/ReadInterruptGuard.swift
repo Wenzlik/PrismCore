@@ -154,11 +154,11 @@ final class ReadInterruptGuard: @unchecked Sendable {
         httpInput?.validatorObservation
     }
 
-    /// The strong `ETag` the coordinated reader saw on its first response.
-    /// `nil` for a weak tag, a `Last-Modified`-only origin, FFmpeg's own I/O
+    /// The strong `ETag` the coordinated reader saw on its first response,
+    /// with the URL that served it (the redirect target, if any). `nil` for a weak tag, a `Last-Modified`-only origin, FFmpeg's own I/O
     /// and a host-supplied input alike — none of them can vouch that a later
     /// open reads the same bytes (see `KeyframeIndexCache.Identity`).
-    var openedStrongETag: String? { httpInput?.openedStrongETag }
+    var openedStrongETag: (tag: String, url: URL)? { httpInput?.openedStrongETag }
 
     /// The byte bound the first read was actually given, when a sizing hint
     /// moved it off the reader's default block.

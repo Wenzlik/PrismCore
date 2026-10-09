@@ -17,7 +17,9 @@ source-compatible.)
   keyframes the new file does not have — and two media selected only by query
   shared one. The identity now keeps the full URL and adds the version the open
   read: a local file's mtime, or the strong `ETag` the coordinated HTTP reader
-  saw on its first response. A remote source with no strong `ETag` (none, a
+  saw on its first response together with the URL that served it (after a
+  redirect, the target: an address redirecting to two files that share a tag
+  must not share a map). A remote source with no strong `ETag` (none, a
   weak `W/` one, `Last-Modified` only), read by FFmpeg's own HTTP, or through a
   host `PrismCoreInput` on a non-`file:` URL, neither uses nor writes a map and
   plans from the source. Only a SHA-256 digest is stored, never the URL or a

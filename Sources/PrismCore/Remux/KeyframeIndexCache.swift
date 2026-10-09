@@ -46,8 +46,12 @@ struct KeyframeIndexCache: Sendable {
         /// A local file's modification time.
         case fileModified(TimeInterval)
         /// The strong `ETag` an origin reported on the open that read the
-        /// bytes (`ReadInterruptGuard.openedStrongETag`).
-        case strongETag(String)
+        /// bytes (`ReadInterruptGuard.openedStrongETag`), and the URL whose
+        /// response carried it. A tag is unique per resource only, and after
+        /// a redirect that resource is the target, which the host's URL does
+        /// not name: an address that redirects elsewhere on the next open
+        /// can meet the same tag on a different file.
+        case strongETag(String, servedBy: URL)
 
         /// The version an opened source can prove, or `nil`.
         ///
@@ -57,13 +61,13 @@ struct KeyframeIndexCache: Sendable {
         /// needs the strong `ETag` the coordinated reader saw; FFmpeg's own
         /// HTTP and a host-supplied input report none, so they plan from the
         /// source every time rather than on a map nothing can bind to it.
-        static func observed(sourceURL: URL, strongETag: String?) -> SourceVersion? {
+        static func observed(sourceURL: URL, strongETag: (tag: String, url: URL)?) -> SourceVersion? {
             if sourceURL.isFileURL {
                 return ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path))?[
                     .modificationDate
                 ] as? Date).map { .fileModified($0.timeIntervalSince1970) }
             }
-            return strongETag.map(SourceVersion.strongETag)
+            return strongETag.map { .strongETag($0.tag, servedBy: $0.url) }
         }
     }
 
@@ -92,10 +96,11 @@ struct KeyframeIndexCache: Sendable {
         ) {
             let proof: String = switch version {
             case .fileModified(let mtime): "mtime:\(mtime)"
-            case .strongETag(let tag): "etag:\(tag)"
+            case .strongETag(let tag, let servedBy): "etag:\(servedBy.absoluteString)\u{0}\(tag)"
             }
             // NUL-separated: no URL, number or ETag contains one, so two
-            // different field lists cannot run together into one digest.
+            // different field lists cannot run together into one digest (a
+            // proof's own NUL count is fixed by its kind).
             let canonical = [
                 "v\(KeyframeIndexCache.formatVersion)",
                 sourceURL.absoluteString,

@@ -48,9 +48,10 @@ struct KeyframeIndexCacheTests {
     @Test("The identity keeps the query and binds the version: only the same URL, size, duration and strong ETag match")
     func identityKeepsQuery() {
         func identity(
-            _ url: String, size: Int64 = 100, version: KeyframeIndexCache.SourceVersion = .strongETag("\"v1\"")
+            _ url: String, size: Int64 = 100, version: KeyframeIndexCache.SourceVersion? = nil
         ) -> KeyframeIndexCache.Identity {
-            .init(sourceURL: URL(string: url)!, sizeBytes: size, durationMicroseconds: 200_000_000, version: version)
+            .init(sourceURL: URL(string: url)!, sizeBytes: size, durationMicroseconds: 200_000_000,
+                  version: version ?? .strongETag("\"v1\"", servedBy: URL(string: url)!))
         }
         let base = "http://nas:32400/library/parts/9/file.mkv?X-Plex-Token=SECRETTOKEN"
         #expect(identity(base) == identity(base))
@@ -63,7 +64,12 @@ struct KeyframeIndexCacheTests {
         #expect(identity(base) != identity(base, size: 101))
         // Replaced on the server at the same size and length: only the
         // version tells the two apart.
-        #expect(identity(base) != identity(base, version: .strongETag("\"v2\"")))
+        #expect(identity(base) != identity(base, version: .strongETag("\"v2\"", servedBy: URL(string: base)!)))
+        // One address redirecting to two resources that happen to share a
+        // tag: the tag is per resource, so the one that served it counts.
+        let play = "http://nas/play"
+        #expect(identity(play, version: .strongETag("\"1\"", servedBy: URL(string: "http://nas/a.ts")!))
+            != identity(play, version: .strongETag("\"1\"", servedBy: URL(string: "http://nas/b.ts")!)))
         #expect(identity(base, version: .fileModified(1)) != identity(base, version: .fileModified(2)))
         // The digest is the only form there is: nothing of the URL in the
         // clear ("S" and "T" are not hex digits, so no digest can spell it).
@@ -79,9 +85,9 @@ struct KeyframeIndexCacheTests {
             let response = HTTPURLResponse(
                 url: remote, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: headers
             )
-            return .observed(sourceURL: remote, strongETag: HTTPRangeInput.strongETag(of: response))
+            return .observed(sourceURL: remote, strongETag: HTTPRangeInput.strongETag(of: response).map { ($0, remote) })
         }
-        #expect(version(["ETag": "\"v1\""]) == .strongETag("\"v1\""))
+        #expect(version(["ETag": "\"v1\""]) == .strongETag("\"v1\"", servedBy: remote))
         // Equivalent content is not the same bytes, and a date has one-second
         // resolution — neither is proof a stored map still fits.
         #expect(version(["ETag": "W/\"v1\""]) == nil)
@@ -97,7 +103,7 @@ struct KeyframeIndexCacheTests {
             Issue.record("a local file lost its mtime proof")
         }
         #expect(KeyframeIndexCache.SourceVersion.observed(
-            sourceURL: URL(fileURLWithPath: "/nonexistent/prismcore/movie.mkv"), strongETag: "\"v1\""
+            sourceURL: URL(fileURLWithPath: "/nonexistent/prismcore/movie.mkv"), strongETag: ("\"v1\"", remote)
         ) == nil)
     }
 
@@ -108,7 +114,7 @@ struct KeyframeIndexCacheTests {
         let cache = KeyframeIndexCache(directory: directory)
         let key = KeyframeIndexCache.Identity(
             sourceURL: URL(string: "http://nas/movie.ts")!, sizeBytes: 100,
-            durationMicroseconds: 30_000_000, version: .strongETag("\"v1\"")
+            durationMicroseconds: 30_000_000, version: .strongETag("\"v1\"", servedBy: URL(string: "http://nas/movie.ts")!)
         ).key
         let file = directory.appendingPathComponent("\(KeyframeIndexCache.fnv1a(key)).json")
 
@@ -511,6 +517,48 @@ struct KeyframeIndexCacheTests {
 
         // Back to the version the map was learned from: both take it.
         etag.value = "\"v1\""
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) == .keyframeIndexCache)
+        #expect(try await Self.previewTakesMap(url, cache: cacheDirectory))
+    }
+
+    @Test("A redirecting address binds the map to the target that served the ETag, not to itself")
+    func redirectTargetBindsTheMap() async throws {
+        let cacheDirectory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let media = try Data(contentsOf: try fixture("h264_ac3_30s.ts"))
+        // `/play` redirects to whichever file is current; both carry the same
+        // strong tag, which is legal — a tag is unique per resource only. The
+        // bytes are the same too, so size, duration and time base all agree:
+        // only the target tells the two apart.
+        let target = LockedString("/a.ts")
+        let origin = try ScriptedHTTPServer { request in
+            request.path == "/play"
+                ? .respond(status: 302, headers: ["Location": target.value], body: Data())
+                : ScriptedHTTPServer.ranged(media, for: request, validators: ["ETag": "\"1\""])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+        let url = root.appendingPathComponent("play")
+
+        let first = HLSRemuxer(
+            sourceURL: url, outputDirectory: output, demand: DemandCoordinator(),
+            keyframeCacheDirectory: cacheDirectory, indexLoadBudget: .zero
+        )
+        first.coordinatedHTTP = true
+        try first.run()
+        let sidecars = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
+            .filter { $0.hasSuffix(".json") }
+        #expect(sidecars.count == 1, "the redirected play stored nothing — nothing was exercised")
+
+        // The address now sends opens to B: A's map must not plan or scrub it.
+        target.value = "/b.ts"
+        #expect(try await !Self.previewTakesMap(url, cache: cacheDirectory))
+        #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) != .keyframeIndexCache)
+
+        // A stable redirect keeps its map: back to A, both take it.
+        target.value = "/a.ts"
         #expect(try await Self.sessionPlanOrigin(url, cache: cacheDirectory) == .keyframeIndexCache)
         #expect(try await Self.previewTakesMap(url, cache: cacheDirectory))
     }

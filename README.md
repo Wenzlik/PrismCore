@@ -368,7 +368,8 @@ each one is bound to an identity: the full URL **including its query** (a query
 can select the media, not only carry a token), the byte size, the container
 duration, and the version the open actually read — a local file's mtime, or the
 **strong `ETag`** a remote origin reported through the coordinated HTTP reader
-(`coordinatedHTTP`). Only a SHA-256 digest of that is written; the URL and any
+(`coordinatedHTTP`), together with the URL that served it — after a redirect,
+the target, since a tag is only unique per resource. Only a SHA-256 digest of that is written; the URL and any
 token in it never reach the disk. The scrub preview (`SeekPreviewService`)
 derives the same identity from its own open. A remote source that cannot prove
 its version neither uses a stored map nor stores one, and plans from the source

@@ -63,8 +63,13 @@ final class HTTPRangeInput {
     /// the two the merged validator happened to be. Every later response is
     /// held to the first one's validator (`fill`), so this vouches for every
     /// byte the open read.
-    private var firstStrongETag: String?
-    var openedStrongETag: String? { failureLock.withLock { firstStrongETag } }
+    ///
+    /// Paired with the URL that answered, not the one the host gave: after a
+    /// redirect the tag belongs to the target, and a strong `ETag` is only
+    /// unique per resource — `/play` sending one open to `/a.ts` and the next
+    /// to `/b.ts`, both tagged `"1"`, must not read as one version.
+    private var firstStrongETag: (tag: String, url: URL)?
+    var openedStrongETag: (tag: String, url: URL)? { failureLock.withLock { firstStrongETag } }
 
     /// Recently fetched blocks, least-recently-used first.
     ///
@@ -331,7 +336,7 @@ final class HTTPRangeInput {
     private func observeFirstResponse(reporting currentValidator: String?, strongETag: String?) {
         guard !firstResponseSeen else { return }
         firstResponseSeen = true
-        failureLock.withLock { firstStrongETag = strongETag }
+        failureLock.withLock { firstStrongETag = strongETag.map { ($0, url) } }
         let verdict: ValidatorObservation
         switch (expectedValidator, currentValidator) {
         case (nil, let reported?): verdict = .unchecked(reported)
