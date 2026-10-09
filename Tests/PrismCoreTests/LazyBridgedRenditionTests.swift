@@ -148,6 +148,58 @@ struct LazyBridgedRenditionTests {
         return Double(pts) * av_q2d(timeBase)
     }
 
+    // MARK: - Across a producer recovery
+
+    /// A re-open (`ProducerRecoveryPolicy`) closes the context every bridge
+    /// and muxer was built from. The armed rendition must come back on the
+    /// NEW context's streams — a bridge or muxer still pointing into the old
+    /// one reads freed memory, which is the likeliest way for a recovery to
+    /// crash rather than heal.
+    @Test("A lazy bridged rendition armed before a source failure is produced from the re-opened context")
+    func armedRenditionSurvivesProducerRecovery() async throws {
+        // 20 s, ~76 KB/s: the gate at 700 KB holds production inside
+        // segment 2 (8–14 s) until the test lets the failure through.
+        let factory = FlakyInputFactory(
+            media: try Data(contentsOf: try fixture("h264_ac3_dts_20s.mkv")),
+            behaviours: [.gate(at: 700_000)]
+        )
+        let session = try PrismCoreSession(url: URL(string: "prismcore-test://lazy.mkv")!, input: factory.make)
+        let events = EventLog(await session.playbackEvents())
+        let playlist = try await session.start()
+        let base = playlist.deletingLastPathComponent()
+        await waitUntil { factory.gated }
+        #expect(factory.gated)
+
+        // Arm the bridged DTS rendition while the producer holds the old
+        // context: its bridge is built from that context's stream.
+        // The loopback arms it on receipt, before the fetch waits for
+        // anything; half a second is that receipt with room to spare.
+        async let initFetch = URLSession.uncached.data(from: base.appendingPathComponent("audio1/init.mp4"))
+        try await Task.sleep(for: .milliseconds(500))
+        factory.openGate()
+
+        await waitUntil { events.contains { if case .producerRecovered = $0 { true } else { false } } }
+        #expect(events.contains { if case .producerRecovered = $0 { true } else { false } }, "\(events.snapshot)")
+        let (initData, initResponse) = try await initFetch
+        #expect((initResponse as? HTTPURLResponse)?.statusCode == 200)
+
+        // Segment 2 is the seam (production failed inside it), 3 is after.
+        for index in [2, 3] {
+            let (segment, response) = try await URLSession.uncached.data(
+                from: base.appendingPathComponent(String(format: "audio1/seg%05d.m4s", index))
+            )
+            #expect((response as? HTTPURLResponse)?.statusCode == 200, "audio1 segment \(index)")
+            let check = SegmentVerifier.verify(initSegment: initData, mediaSegment: segment)
+            #expect(!check.hasErrors && check.audioFrames > 0, "audio1 segment \(index): \(check.problems)")
+            let first = try Self.firstPacketSeconds(initSegment: initData, media: segment)
+            let planned = 2.0 + Double(index - 1) * 6
+            #expect(abs(first - planned) < 0.25, "audio1 segment \(index) opens at \(first) s, planned \(planned) s")
+        }
+        let report = try await SegmentVerifier.verify(playlist: playlist)
+        #expect(!report.hasErrors, "findings: \(report.findings)")
+        await session.stop()
+    }
+
     // MARK: - Sequential shape
 
     @Test("A sequential session declares only what it produces: no bridged alternate, no boost")

@@ -19,6 +19,9 @@ final class ScriptedHTTPServer: @unchecked Sendable {
         case respond(status: Int, headers: [String: String] = [:], body: Data)
         /// Hold the connection open and never answer: a starved origin.
         case stall
+        /// Close the connection without a byte of response: an origin, or a
+        /// proxy in front of it, that went away mid-request.
+        case drop
     }
 
     private let queue = DispatchQueue(label: "prismcore.tests.scripted-origin")
@@ -118,6 +121,8 @@ final class ScriptedHTTPServer: @unchecked Sendable {
             switch handler(request) {
             case .stall:
                 break
+            case .drop:
+                close(connection)
             case .respond(let status, let extra, let body):
                 var head = "HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n"
                 for (name, value) in extra { head += "\(name): \(value)\r\n" }
