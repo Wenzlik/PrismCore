@@ -24,7 +24,8 @@ import Libavutil
 ///
 /// Never stored unless the open proves it read the **same version** as the
 /// producer's: the two identities must be equal (`KeyframeIndexCache.Identity`
-/// — URL, size, duration, strong `ETag` and the URL that served it). A file
+/// — URL, size, duration, strong `ETag` and the URL that served it, or the
+/// host's `SourceCacheIdentity` with size and duration). A file
 /// replaced between the two opens yields different digests and nothing is
 /// written. And the map must pass what a map stored by the producer passes:
 /// `keyframePlan`'s witnesses and `indexCoversThroughEnd` — a scan the budget
