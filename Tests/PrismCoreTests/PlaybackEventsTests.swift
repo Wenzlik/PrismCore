@@ -209,6 +209,24 @@ struct PlaybackEventsTests {
         #expect(await finish(sink, stream) == [.serveTimedOut(path: "seg00003.m4s")])
     }
 
+    /// The report keeps events nobody subscribed to; a stall must reach it
+    /// the same way, not only when a host happens to be listening.
+    @Test("A stall with no subscriber still reaches the retained events")
+    func unobservedStallIsRetained() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var (provider, sink, _) = orphanProvider(root: root, timeout: .milliseconds(300))
+        sink.replace(with: nil)
+        provider.stallReport = { _, _ in .producerStalled(since: .seconds(5), lastPTS: 1) }
+
+        guard case .pending(let pending) = await provider.data(forPath: "seg00003.m4s") else {
+            Issue.record("a missing planned segment must go pending")
+            return
+        }
+        _ = await pending.resolve()
+        #expect(sink.retained.events.contains { $0.event == .producerStalled(since: .seconds(5), lastPTS: 1) })
+    }
+
     @Test("A wait whose request went away reports no timeout")
     func cancelledWaitIsSilent() async throws {
         let root = try temporaryRoot()

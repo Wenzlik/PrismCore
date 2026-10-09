@@ -10,6 +10,93 @@ source-compatible.)
 
 ### Added
 
+- **`PrismCoreSession.diagnosticReport()`**: one `Codable` snapshot of a
+  playback for a field report. It holds the build (`PrismCoreVersion.current`,
+  the FFmpeg libraries and any ABI mismatch, the platform), the source
+  (`SourceInfo` through an explicit DTO, the container layout without
+  keyframe timestamps), the routing verdict, the options, the startup
+  checkpoints with plan origin and the probe timings, and the run: the newest
+  64 playback events, timestamp repairs, audio rendition production, object
+  audio, Dolby Vision conversion, retention evictions, and the classified
+  failure with its retryability. `PrismCoreEngine.diagnosticReport(for:decision:)`
+  is the same report for a source that never got a session. `jsonData()`
+  writes sorted keys, and `schemaVersion` (1) only ever grows additively. The
+  session now keeps its startup checkpoints and the newest 64 playback events
+  even when no host subscribed, so a report taken after a failure still has
+  them.
+- The report withholds HTTP headers (only their count is kept), the URL's
+  query, fragment and credentials, the LAN access token, and every path on
+  disk (work directory, keyframe cache, sidecars; a local source is named by
+  file name only). Free-text error descriptions are scrubbed of the same
+  values, and any URL they quote — a redirect target included — loses its
+  credentials, query and fragment. Error descriptions and track titles and
+  languages, which the muxer wrote, also lose any absolute path — POSIX,
+  Windows drive or UNC — even one the session never knew or one glued to a
+  label by `:`.
+- `prismcore-cli probe --json` prints the report alone on stdout.
+  `serve --report FILE` and `segverify --report FILE` write it on every exit,
+  including a failed start.
+- `PrismCoreVersion.current` (`3.4.0`). A test fails while it disagrees with
+  the newest version heading here.
+
+- **A first play that lost its index to the startup budget loads it in the
+  background.** A Matroska with Cues at the tail, behind a range proxy whose
+  one tail request can outlast `SegmentPlan.indexLoadBudget` (3 s), played the
+  whole first play sequentially, and the keyframe sidecar only learned the map
+  at EOF. The plan now records why it fell back to the uniform stride
+  (`budgetExpired`, `untrustedIndex`, `noIndex`); on an expired budget the
+  remuxer, once its first video segment is out, opens the source a second time
+  on its own `ProducerThread` with its own `ReadInterruptGuard` (installed
+  before the open, 60 s for open and index read, cancelled by `stop()`), reads
+  only the index, and stores it as a complete map when it passes the plan's
+  witnesses, reaches the end of the source, and the second open's identity
+  equals the producer's. `PlaybackEvent.segmentPlanAvailable(segments:)` then
+  tells the host that a successor session would plan from it; the running
+  session does not change.
+  - Started only where the result can be stored: coordinated HTTP with a strong
+    `ETag` and a `keyframeIndexCacheDirectory`. Without a version proof there
+    is no event either — a successor would face the same budget and most
+    likely play sequentially again, so the event would invite a restart for
+    nothing.
+  - Not started for a live / no-duration source, for a junk index, or when a
+    probe's `SourceStructure` positively reports no index. The second open
+    nudges only a container whose framing names its index (a SeekHead pointing
+    at Cues); a Cues-less Matroska or an MPEG-TS would turn the nudge into a
+    scan of the whole file, which the EOF harvest does for free.
+  - Bandwidth: the second open skips `avformat_find_stream_info` (it never
+    feeds a muxer) and its reader takes an origin slot only while nothing else
+    is in flight, the source prewarm's admission. On a tail-Cues Matroska it
+    costs the header block and the Cues read. Startup is untouched: nothing
+    starts before the first video segment.
+  - `prismcore-cli serve` takes `--keyframe-cache DIR`, as `bench` does, so the
+    late load and its event can be watched from a terminal.
+  - Considered and not done: adopting the map into the running session
+    (closing its EVENT playlist into a VOD one mid-play). The seam between
+    segments muxed from the head and re-anchored ones with absolute `tfdt`,
+    the EVENT playlist's cumulative `EXTINF` against the plan's keyframes, and
+    every rendition and subtitle playlist switching at the same boundary need
+    a device measurement before they can ship, even behind an option.
+
+- **`SubtitleCueHistory`: an opt-in bound on the remux cue tap's replay
+  history.** The tap kept every produced cue and its dedup key for the
+  session's lifetime (so a late `setTimedTextCueHandler` starts complete), and
+  queued pre-origin cues without limit — memory that grows with the text a
+  long captioned stream or a many-track disc carries. New
+  `PrismCoreSession.Options.subtitleCueHistory` (an initializer parameter on
+  every builder) takes `.complete` — the default, exactly today's behaviour —
+  or `.bounded(maxCues:maxBytes:)`, which keeps the newest cues only. Each cue
+  is evicted together with its key (a key left behind is the leak the bound
+  exists to stop; a key evicted alone is a duplicate cue), the byte bound
+  charges text plus key as UTF-8, and the pre-origin queue is capped the same
+  way. Live delivery is never bounded; a single cue over `maxBytes` goes out
+  live and is not retained. The contract a host takes on: the replay is the
+  retained window, and dedup is too — a seek back past evicted cues delivers
+  them again. Bounds below 1 are clamped rather than trapped on (a memory knob
+  should not crash a player), and read back as in force. The policy rides
+  `makeSession(changing:)` and both master-rejection fallbacks.
+  `subtitleCueHistoryStats` reports retained cues and bytes, `evictedCues` and
+  `droppedBeforeOrigin`, so truncation is never silent.
+
 - **A planned session heals a mid-film read failure instead of ending.** Until
   now any read error that survived the transport's own retries ended the
   remux, and the host's only remedy was a new session: a new probe (a full
@@ -58,6 +145,27 @@ source-compatible.)
   poll. `prismcore-cli serve` prints both events. `PlaybackEvent`'s
   `Equatable` is now written out: the new cases carry a `PrismCoreError`,
   which is not `Equatable`, and compare it by `description`.
+
+### Changed
+
+- **The keyframe sidecar is bound to a proven version of the source.** Its
+  identity used to be the URL without its query, the byte size and the
+  duration (plus mtime for a local file), so a remote file replaced at the same
+  size and length kept the old map — segment cuts and scrub frames planned on
+  keyframes the new file does not have — and two media selected only by query
+  shared one. The identity now keeps the full URL and adds the version the open
+  read: a local file's mtime, or the strong `ETag` the coordinated HTTP reader
+  saw on its first response together with the URL that served it (after a
+  redirect, the target: an address redirecting to two files that share a tag
+  must not share a map). A remote source with no strong `ETag` (none, a
+  weak `W/` one, `Last-Modified` only), read by FFmpeg's own HTTP, or through a
+  host `PrismCoreInput` on a non-`file:` URL, neither uses nor writes a map and
+  plans from the source. Only a SHA-256 digest is stored, never the URL or a
+  token in it, and entries carry a format version: every existing sidecar is a
+  miss once and is rebuilt. The cost is fewer hits — a rotated query token or
+  an origin without `ETag` now pays the index load (or the sequential first
+  play) every time. The remuxer's plan and `SeekPreviewService` derive the same
+  identity from their own opens. No API change.
 
 ## [3.4.0] — 2026-10-07
 

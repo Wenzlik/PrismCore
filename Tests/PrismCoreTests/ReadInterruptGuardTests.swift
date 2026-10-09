@@ -159,7 +159,7 @@ struct ReadInterruptGuardTests {
         // the only honest plan is uniform — but it must still exist, start at
         // the head, and cover the source.
         let built = try #require(plan)
-        #expect(built.basis == .uniform)
+        #expect(built.basis == .uniform(.budgetExpired))
         #expect(built.entries.first?.startPTS == 0)
         let covered = built.entries.reduce(0) { $0 + $1.duration }
         #expect(covered > 29, "a 30 s source planned as \(covered)s")

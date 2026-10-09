@@ -9,6 +9,12 @@ final class HTTPRangeInput {
     private var url: URL
     private var headers: [String: String]
     private let interrupted: () -> Bool
+    /// Fill only while the origin has nothing else in flight
+    /// (`HTTPOriginCoordinator.acquireYielding`). For a reader nobody is
+    /// watching — the late index load — so it never queues ahead of the
+    /// producer feeding the player, and never holds the slot the producer's
+    /// next fill would take.
+    private let yieldsToPlayback: Bool
     static let blockSize = 1 << 20
     private var position: Int64 = 0
     private var length: Int64?
@@ -55,6 +61,21 @@ final class HTTPRangeInput {
     var validatorObservation: ValidatorObservation {
         failureLock.withLock { observation }
     }
+
+    /// The strong `ETag` of the first response, kept apart from `validator`
+    /// on purpose: that one falls back to `Last-Modified`, and a date is not
+    /// proof of the same bytes (see `strongETag(of:)`). A persistent keyframe
+    /// map binds to this and nothing weaker, so it must never learn which of
+    /// the two the merged validator happened to be. Every later response is
+    /// held to the first one's validator (`fill`), so this vouches for every
+    /// byte the open read.
+    ///
+    /// Paired with the URL that answered, not the one the host gave: after a
+    /// redirect the tag belongs to the target, and a strong `ETag` is only
+    /// unique per resource — `/play` sending one open to `/a.ts` and the next
+    /// to `/b.ts`, both tagged `"1"`, must not read as one version.
+    private var firstStrongETag: (tag: String, url: URL)?
+    var openedStrongETag: (tag: String, url: URL)? { failureLock.withLock { firstStrongETag } }
 
     /// Recently fetched blocks, least-recently-used first.
     ///
@@ -111,9 +132,11 @@ final class HTTPRangeInput {
         headers: [String: String],
         hints: SourceOpenHints? = nil,
         prewarmStore: SourcePrewarmStore? = .shared,
+        yieldsToPlayback: Bool = false,
         interrupted: @escaping () -> Bool
     ) {
         self.prewarmStore = prewarmStore
+        self.yieldsToPlayback = yieldsToPlayback
         self.url = url
         self.headers = headers
         self.interrupted = interrupted
@@ -211,7 +234,10 @@ final class HTTPRangeInput {
         for _ in 0..<8 {
             guard !cancelled() else { throw Failure.request }
             let origin = HTTPOriginCoordinator.origin(url)
-            guard HTTPOriginCoordinator.shared.acquire(origin, cancelled: cancelled) else { throw Failure.request }
+            let admitted = yieldsToPlayback
+                ? HTTPOriginCoordinator.shared.acquireYielding(origin, cancelled: cancelled)
+                : HTTPOriginCoordinator.shared.acquire(origin, cancelled: cancelled)
+            guard admitted else { throw Failure.request }
             let requestSize = firstFillSize ?? Self.blockSize
             let response: RangeResponse
             do {
@@ -286,7 +312,7 @@ final class HTTPRangeInput {
             // open unhinted. The mid-session case is the line above, which
             // does throw, because there the old version's headers, blocks and
             // plan are already built and mixing versions fails invisibly.
-            observeFirstResponse(reporting: currentValidator)
+            observeFirstResponse(reporting: currentValidator, strongETag: Self.strongETag(of: response.response))
             // One fill only: every later read is an ordinary block.
             if firstFillSize != nil {
                 firstFillBytes = requestSize
@@ -331,9 +357,10 @@ final class HTTPRangeInput {
         response?.value(forHTTPHeaderField: "ETag").flatMap { $0.hasPrefix("W/") ? nil : $0 }
     }
 
-    private func observeFirstResponse(reporting currentValidator: String?) {
+    private func observeFirstResponse(reporting currentValidator: String?, strongETag: String?) {
         guard !firstResponseSeen else { return }
         firstResponseSeen = true
+        failureLock.withLock { firstStrongETag = strongETag.map { ($0, url) } }
         let verdict: ValidatorObservation
         switch (expectedValidator, currentValidator) {
         case (nil, let reported?): verdict = .unchecked(reported)
@@ -399,7 +426,7 @@ final class HTTPRangeInput {
             let reported = Self.validator(of: response.response)
             // This is the first response this reader has seen, whatever
             // happens next, and the hints' validator check is judged on it.
-            observeFirstResponse(reporting: reported)
+            observeFirstResponse(reporting: reported, strongETag: Self.strongETag(of: response.response))
             validator = reported
             length = range.total
             // Judged on the strong ETag only, whatever the entry says: an

@@ -250,8 +250,10 @@ struct PlanSegmentProvider: SegmentProvider {
                 // Checked on this wait's own wakeups (the backstop poll at
                 // worst), so the watchdog costs nothing while nobody waits and
                 // never touches the producer's or the coordinator's condition.
-                if let events, events.isObserved,
-                   let stalled = stallReport?(waitingSince, stallThreshold) {
+                // Asked whether or not a host subscribed: the sink keeps what
+                // it is given for the diagnostic report, and a stall nobody
+                // was watching for is exactly the one a report must explain.
+                if let events, let stalled = stallReport?(waitingSince, stallThreshold) {
                     events.yield(stalled)
                 }
                 // This wait sits on the SEEK path: a demand fetch is answered
