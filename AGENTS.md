@@ -348,7 +348,9 @@ PRISMCORE_FUZZ_TARGET=<target> .build/debug/prismcore-fuzz corpus/
 ## Releasing
 
 1. Land the change with a CHANGELOG entry under a new version heading, plus the
-   link at the bottom of the file.
+   link at the bottom of the file, and bump `PrismCoreVersion.current` to the
+   same number — diagnostic reports name it, and a test fails while the two
+   disagree.
 2. `git tag X.Y.Z` — **always three components**. SPM only resolves full semver
    tags; a `1.2` tag is invisible to consumers. (Release *titles* may drop a
    trailing zero if you like; tags may not.)
@@ -377,8 +379,9 @@ Sources/PrismCore/
   Subtitles/                 WebVTT renditions, bitmap decode + OCR
   Display/                   tvOS criteria + settle
   Software/                  the decode-and-render path
-  Diagnostics/               package-only: StartupCheckpointRun, SegmentVerifier
-                             (shared by the CLI and the tests)
+  Diagnostics/               SessionDiagnosticReport (public); package-only
+                             StartupCheckpointRun, SegmentVerifier (shared by
+                             the CLI and the tests)
 Sources/prismcore-cli/       macOS repro tool: probe, serve, validate, bench, segverify
 Tests/PrismCoreTests/        Swift Testing, fixtures, opt-in harnesses
 ```

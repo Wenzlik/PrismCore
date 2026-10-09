@@ -326,6 +326,35 @@ vanished mid-session are both `originUnreachable`, because the evidence at the
 failure site is identical — the host knows which it was from whether `start()`
 had returned.
 
+For a bug report, `await session.diagnosticReport()` gathers the rest in one
+`Codable` value: PrismCore and FFmpeg versions (with any ABI mismatch), the
+platform, the source's description and container layout, the routing verdict
+and its reason, the session's options, every startup checkpoint with its time
+and the plan origin (planned or sequential), the probe's phase timings, and
+the run so far: the newest 64 playback events, timestamp repairs, audio
+rendition production, the object-audio and Dolby Vision conversion findings,
+retention evictions and the classified failure. The session keeps the
+checkpoints and events itself, so the report has them even if the host never
+subscribed. A source that never got a session (declined, or sent to the
+software path) gets the same report from its probe:
+`PrismCoreEngine.diagnosticReport(for: probed, decision: Result { try
+PrismCoreEngine.decide(for: probed.info) })`. `jsonData()` writes it with
+sorted keys, so two reports diff line by line. `schemaVersion` names the shape,
+and fields are only ever added.
+
+**What a report leaves out.** It is built to be pasted into a public issue, so it
+never carries HTTP headers (only how many there were), the URL's query string,
+fragment or `user:password@`, the LAN access token, or any path on the
+device's disk: the work directory, `keyframeIndexCacheDirectory` (reported as
+on or off) and sidecar subtitle files are all left out, and a local source is
+named by its file name alone. Error descriptions are also scrubbed of every one
+of those values, because an error can quote the failing URL — and any URL it
+quotes, a redirect target included, loses its credentials, query and fragment
+too. Two things do stay
+in: a remote URL's host and path, which are what a reproduction needs, and the
+track titles, languages and file name the media itself carries. A host whose
+URLs keep a token in the *path* should cut it before sharing.
+
 ## How it works
 
 ```
@@ -660,11 +689,15 @@ link) that runs the engine on one source from the command line:
 
 ```
 swift run prismcore-cli probe     <url-or-path>   # SourceInfo, structure, routing verdict + reason
+                                                  # (--json: the diagnostic report, alone on stdout)
 swift run prismcore-cli serve     <url-or-path>   # loopback playlist URL for Safari / QuickTime
 swift run prismcore-cli bench     <url-or-path>   # the startup checkpoint line a host logs
 swift run prismcore-cli segverify <url-or-path>   # decode every served segment on its own
 swift run prismcore-cli validate  <url-or-path>   # Apple's mediastreamvalidator, if installed
 ```
+
+`serve` and `segverify` take `--report FILE` and write the session's diagnostic
+report there on exit, a failed start included.
 
 `validate` is opt-in. It needs Apple's HTTP Live Streaming Tools, and without
 them it prints a notice and exits 0 (unless you pass `--require-validator`).
