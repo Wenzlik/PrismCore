@@ -8,6 +8,32 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **A sliding HLS window for sequential sessions** —
+  `PrismCoreSession.Options.sequentialPlaylist` (and the same parameter on
+  every initializer), `.event` by default. A sequential session (no keyframe
+  plan) has always deleted old segments for the cache budget while its EVENT
+  playlist kept offering them, so a seek back past the budget was a 404.
+  With `.slidingWindow(seconds:)` the playlists stop offering them first:
+  no `PLAYLIST-TYPE`, `EXT-X-MEDIA-SEQUENCE` advancing, the variant, audio and
+  subtitle playlists cut on one common instant, at least three target
+  durations always listed, nothing cut past the segment AVPlayer fetched
+  last. Removed files — WebVTT segments included, which sequential retention
+  never deleted — are unlinked only after RFC 8216 §6.2.2's grace period
+  (segment duration plus the longest playlist), so a client on an older
+  manifest still gets a 200. The byte budget becomes soft in this mode: it
+  counts what is listed, and files in their grace period sit on top of it.
+  EOF ends the remaining window with `EXT-X-ENDLIST`. Planned sessions,
+  `.event` sessions and the planned VOD playlist are unchanged byte for
+  byte; clones and both rejection fallbacks carry the option. Covered by
+  `SequentialWindowTests` (driven clock) and `SlidingWindowPlaybackTests`,
+  which steps a sequential remux of a new 60 s two-audio + SRT fixture over
+  the loopback and checks every URL of the current and older manifests.
+  Not yet run on a device: how AVPlayer and an AirPlay receiver handle the
+  moving start of the window (long pause, seek to its left edge, audio and
+  subtitle switches, the end) is still to be confirmed there.
+
 ## [3.4.0] — 2026-10-07
 
 Audio renditions that re-encode are no longer produced for the whole film
