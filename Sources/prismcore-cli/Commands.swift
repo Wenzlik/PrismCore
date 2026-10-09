@@ -148,6 +148,10 @@ enum ServeCommand {
         case .originThrottled(let retryAfter):
             return "origin throttled" + (retryAfter.map { ", retry after \(seconds($0))" } ?? "")
         case .originRecovered: return "origin recovered"
+        case .producerRecovered(let attempt, let cause):
+            return "producer recovered (attempt \(attempt)) from: \(cause)"
+        case .producerFailed(let failure):
+            return "producer failed (\(failure.retryability)): \(failure)"
         }
     }
 }

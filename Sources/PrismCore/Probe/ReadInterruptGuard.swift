@@ -137,6 +137,13 @@ final class ReadInterruptGuard: @unchecked Sendable {
     /// expired while the origin was busy throttling us) and this is the cause.
     var originFailure: PrismCoreError? { httpInput?.lastOriginFailure }
 
+    /// The origin's verdict behind the last read that failed into
+    /// libavformat, which a later successful read does not clear (see
+    /// `HTTPRangeInput.lastFailedReadCause`). For a mid-session read
+    /// failure this outranks `originFailure`: the demuxer may have read on
+    /// past the failure before anyone could ask.
+    var failedReadCause: PrismCoreError? { httpInput?.lastFailedReadCause }
+
     func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
                           headers: [String: String], hints: SourceOpenHints? = nil) throws {
         let input = HTTPRangeInput(url: url, headers: headers, hints: hints, interrupted: { [weak self] in

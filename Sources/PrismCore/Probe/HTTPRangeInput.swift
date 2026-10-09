@@ -89,6 +89,15 @@ final class HTTPRangeInput {
     var lastOriginFailure: PrismCoreError? { failureLock.withLock { latchedFailure } }
     private func latch(_ failure: PrismCoreError?) { failureLock.withLock { latchedFailure = failure } }
 
+    /// What the origin had said when a fill last gave up and `read` handed
+    /// libavformat its `-EIO` — kept apart from `lastOriginFailure`, which
+    /// the next successful fill clears. A demuxer that meets a failed read
+    /// can resync and read on (Matroska scans to the next cluster), and that
+    /// next fill succeeds inside the same `av_read_frame` that hit the
+    /// failure: by the time the caller asks, the cause of the hole is gone.
+    private var handedOverFailure: PrismCoreError?
+    var lastFailedReadCause: PrismCoreError? { failureLock.withLock { handedOverFailure } }
+
     /// Where a prewarm left this source's first bytes, and what became of
     /// them. Consulted once, before the first fill; `nil` opts a reader out
     /// (tests that count requests against a cold origin).
@@ -178,7 +187,11 @@ final class HTTPRangeInput {
             block.data.copyBytes(to: destination, from: offset..<(offset + copied))
             position += Int64(copied)
             return Int32(copied)
-        } catch { return interrupted() ? swift_AVERROR_EXIT() : swift_AVERROR(EIO) }
+        } catch {
+            if interrupted() { return swift_AVERROR_EXIT() }
+            failureLock.withLock { handedOverFailure = latchedFailure }
+            return swift_AVERROR(EIO)
+        }
     }
 
     /// Drained per fill because the reader runs on threads that never drain
