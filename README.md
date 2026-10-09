@@ -379,6 +379,25 @@ URL. A file replaced on the server under the same URL (new strong `ETag`), or a
 rotated query token, costs one rebuild rather than a wrong map. Sidecars written by
 3.4.0 and earlier are ignored and rebuilt once.
 
+A source that **has** an index can still play its first play sequentially:
+`SegmentPlan.indexLoadBudget` (3 s) bounds the index-load seek, and behind a
+range proxy one tail request for Matroska Cues can take longer than that on
+its own. When the plan fell back **because the budget ran out** (not for a junk
+or missing index), the session reads the index again in the background once its
+first video segment is out — a second open with its own interrupt guard and a
+60 s budget, cancelled by `stop()`, whose reader takes the origin only while
+the producer has nothing in flight. If that open proves it read the same
+version (the identity above is equal) and the index reaches the end of the
+source, the map is stored as complete right away rather than at EOF, and the
+session reports `PlaybackEvent.segmentPlanAvailable(segments:)`. The running
+session stays sequential; a successor (`makeSession(changing:)` with the same
+cache directory, then a seek to the current time) plans as VOD from the map.
+This runs only where the map can be stored — over `coordinatedHTTP` with a
+strong `ETag` and a `keyframeIndexCacheDirectory` — and only for a container
+whose framing names where its index is (a Matroska SeekHead pointing at its
+Cues); anywhere else the second read would be a scan of the whole file, and the
+EOF harvest gets that map for free.
+
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and by
 an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
 `SegmentProvider` rather than straight off disk, and a provider that answers
