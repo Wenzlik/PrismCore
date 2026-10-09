@@ -39,6 +39,8 @@ source-compatible.)
     is in flight, the source prewarm's admission. On a tail-Cues Matroska it
     costs the header block and the Cues read. Startup is untouched: nothing
     starts before the first video segment.
+  - `prismcore-cli serve` takes `--keyframe-cache DIR`, as `bench` does, so the
+    late load and its event can be watched from a terminal.
   - Considered and not done: adopting the map into the running session
     (closing its EVENT playlist into a VOD one mid-play). The seam between
     segments muxed from the head and re-anchored ones with absolute `tfdt`,
