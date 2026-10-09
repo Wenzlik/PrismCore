@@ -113,6 +113,25 @@ struct SubtitleCueHistoryTests {
         #expect(late.cues.map(\.start) == [8, 9])
     }
 
+    @Test("An evicted cue's text and key are released at eviction, not at the next compaction")
+    func evictionReleasesThePayloadBeforeCompaction() {
+        // Five equal-cost cues under room for four: the fifth evicts the
+        // first, and one dead slot against three live ones is too little to
+        // compact — the slot must still let go of its text and key.
+        let texts = (0..<5).map { String(repeating: Character(String($0)), count: 100) }
+        let one = cost(cue(0, text: texts[0]))
+        let renditions = set(.bounded(maxCues: 4, maxBytes: 4 * one))
+        renditions.setTimelineOrigin(seconds: 0)
+        for index in 0..<5 { renditions.emitHostCue(streamIndex: 0, cue(index, text: texts[index])) }
+
+        let stats = renditions.historyStats
+        #expect(stats.retainedCues == 4)
+        #expect(stats.retainedBytes == 4 * one)
+        let held = renditions.heldHistoryForTesting
+        #expect(held.cues == stats.retainedCues)
+        #expect(held.bytes == stats.retainedBytes)
+    }
+
     @Test("Dedup is the retained window: an evicted cue re-demuxed after a seek back arrives again")
     func evictedCueIsRedeliveredAfterSeekBack() {
         let renditions = set(.bounded(maxCues: 3, maxBytes: 1 << 20))
