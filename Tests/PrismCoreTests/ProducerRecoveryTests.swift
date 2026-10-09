@@ -172,6 +172,9 @@ struct ProducerRecoveryTests {
         let playlist = try await session.start()
         await waitUntil { events.contains(where: Self.isRecovered) }
         #expect(factory.made == 2, "the factory is called once per open, the re-open included")
+        // The broken instance was let go before the next was asked for: a
+        // host input that frees a connection slot in `deinit` needs that.
+        #expect(factory.liveWhenMade == [0, 0], "\(factory.liveWhenMade)")
         guard case .producerRecovered(1, let cause)? = events.snapshot.first(where: Self.isRecovered) else {
             Issue.record("no recovery: \(events.snapshot)")
             await session.stop()
@@ -425,6 +428,8 @@ final class FlakyInputFactory: @unchecked Sendable {
     private let behaviours: [Behaviour]
     private let otherwise: Behaviour
     private var count = 0
+    private var live = 0
+    private var liveAtMake: [Int] = []
     private var failed = 0
     private var isGated = false
     private var gateOpen = false
@@ -437,6 +442,8 @@ final class FlakyInputFactory: @unchecked Sendable {
     }
 
     var made: Int { condition.withLock { count } }
+    /// How many earlier instances were still alive at each `make`.
+    var liveWhenMade: [Int] { condition.withLock { liveAtMake } }
     var failures: Int { condition.withLock { failed } }
     var gated: Bool { condition.withLock { isGated } }
     var parked: Bool { condition.withLock { isParked } }
@@ -450,12 +457,19 @@ final class FlakyInputFactory: @unchecked Sendable {
 
     var make: PrismCoreInputFactory {
         { [self] in
-            let ordinal = condition.withLock { defer { count += 1 }; return count }
+            let ordinal = condition.withLock {
+                liveAtMake.append(live)
+                live += 1
+                defer { count += 1 }
+                return count
+            }
             return FlakyInput(factory: self, behaviour: ordinal < behaviours.count ? behaviours[ordinal] : otherwise)
         }
     }
 
     fileprivate func noteFailure() { condition.withLock { failed += 1 } }
+
+    fileprivate func noteReleased() { condition.withLock { live -= 1 } }
 
     fileprivate func waitAtGate() {
         condition.withLock {
@@ -489,6 +503,8 @@ private final class FlakyInput: CancellablePrismCoreInput, @unchecked Sendable {
         self.behaviour = behaviour
         self.media = factory.bytes
     }
+
+    deinit { factory.noteReleased() }
 
     var length: Int64? { Int64(media.count) }
 

@@ -1770,7 +1770,9 @@ final class HLSRemuxer: @unchecked Sendable {
                 let retiredGuard = interruptGuard
                 activeGuardLock.withLock { activeGuard = nil }
                 avformat_close_input(&openedInput)
-                withExtendedLifetime(retiredGuard) {}
+                // Closed, so its host input can go — before the factory is
+                // asked for the next one (`releaseHostInput` says why).
+                retiredGuard.releaseHostInput()
                 let reopened: (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)
                 do {
                     guard let opened = try openSourceContext() else { return }
