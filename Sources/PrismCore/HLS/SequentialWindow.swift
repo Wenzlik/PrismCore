@@ -89,9 +89,21 @@ final class SequentialWindow {
             cut = max(cut, min(victim.end, playhead.start))
         }
         let writers = [video] + renditions
-        for writer in writers where writer.listedSeconds > 0 {
-            cut = min(cut, writer.listedEndSeconds
-                - Self.minimumTargetDurations * Double(writer.targetDuration))
+        let videoFloor = video.listedEndSeconds
+            - Self.minimumTargetDurations * Double(video.targetDuration)
+        cut = min(cut, videoFloor)
+        // A rendition whose last entry ends at or behind the variant's own
+        // floor has stopped delivering (an audio track that ends early):
+        // nothing it lists is within what a joining client starts from, and
+        // its floor would pin the front of EVERY playlist to where it stopped
+        // while the variant grows without bound. It is passed over like an
+        // empty one — its entries leave with the cut and its front moves on
+        // (`MediaPlaylistWriter.unlistedRemovedSeconds`). A rendition that is
+        // merely folding a boundary or two lags far less than three targets.
+        for rendition in renditions where rendition.listedSeconds > 0
+            && rendition.listedEndSeconds > videoFloor + MediaPlaylistWriter.boundaryTolerance {
+            cut = min(cut, rendition.listedEndSeconds
+                - Self.minimumTargetDurations * Double(rendition.targetDuration))
         }
         // One instant for every playlist: a rendition entry that straddles
         // the cut pulls it back to that entry's start, and that can land

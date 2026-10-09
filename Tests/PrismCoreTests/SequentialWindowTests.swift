@@ -145,6 +145,24 @@ struct SequentialWindowTests {
         #expect(spans.allSatisfy { abs($0 - 42) < 0.001 }, "\(spans)")
     }
 
+    @Test("A rendition that stops delivering does not pin the window where it stopped")
+    func interruptedRenditionDoesNotPinTheWindow() throws {
+        let presentation = try Presentation(seconds: 0)
+        // Audio for 30 s, then nothing while the video runs on to 120 s.
+        for _ in 0..<5 { try presentation.cut(6) }
+        for _ in 0..<15 { try presentation.cut(6, audioCarries: false) }
+        let retired = try #require(try presentation.window.slide(playheadIndex: 19, budgetCutIndex: nil, now: 0))
+        // The variant's own floor (120 − 3 × 6 s), not the audio's (30 − 18 s).
+        #expect(retired.videoIndexes == Array(0..<17))
+        let audio = try presentation.playlist("audio0")
+        #expect(audio.segments.isEmpty)
+        #expect(audio.mediaSequence == 5)
+
+        // Audio resumes: its entry starts on the front (102 s), not at 30 s.
+        try presentation.cut(6)
+        #expect(try presentation.playlist("audio0").segments.compactMap(\.duration) == [24])
+    }
+
     @Test("The window never drops below three target durations, nor past the playhead")
     func minimumWindow() throws {
         let presentation = try Presentation(seconds: 0)

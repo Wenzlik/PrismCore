@@ -405,7 +405,11 @@ source), and clones and both rejection fallbacks carry it. In the window:
   arrives after the window has moved starts on the window's front: its first
   entry covers only the stretch still listed elsewhere, not the whole time
   before it. That entry still sets its `TARGETDURATION`, and so its three
-  target durations of minimum window, for the rest of the session.
+  target durations of minimum window, for the rest of the session. A
+  rendition that stops delivering (an audio track ending early) no longer
+  holds the window back once its last entry falls behind the variant's own
+  three-target floor: its entries leave with everyone else's and, if it
+  resumes, it rejoins on the front the same way.
 - **Unlink after a grace period.** A segment leaves the playlists first. Its
   files — `.m4s` and `.vtt` alike — are deleted only after its own duration
   plus the longest any of the session's playlists has been (RFC 8216
