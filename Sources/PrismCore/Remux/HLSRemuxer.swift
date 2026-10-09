@@ -569,7 +569,8 @@ final class HLSRemuxer: @unchecked Sendable {
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
         indexLoadBudget: Duration = SegmentPlan.indexLoadBudget,
-        landed: ProductionSignal? = nil
+        landed: ProductionSignal? = nil,
+        subtitleCueHistory: SubtitleCueHistory = .complete
     ) {
         self.probed = probed
         // The probe's factory carries over when the caller did not pass one:
@@ -584,7 +585,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.outputDirectory = outputDirectory
         self.segmentSeconds = segmentSeconds
         self.firstSegmentSeconds = firstSegmentSeconds
-        self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory)
+        self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory, cueHistory: subtitleCueHistory)
         self.displayIsHDRReady = displayIsHDRReady
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
         self.demand = demand
