@@ -141,7 +141,8 @@ public actor PrismCoreSession {
         /// written, so the rendition shows the old offset for whatever is
         /// buffered or was produced ahead. Cues the host already holds keep
         /// their old times too; registering the cue handler again replays
-        /// everything with the new offset.
+        /// everything with the new offset — everything still retained, under
+        /// `SubtitleCueHistory.bounded`.
         case appliesToNewSegments
         /// The session is stopped. Nothing changed.
         case sessionStopped
@@ -243,6 +244,9 @@ public actor PrismCoreSession {
         /// clone, or a master rejection would quietly drop an AirPlayed
         /// session back onto an address the receiver cannot reach.
         public var reachability: LoopbackHTTPServer.Reachability
+        /// How much of the cue tap's past is kept for a late handler's replay.
+        /// A `.bounded` value reads back clamped, as it is in force.
+        public var subtitleCueHistory: SubtitleCueHistory
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -492,7 +496,8 @@ public actor PrismCoreSession {
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
-        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly
+        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
+        subtitleCueHistory: SubtitleCueHistory = .complete
     ) throws {
         try self.init(
             url: url,
@@ -510,7 +515,8 @@ public actor PrismCoreSession {
             audioDelaySeconds: audioDelaySeconds,
             coordinatedHTTP: coordinatedHTTP,
             input: input,
-            reachability: reachability
+            reachability: reachability,
+            subtitleCueHistory: subtitleCueHistory
         )
     }
 
@@ -571,6 +577,11 @@ public actor PrismCoreSession {
     ///   Do **not** pass this together with `setTimedTextCueHandler` unless
     ///   the host suppresses its own overlay: engaging the rendition means
     ///   AVKit draws the cues, and the handler draws them again.
+    /// - Parameter subtitleCueHistory: how much of the cue tap's past is kept
+    ///   for a handler registered late. `.complete` (the default) keeps every
+    ///   cue for the session's lifetime; `.bounded` keeps the newest only —
+    ///   see `SubtitleCueHistory` for what a host opting in gives up, and
+    ///   `subtitleCueHistoryStats` for what was let go.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -585,7 +596,8 @@ public actor PrismCoreSession {
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
-        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly
+        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
+        subtitleCueHistory: SubtitleCueHistory = .complete
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -599,7 +611,8 @@ public actor PrismCoreSession {
             preferredSubtitleLanguage: preferredSubtitleLanguage,
             audioDelaySeconds: AudioDelay.normalized(audioDelaySeconds),
             coordinatedHTTP: coordinatedHTTP || probed?.interruptGuard.usesCoordinatedHTTP == true,
-            reachability: reachability
+            reachability: reachability,
+            subtitleCueHistory: subtitleCueHistory.normalized
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -635,7 +648,8 @@ public actor PrismCoreSession {
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
-            landed: landed
+            landed: landed,
+            subtitleCueHistory: configuration.subtitleCueHistory
         )
         self.remuxer = remuxer
         remuxer.audioDelaySeconds = AudioDelay.normalized(audioDelaySeconds)
@@ -696,7 +710,8 @@ public actor PrismCoreSession {
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
-        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly
+        reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
+        subtitleCueHistory: SubtitleCueHistory = .complete
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -711,7 +726,8 @@ public actor PrismCoreSession {
             audioDelaySeconds: audioDelaySeconds,
             coordinatedHTTP: coordinatedHTTP,
             input: input,
-            reachability: reachability
+            reachability: reachability,
+            subtitleCueHistory: subtitleCueHistory
         )
     }
 
@@ -813,7 +829,10 @@ public actor PrismCoreSession {
             // easy to lose: a successor that fell back to `.loopbackOnly`
             // would serve 127.0.0.1 to an AirPlay receiver that cannot reach
             // it, and the rejection tier is exactly when that happens.
-            reachability: options.reachability
+            reachability: options.reachability,
+            // Carried so a fallback cannot quietly go back to `.complete`
+            // and grow the memory the host bounded on purpose.
+            subtitleCueHistory: options.subtitleCueHistory
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
@@ -968,11 +987,24 @@ public actor PrismCoreSession {
     /// seek forward means that region's cues arrive when the remux reaches
     /// it, and a re-demuxed region is deduplicated here, not by the host.
     ///
+    /// Under `SubtitleCueHistory.bounded` both of those promises shrink to the
+    /// retained window: the replay is the newest cues only, and a region
+    /// re-demuxed after its cues were evicted is delivered again. Live
+    /// delivery is never bounded. `subtitleCueHistoryStats` says what was
+    /// let go.
+    ///
     /// External files registered via `addExternalSubtitle` are *not* streamed:
     /// the host handed those in and already owns their text.
     public func setTimedTextCueHandler(_ handler: (@Sendable (TimedTextCue) -> Void)?) {
         timedTextCueHandler = handler
         remuxer.subtitles.setCueHandler(handler)
+    }
+
+    /// What the cue tap's history holds now and what it has let go of — the
+    /// visible side of `SubtitleCueHistory.bounded`. Under `.complete` the
+    /// eviction counters stay zero.
+    public nonisolated var subtitleCueHistoryStats: SubtitleCueHistoryStats {
+        remuxer.subtitles.historyStats
     }
 
     /// OCR a bitmap subtitle stream (PGS / DVB / DVD) for the host's cue tap.
