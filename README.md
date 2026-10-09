@@ -401,7 +401,11 @@ source), and clones and both rejection fallbacks carry it. In the window:
   next entry (and numbers its own files), so where its entry straddles the
   cut the cut moves back to that entry's start, for everyone. Media sequence
   numbers may therefore differ between renditions by those folds; the
-  playlist timeline is what lines them up.
+  playlist timeline is what lines them up. A rendition whose first audio
+  arrives after the window has moved starts on the window's front: its first
+  entry covers only the stretch still listed elsewhere, not the whole time
+  before it. That entry still sets its `TARGETDURATION`, and so its three
+  target durations of minimum window, for the rest of the session.
 - **Unlink after a grace period.** A segment leaves the playlists first. Its
   files — `.m4s` and `.vtt` alike — are deleted only after its own duration
   plus the longest any of the session's playlists has been (RFC 8216

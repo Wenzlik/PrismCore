@@ -114,6 +114,37 @@ struct SequentialWindowTests {
         #expect(spans.allSatisfy { abs($0 - 16) < 0.001 }, "\(spans)")
     }
 
+    @Test("A rendition whose first audio comes after the window moved starts on the common front")
+    func lateRenditionJoinsTheFront() throws {
+        let presentation = try Presentation(seconds: 10)
+        // 40 s with no audio at all: the rendition lists nothing and the
+        // others slide without it — playhead 38 s, front at 28 s.
+        for _ in 0..<20 { try presentation.cut(2, audioCarries: false) }
+        let first = try #require(try presentation.window.slide(playheadIndex: 19, budgetCutIndex: nil, now: 0))
+        #expect(first.videoIndexes == Array(0..<14))
+
+        // The first audio folds 0…42 s; only 28…42 s is still in the window.
+        try presentation.cut(2)
+        let audio = try presentation.playlist("audio0")
+        #expect(audio.mediaSequence == 0)
+        #expect(audio.segments.compactMap(\.duration) == [14])
+        #expect(try presentation.text("audio0").contains("#EXT-X-TARGETDURATION:14\n"))
+
+        // The window keeps moving: 86 s produced, playhead at 84 s. The
+        // audio's own floor (3 × 14 s) holds the cut at 44 s, a boundary
+        // every playlist has. With the fold left at 0…42 s, its 42 s target
+        // put that floor below zero and nothing moved again.
+        for _ in 0..<22 { try presentation.cut(2) }
+        _ = try #require(try presentation.window.slide(playheadIndex: 42, budgetCutIndex: nil, now: 0))
+        let video = try presentation.playlist()
+        let late = try presentation.playlist("audio0")
+        let subtitles = try presentation.playlist("subs0")
+        #expect(video.mediaSequence == 22)
+        #expect(late.mediaSequence == 2)
+        let spans = [video, late, subtitles].map { $0.segments.compactMap(\.duration).reduce(0, +) }
+        #expect(spans.allSatisfy { abs($0 - 42) < 0.001 }, "\(spans)")
+    }
+
     @Test("The window never drops below three target durations, nor past the playhead")
     func minimumWindow() throws {
         let presentation = try Presentation(seconds: 0)

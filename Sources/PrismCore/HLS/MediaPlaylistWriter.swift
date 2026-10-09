@@ -42,6 +42,15 @@ final class MediaPlaylistWriter {
     /// The longest this playlist has ever been, in seconds — the second term
     /// of RFC 8216 §6.2.2's availability rule for a removed segment.
     private(set) var longestListedSeconds = 0.0
+    /// Time the window took off the front before this playlist listed it:
+    /// an audio rendition whose first packet comes late has nothing listed
+    /// while the others slide, and folds that whole stretch into its first
+    /// entry. Without this, that entry would start at 0 — offering time no
+    /// other playlist still lists, straddling every later cut (which then
+    /// snaps back to 0 and freezes the window) and setting a TARGETDURATION
+    /// the length of the stretch. Trimmed off the next entry instead, so it
+    /// starts on the common front.
+    private var unlistedRemovedSeconds = 0.0
 
     /// Two entry boundaries closer than this are the same boundary. Each
     /// rendition sums its own durations (the video's ticks, a rendition's
@@ -56,6 +65,11 @@ final class MediaPlaylistWriter {
 
     /// Record one finished segment and rewrite the playlist.
     func appendSegment(duration: Double, file: String) throws {
+        var duration = duration
+        if unlistedRemovedSeconds > 0 {
+            duration = max(0.001, duration - unlistedRemovedSeconds)
+            unlistedRemovedSeconds = 0
+        }
         entries.append((duration, file))
         appendText(duration: duration, file: file)
         listedSeconds += duration
@@ -146,6 +160,13 @@ final class MediaPlaylistWriter {
             end += entry.duration
             guard end <= seconds + Self.boundaryTolerance else { break }
             removed.append(entry)
+        }
+        // The cut passed everything listed — only possible for a playlist
+        // the window's floor skips, one with nothing listed yet: its front
+        // moves with everyone else's (see `unlistedRemovedSeconds`).
+        if removed.count == entries.count, seconds > end + Self.boundaryTolerance {
+            unlistedRemovedSeconds += seconds - end
+            removedSeconds += seconds - end
         }
         guard !removed.isEmpty else { return [] }
         entries.removeFirst(removed.count)
