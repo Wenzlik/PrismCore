@@ -28,6 +28,12 @@ final class ResidentSegmentStore: @unchecked Sendable {
     /// supersede can mark those files unservable too: their entry is already
     /// gone, so `entries.keys` would not name them.
     private var awaitingUnlink: Set<Int> = []
+    /// Segments retention has evicted over the session, for the diagnostic
+    /// report: a budget that evicts constantly is a session re-producing
+    /// what it already made, and nothing else would say so.
+    private var evicted = 0
+
+    var evictedCount: Int { lock.withLock { evicted } }
 
     func record(index: Int, start: Double, end: Double) {
         guard start.isFinite, end.isFinite, end > start else { return }
@@ -39,6 +45,7 @@ final class ResidentSegmentStore: @unchecked Sendable {
 
     func retire(_ indexes: [Int]) {
         lock.withLock {
+            evicted += indexes.count
             for index in indexes {
                 entries.removeValue(forKey: index)
                 awaitingUnlink.insert(index)

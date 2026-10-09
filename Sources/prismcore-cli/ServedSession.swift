@@ -21,12 +21,17 @@ import PrismCore
 /// `beforeStop` runs after `body` succeeds, while the session is still
 /// alive: what the remux learned on the way (its repair counts) is read from
 /// the session, and a stopped one has nothing left to ask.
+///
+/// `afterStop` runs after EVERY stop of a session that was built — a failed
+/// or interrupted `start()` included, which is the report most worth
+/// having.
 func withServedSession<T>(
     _ options: SourceOptions,
     stop: StopSignal,
     afterProbe: () -> Void = {},
     beforeStart: (PrismCoreSession) async -> Void = { _ in },
     beforeStop: (PrismCoreSession) async -> Void = { _ in },
+    afterStop: (PrismCoreSession) async -> Void = { _ in },
     _ body: (URL) async throws -> T
 ) async throws -> T {
     let (probed, decision) = try await untilStopped(stop) { try await probeAndRoute(options) }
@@ -49,6 +54,10 @@ func withServedSession<T>(
         coordinatedHTTP: options.coordinatedHTTP
     )
     await beforeStart(session)
+    func finish() async {
+        await session.stop()
+        await afterStop(session)
+    }
     let playlist: URL
     do {
         playlist = try await untilStopped(stop) { try await session.start() }
@@ -56,19 +65,19 @@ func withServedSession<T>(
         // Interrupted mid-start. `stop()` is what ends the abandoned
         // `start()` too: it cancels the producer, and `start()` returns as
         // soon as it sees the producer finished.
-        await session.stop()
+        await finish()
         throw failure
     } catch {
-        await session.stop()
+        await finish()
         throw CLIFailure(code: .checkFailed, message: "session failed to start: \(error)")
     }
     do {
         let result = try await body(playlist)
         await beforeStop(session)
-        await session.stop()
+        await finish()
         return result
     } catch {
-        await session.stop()
+        await finish()
         throw error
     }
 }
@@ -241,6 +250,20 @@ private final class FirstOutcome<T>: @unchecked Sendable {
 extension CLIFailure {
     static func interrupted(_ reason: String) -> CLIFailure {
         CLIFailure(code: .interrupted, message: reason)
+    }
+}
+#endif
+
+#if os(macOS)
+/// `serve --report` / `segverify --report`: the session's diagnostic report
+/// as JSON. A write that fails is said on stderr and changes no exit status
+/// — the report describes the run, it is not the run's result.
+func writeReport(of session: PrismCoreSession, to path: String) async {
+    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    do {
+        try await session.diagnosticReport().jsonData().write(to: url)
+    } catch {
+        printError("prismcore-cli: could not write the report to \(path): \(error)")
     }
 }
 #endif
