@@ -9,6 +9,12 @@ final class HTTPRangeInput {
     private var url: URL
     private var headers: [String: String]
     private let interrupted: () -> Bool
+    /// Fill only while the origin has nothing else in flight
+    /// (`HTTPOriginCoordinator.acquireYielding`). For a reader nobody is
+    /// watching — the late index load — so it never queues ahead of the
+    /// producer feeding the player, and never holds the slot the producer's
+    /// next fill would take.
+    private let yieldsToPlayback: Bool
     static let blockSize = 1 << 20
     private var position: Int64 = 0
     private var length: Int64?
@@ -117,9 +123,11 @@ final class HTTPRangeInput {
         headers: [String: String],
         hints: SourceOpenHints? = nil,
         prewarmStore: SourcePrewarmStore? = .shared,
+        yieldsToPlayback: Bool = false,
         interrupted: @escaping () -> Bool
     ) {
         self.prewarmStore = prewarmStore
+        self.yieldsToPlayback = yieldsToPlayback
         self.url = url
         self.headers = headers
         self.interrupted = interrupted
@@ -213,7 +221,10 @@ final class HTTPRangeInput {
         for _ in 0..<8 {
             guard !cancelled() else { throw Failure.request }
             let origin = HTTPOriginCoordinator.origin(url)
-            guard HTTPOriginCoordinator.shared.acquire(origin, cancelled: cancelled) else { throw Failure.request }
+            let admitted = yieldsToPlayback
+                ? HTTPOriginCoordinator.shared.acquireYielding(origin, cancelled: cancelled)
+                : HTTPOriginCoordinator.shared.acquire(origin, cancelled: cancelled)
+            guard admitted else { throw Failure.request }
             let requestSize = firstFillSize ?? Self.blockSize
             let response: RangeResponse
             do {

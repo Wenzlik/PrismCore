@@ -138,10 +138,16 @@ final class ReadInterruptGuard: @unchecked Sendable {
     var originFailure: PrismCoreError? { httpInput?.lastOriginFailure }
 
     func installHTTPInput(on context: UnsafeMutablePointer<AVFormatContext>, url: URL,
-                          headers: [String: String], hints: SourceOpenHints? = nil) throws {
-        let input = HTTPRangeInput(url: url, headers: headers, hints: hints, interrupted: { [weak self] in
-            self?.shouldInterrupt ?? true
-        })
+                          headers: [String: String], hints: SourceOpenHints? = nil,
+                          yieldsToPlayback: Bool = false) throws {
+        // A yielding reader is background work: it has no business adopting
+        // (and spending a verification request on) the prewarmed head that is
+        // there for the open a viewer is waiting on.
+        let input = HTTPRangeInput(
+            url: url, headers: headers, hints: hints,
+            prewarmStore: yieldsToPlayback ? nil : .shared, yieldsToPlayback: yieldsToPlayback,
+            interrupted: { [weak self] in self?.shouldInterrupt ?? true }
+        )
         try input.install(on: context)
         httpInput = input
     }
