@@ -359,10 +359,24 @@ turns those fragments into a playlist. Two production modes exist:
 A source whose container carries no usable index (a Matroska without Cues, any
 MPEG-TS) is stuck sequential on its first play — but the producer reads every
 packet anyway, so with `keyframeIndexCacheDirectory` set on the session it
-harvests the keyframe map as a by-product and persists it (keyed by URL sans
-query + size + duration; bounded LRU). The next play of the same source plans
-on that map from its first second, as if the file had an index — and a cache
-hit skips the index-load seek entirely.
+harvests the keyframe map as a by-product and persists it (bounded LRU). The
+next play of the same source plans on that map from its first second, as if the
+file had an index — and a cache hit skips the index-load seek entirely.
+
+A map is only as good as the proof that the file has not changed under it, so
+each one is bound to an identity: the full URL **including its query** (a query
+can select the media, not only carry a token), the byte size, the container
+duration, and the version the open actually read — a local file's mtime, or the
+**strong `ETag`** a remote origin reported through the coordinated HTTP reader
+(`coordinatedHTTP`). Only a SHA-256 digest of that is written; the URL and any
+token in it never reach the disk. The scrub preview (`SeekPreviewService`)
+derives the same identity from its own open. A remote source that cannot prove
+its version neither uses a stored map nor stores one, and plans from the source
+every time: an origin or proxy with no `ETag`, only a weak `W/` one, or only
+`Last-Modified`; FFmpeg's own HTTP; and a host `PrismCoreInput` on a non-`file:`
+URL. A file replaced on the server under the same URL (new strong `ETag`), or a
+rotated query token, costs one rebuild rather than a wrong map. Sidecars written by
+3.4.0 and earlier are ignored and rebuilt once.
 
 The loopback server speaks HTTP/1.1 with keep-alive (bounded per connection and by
 an idle timeout), `GET` + `HEAD`, and pipelined requests. Payloads come from a
