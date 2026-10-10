@@ -540,6 +540,15 @@ final class HLSRemuxer: @unchecked Sendable {
     private let renditionsLock = NSLock()
     private var storedRenditionsByDirectory: [String: AudioRenditionWriter] = [:]
     private var storedLazyRenditionPlaylistURIs: Set<String> = []
+    private var storedAudioRenditionDirectories: [(name: String, directory: String)] = []
+
+    /// Every declared audio rendition's master `NAME` and directory, in
+    /// master order — the first is the DEFAULT. Empty before the master and
+    /// in the muxed shape. What `cachedAudio` resolves a name with; read-only,
+    /// so a lookup never arms the rendition it names (`noteAudioDemand` does).
+    var audioRenditionDirectories: [(name: String, directory: String)] {
+        renditionsLock.withLock { storedAudioRenditionDirectories }
+    }
 
     /// Relative playlist URIs of renditions that are declared in the master
     /// but produce nothing until a fetch arms them. The readiness gate must
@@ -1362,6 +1371,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     storedLazyRenditionPlaylistURIs = Set(
                         renditions.filter(\.isLazy).map(\.playlistURI)
                     )
+                    storedAudioRenditionDirectories = renditions.map { ($0.renditionName, $0.directoryName) }
                 }
                 variant.audioRenditions = renditions.enumerated().map { ordinal, rendition in
                     // DEFAULT on the first rendition only, which is the track

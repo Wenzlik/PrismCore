@@ -515,7 +515,7 @@ final class AudioRenditionWriter {
     /// tracks from each other. A boost rendition appends its level's suffix so
     /// the two stay tellable-apart in AVKit's own picker — and NAME must be
     /// unique within the group anyway.
-    private var renditionName: String {
+    var renditionName: String {
         if let level = route.mode.dialogueBoostLevel {
             return "\(baseRenditionName) (\(level.renditionNameSuffix))"
         }

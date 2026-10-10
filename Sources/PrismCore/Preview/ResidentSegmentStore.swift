@@ -136,6 +136,58 @@ final class ResidentSegmentStore: @unchecked Sendable {
         }
     }
 
+    /// `init.mp4` and then every media file of `directory` (`""` for the
+    /// variant, `audioN` for a rendition) across a run of resident segments
+    /// that covers `[from, to]` without a gap, opened under the lock, for
+    /// `cachedAudio`. Like `snapshot`, only the lookup and the opens hold the
+    /// lock: the decode reads the descriptors afterwards, which an eviction's
+    /// unlink cannot take away.
+    ///
+    /// One resident neighbour on each side is added when it is there: the
+    /// audio heard at a time can sit in the segment next to the video's (an
+    /// audio offset shifts it, and an interleave lags it), and the decoder
+    /// warms up on what comes before. A neighbour is optional; a segment the
+    /// range needs is not, and a missing file there (a rendition cut that has
+    /// not landed beside its video, a lazy rendition nobody armed) is `nil`.
+    ///
+    /// A superseded index is not resident: its files carry an audio offset
+    /// that is no longer in force.
+    func openAudioRun(from: Double, to: Double, directory: String, root: URL) -> [FileHandle]? {
+        guard from.isFinite, to.isFinite, to > from else { return nil }
+        return lock.withLock {
+            guard !stopped else { return nil }
+            let sorted = entries.sorted { $0.value.startSeconds < $1.value.startSeconds }
+            func adjacent(_ a: Int, _ b: Int) -> Bool {
+                sorted[b].value.startSeconds <= sorted[a].value.endSeconds + 0.000_001
+            }
+            guard var last = sorted.firstIndex(where: {
+                from >= $0.value.startSeconds && from < $0.value.endSeconds
+            }) else { return nil }
+            let first = last
+            while sorted[last].value.endSeconds < to {
+                guard last + 1 < sorted.count, adjacent(last, last + 1) else { return nil }
+                last += 1
+            }
+            guard !sorted[first...last].contains(where: { supersededIndexes.contains($0.key) }) else { return nil }
+            let lower = first > 0 && adjacent(first - 1, first)
+                && !supersededIndexes.contains(sorted[first - 1].key) ? first - 1 : first
+            let upper = last + 1 < sorted.count && adjacent(last, last + 1)
+                && !supersededIndexes.contains(sorted[last + 1].key) ? last + 1 : last
+            let folder = directory.isEmpty ? root : root.appendingPathComponent(directory, isDirectory: true)
+            guard let initial = try? FileHandle(forReadingFrom: folder.appendingPathComponent("init.mp4")) else { return nil }
+            var handles = [initial]
+            for position in lower...upper {
+                let name = String(format: "seg%05d.m4s", sorted[position].key)
+                if let media = try? FileHandle(forReadingFrom: folder.appendingPathComponent(name)) {
+                    handles.append(media)
+                } else if (first...last).contains(position) {
+                    return nil
+                }
+            }
+            return handles
+        }
+    }
+
     func snapshot(at seconds: Double, root: URL) -> (index: Int, data: Data)? {
         guard seconds.isFinite else { return nil }
         // Only the lookup and the opens happen under the lock: an open
