@@ -58,7 +58,8 @@ struct SegmentPlan: Equatable {
     enum UniformReason: Equatable {
         /// The index-load seek ran out of `indexLoadBudget` before returning.
         case budgetExpired
-        /// Keyframe entries exist but fail a witness (gap or coverage).
+        /// Keyframe entries exist but fail a witness (gap, coverage, or —
+        /// with the clock not run out — end: a read that failed mid-index).
         case untrustedIndex
         /// No keyframe entries at all.
         case noIndex
@@ -121,8 +122,9 @@ struct SegmentPlan: Equatable {
     /// keyframe map a previous play's producer harvested
     /// (`KeyframeIndexCache`) stands in for it, and neither seek runs — the
     /// read position stays at the head, where the caller put it. The map
-    /// still faces the same two witnesses as a demuxer index; a stale or
-    /// sparse one degrades to uniform exactly like a junk index would.
+    /// still faces the gap and span witnesses (not the end one: complete
+    /// by construction, or partial and saying where); a stale or sparse one
+    /// degrades to uniform exactly like a junk index would.
     static func build(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
