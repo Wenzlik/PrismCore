@@ -258,7 +258,9 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             /// `uniform.untrustedIndex` or `uniform.noIndex`.
             public var basis: String
             public var segments: Int
-            /// The longest entry: the playlist's largest `EXTINF`.
+            /// The built plan's longest entry — the playlist's largest
+            /// `EXTINF` only when the plan was published (`keyframeIndex`); a
+            /// uniform plan runs sequential and cuts at real keyframes.
             public var maxSegmentSeconds: Double
             /// The last entry, which runs to the container's end.
             public var tailStartSeconds: Double

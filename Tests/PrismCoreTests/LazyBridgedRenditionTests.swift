@@ -177,13 +177,66 @@ struct LazyBridgedRenditionTests {
         #expect(abs(try await firstSeconds("audio1", 2) - 8) < 0.25)
         #expect(!files(in: audio1).contains("seg00001.m4s"), "production walked from the head instead of seeking")
         // BACKWARD: segment 1 does not exist, so this fetch is a re-anchor
-        // to 2 s, and the TrueHD bridge — flushed, not rebuilt — answers there.
+        // to 2 s. Both re-anchors here come after EOF, which drained the
+        // bridges, so they are REBUILT (`trueHDResetBeforeEOF` covers the
+        // reset of a live one).
         #expect(abs(try await firstSeconds("audio1", 1) - 2) < 0.25)
         // The DEFAULT bridge and the video are rewritten by the same
         // re-anchors and still open where the playlist says.
         #expect(abs(try await firstSeconds("audio0", 2) - 8) < 0.25)
         #expect(abs(try await firstSeconds("audio0", 1) - 2) < 0.25)
         #expect(abs(try await firstSeconds("", 1) - 2) < 0.1)
+    }
+
+    @Test("TrueHD: a backward re-anchor while the bridges are live resets them and lands on the plan")
+    func trueHDResetBeforeEOF() async throws {
+        // ~60 KB/s: the 1.08 MB fixture takes ~18 s to read, so production
+        // is mid-file whenever the test acts — no bridge has reached EOF,
+        // been drained, and taken `reanchor`'s rebuild branch.
+        let server = try RangeFixtureServer(
+            media: try Data(contentsOf: try fixture("h264_truehd_14s.mkv")), bytesPerSecond: 60_000
+        )
+        let url = try await server.start()
+        defer { server.stop() }
+        let session = try PrismCoreSession(url: url)
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        let base = playlist.deletingLastPathComponent()
+        let work = await session.workDirectory
+        #expect(try #require(await session.diagnosticReport().startup.plan).basis == "keyframeIndex")
+
+        // Arm the TrueHD alternate on the LAST segment (8–14 s) and leave the
+        // fetch waiting: production re-anchors there and both bridges run.
+        let forward = Task {
+            _ = try? await URLSession.uncached.data(from: base.appendingPathComponent("audio1/seg00002.m4s"))
+        }
+        defer { forward.cancel() }
+        var alternateFed = false
+        let deadline = ContinuousClock.now + .seconds(20)
+        while !alternateFed, ContinuousClock.now < deadline {
+            alternateFed = await session.audioTrackDeliveries
+                .first { $0.streamIndex == 2 }?.bridge.map { $0.inputPackets > 0 } ?? false
+            if !alternateFed { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        #expect(alternateFed, "the alternate's bridge was never fed")
+        // The last segment has not landed anywhere: no rendition reached EOF,
+        // so the re-anchor below finds every bridge live and RESETS it.
+        #expect(!files(in: work.appendingPathComponent("audio0")).contains("seg00002.m4s"))
+        #expect(!files(in: work.appendingPathComponent("audio1")).contains("seg00002.m4s"))
+
+        // BACKWARD to segment 1 (2 s), mid-production.
+        let (segment, response) = try await URLSession.uncached.data(
+            from: base.appendingPathComponent("audio1/seg00001.m4s")
+        )
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let (initData, _) = try await URLSession.uncached.data(from: base.appendingPathComponent("audio1/init.mp4"))
+        let check = SegmentVerifier.verify(initSegment: initData, mediaSegment: segment)
+        #expect(!check.hasErrors && check.audioFrames > 0, "\(check.problems)")
+        #expect(abs(try Self.firstPacketSeconds(initSegment: initData, media: segment) - 2) < 0.25)
+        // The DEFAULT TrueHD bridge, reset by the same re-anchor.
+        let (defaultSegment, _) = try await URLSession.uncached.data(from: base.appendingPathComponent("audio0/seg00001.m4s"))
+        let (defaultInit, _) = try await URLSession.uncached.data(from: base.appendingPathComponent("audio0/init.mp4"))
+        #expect(abs(try Self.firstPacketSeconds(initSegment: defaultInit, media: defaultSegment) - 2) < 0.25)
     }
 
     /// Opens init + one fragment as one file and returns the first packet's

@@ -53,7 +53,9 @@ source-compatible.)
   degraded plan too.
 - **TrueHD seek coverage**: `h264_truehd_14s.mkv` (synthetic, 5.1 + stereo
   TrueHD, silent) pins the bridged DEFAULT and a lazy TrueHD alternate to the
-  planned time across a forward and a backward re-anchor.
+  planned time across a forward and a backward re-anchor — after EOF (bridges
+  rebuilt) and mid-file over a bandwidth-limited origin (live bridges reset;
+  a no-op `AudioBridge.reset()` fails it).
 
 ## [3.5.2] — 2026-10-10
 
