@@ -36,6 +36,23 @@ struct CachedAudioTests {
         Issue.record("[\(from), \(to)] never became resident: \(session.residentRanges)")
     }
 
+    /// `cachedAudio` once the read can succeed. `residentRanges` counts an
+    /// index from the variant's publish, but the same index's `audioN/` file is
+    /// cut after it, and in that window a rendition read is (rightly) `nil` —
+    /// asking right after `waitResident` failed this way, intermittently.
+    private func residentClip(
+        _ session: PrismCoreSession, from: Double, duration: Double, renditionName: String? = nil
+    ) async throws -> CachedAudioClip? {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while ContinuousClock.now < deadline {
+            if let clip = try await session.cachedAudio(from: from, duration: duration, renditionName: renditionName) {
+                return clip
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return nil
+    }
+
     private func rms(_ samples: [Float]) -> Double {
         (samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, samples.count))).squareRoot()
     }
@@ -63,7 +80,7 @@ struct CachedAudioTests {
         let bytesBefore = session.sourceBytesRead
         try FileManager.default.removeItem(at: source)
 
-        let clip = try #require(try await session.cachedAudio(from: 10, duration: 3))
+        let clip = try #require(try await residentClip(session, from: 10, duration: 3))
         #expect(clip.sampleRate == 48_000)
         #expect(clip.samples.count == 144_000, "44.1 kHz source, 3 s at 48 kHz")
         #expect(abs(clip.startSeconds - 10) < 0.001)
@@ -81,7 +98,7 @@ struct CachedAudioTests {
         defer { Task { await session.stop() } }
         _ = try await session.start()
         try await waitResident(session, 5, 50)
-        let clip = try #require(try await session.cachedAudio(from: 10, duration: 45))
+        let clip = try #require(try await residentClip(session, from: 10, duration: 45))
         #expect(clip.samples.count == 30 * 48_000)
     }
 
@@ -113,7 +130,7 @@ struct CachedAudioTests {
         _ = try await session.start()
         try await waitResident(session, 0, 19)
 
-        let clip = try #require(try await session.cachedAudio(from: 6, duration: 2))
+        let clip = try #require(try await residentClip(session, from: 6, duration: 2))
         #expect(clip.samples.count == 96_000)
         #expect(rms(clip.samples) > 0.01)
 
@@ -137,7 +154,7 @@ struct CachedAudioTests {
         defer { Task { await session.stop() } }
         _ = try await session.start()
         try await waitResident(session, 2, 5)
-        let clip = try #require(try await session.cachedAudio(from: 2, duration: 2))
+        let clip = try #require(try await residentClip(session, from: 2, duration: 2))
         #expect(clip.samples.count == 96_000)
         #expect(rms(clip.samples) > 0.02)
     }
@@ -153,9 +170,9 @@ struct CachedAudioTests {
         let defaultName = try #require(renditions.first?.name)
         let otherName = try #require(renditions.last?.name)
 
-        let byDefault = try #require(try await session.cachedAudio(from: 3, duration: 2))
-        let named = try #require(try await session.cachedAudio(from: 3, duration: 2, renditionName: defaultName))
-        let other = try #require(try await session.cachedAudio(from: 3, duration: 2, renditionName: otherName))
+        let byDefault = try #require(try await residentClip(session, from: 3, duration: 2))
+        let named = try #require(try await residentClip(session, from: 3, duration: 2, renditionName: defaultName))
+        let other = try #require(try await residentClip(session, from: 3, duration: 2, renditionName: otherName))
         #expect(byDefault == named)
         #expect(other.samples.count == 96_000)
         #expect(other != byDefault, "both names decoded the same track")
@@ -170,7 +187,7 @@ struct CachedAudioTests {
         defer { Task { await session.stop() } }
         _ = try await session.start()
         try await waitResident(session, 8, 14)
-        let clip = try #require(try await session.cachedAudio(from: 10, duration: 3))
+        let clip = try #require(try await residentClip(session, from: 10, duration: 3))
         #expect(clip.samples.count == 144_000)
         #expect(rms(clip.samples) > 0.02)
         await #expect(throws: PrismCoreSession.CachedAudioError.self) {
@@ -183,7 +200,7 @@ struct CachedAudioTests {
         let session = try PrismCoreSession(url: try fixture("h264_aac_30s.mkv"))
         _ = try await session.start()
         try await waitResident(session, 2, 6)
-        #expect(try await session.cachedAudio(from: 3, duration: 2) != nil)
+        #expect(try await residentClip(session, from: 3, duration: 2) != nil)
         await session.stop()
         #expect(try await session.cachedAudio(from: 3, duration: 2) == nil)
     }
@@ -199,10 +216,10 @@ struct CachedAudioTests {
         try await waitResident(delayed, 0, 6)
         let origin = try #require(delayed.residentRanges.first?.startSeconds)
 
-        #expect(try await plain.cachedAudio(from: origin, duration: 1) != nil)
+        #expect(try await residentClip(plain, from: origin, duration: 1) != nil)
         // Nothing is heard in the first half second of the delayed session.
         #expect(try await delayed.cachedAudio(from: origin, duration: 1) == nil)
-        let shifted = try #require(try await delayed.cachedAudio(from: origin + 0.5, duration: 1))
+        let shifted = try #require(try await residentClip(delayed, from: origin + 0.5, duration: 1))
         #expect(abs(shifted.startSeconds - (origin + 0.5)) < 0.001)
         #expect(shifted.samples.count == 48_000)
     }
