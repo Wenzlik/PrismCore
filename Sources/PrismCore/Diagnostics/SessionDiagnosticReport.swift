@@ -263,8 +263,9 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             /// The last entry, which runs to the container's end.
             public var tailStartSeconds: Double
             public var tailSeconds: Double
-            /// Whether the keyframe map reached the source's end; `nil` with
-            /// no keyframes at all.
+            /// Whether the keyframe map reached the source's end at its own
+            /// cadence (the strict test); `nil` with no keyframes at all. A
+            /// whole index ending on a long final GOP can plan with `false`.
             public var indexCoversEnd: Bool?
             /// Whether the index-load seek ran out of its budget.
             public var indexBudgetExpired: Bool

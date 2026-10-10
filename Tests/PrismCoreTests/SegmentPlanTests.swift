@@ -83,17 +83,25 @@ struct SegmentPlanTests {
     func expiredPrefixDegradesToBudgetExpired() async throws {
         // seek_clock.mkv: 90 s, keyframes every 2 s, Cues (919 B) at the tail.
         // The Cues trickle in slower than the budget, so the demuxer holds
-        // whichever CuePoints arrived — a contiguous head prefix.
+        // whichever CuePoints arrived — a contiguous head prefix. Every other
+        // answer stops short of them (a legal short 206): an open-ended
+        // response from the head would otherwise carry FFmpeg's reader
+        // straight into the Cues on the same connection.
         let fixture = try #require(Bundle.module.url(
             forResource: "seek_clock", withExtension: "mkv", subdirectory: "Fixtures"
         ))
         let bytes = try Data(contentsOf: fixture)
+        let cues = try #require(bytes.range(of: Data([0x1C, 0x53, 0xBB, 0x6B]), options: .backwards)).lowerBound
         let origin = try ScriptedHTTPServer { request in
-            let reply = ScriptedHTTPServer.ranged(bytes, for: request, validators: ["ETag": "\"v1\""])
             let start = request.headers["range"].flatMap {
                 Int($0.dropFirst("bytes=".count).split(separator: "-").first ?? "")
             } ?? 0
-            return start >= 1_000_000 ? .trickle(reply, chunk: 16, interval: 0.05) : reply
+            guard start < cues else {
+                let reply = ScriptedHTTPServer.ranged(bytes, for: request, validators: ["ETag": "\"v1\""])
+                return .trickle(reply, chunk: 16, interval: 0.05)
+            }
+            let head = ScriptedHTTPServer.Request(path: request.path, headers: ["range": "bytes=\(start)-\(cues - 1)"])
+            return ScriptedHTTPServer.ranged(bytes, for: head, validators: ["ETag": "\"v1\""])
         }
         let root = try await origin.start()
         defer { origin.stop() }

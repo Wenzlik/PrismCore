@@ -122,9 +122,10 @@ struct SegmentPlan: Equatable {
     /// keyframe map a previous play's producer harvested
     /// (`KeyframeIndexCache`) stands in for it, and neither seek runs — the
     /// read position stays at the head, where the caller put it. The map
-    /// still faces the gap and span witnesses (not the end one: complete
-    /// by construction, or partial and saying where); a stale or sparse one
-    /// degrades to uniform exactly like a junk index would.
+    /// still faces the witnesses a demuxer index does — a complete one the
+    /// end witness at the uninterrupted bound, a partial one only up to its
+    /// covered end; a stale or sparse one degrades to uniform exactly like
+    /// a junk index would.
     static func build(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
@@ -205,7 +206,11 @@ struct SegmentPlan: Equatable {
             // On the clock, not from the seek's return code: an aborted read
             // can surface as anything from a clean return to `AVERROR_EXIT`,
             // and only the clock says the budget, not the file, ended it.
-            budgetExpired = interruptGuard != nil && ContinuousClock.now - nudgeStarted >= indexLoadBudget
+            // The guard's own deadline counts too: it is set inside `arm`,
+            // before `nudgeStarted` is sampled, so the clock alone can read a
+            // hair short of a budget that did abort the read.
+            budgetExpired = interruptGuard?.shouldInterrupt == true
+                || (interruptGuard != nil && ContinuousClock.now - nudgeStarted >= indexLoadBudget)
             indexLoadInterrupted = budgetExpired || nudged < 0 || (input.pointee.pb?.pointee.error ?? 0) < 0
             // The guard must not outlive the nudge: the seek back to the head is
             // what restores the position the producer starts from, and aborting
