@@ -22,6 +22,14 @@ source-compatible.)
   shape (muxed fallback, HDR source on a display not vouched HDR-ready) has no
   `EXT-X-STREAM-INF` to say it on.
 
+- **The tail segment no longer turns servable before its renditions are
+  rewritten.** After an audio-delay re-anchor, the final cut (`finish`)
+  cleared the index's superseded mark at the variant's `publish`, before the
+  `audioN/` files of that index were written — the window `emitSegment`
+  already closes for every other index. A fetch of the tail's rendition (or a
+  `cachedAudio` read) in it got the old offset's file. The mark now clears
+  after every rendition has finished.
+
 ### Added
 
 - **`inBandClosedCaptions`** on every session initializer (and carried by

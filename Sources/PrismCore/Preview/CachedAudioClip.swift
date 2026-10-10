@@ -276,8 +276,9 @@ private final class FileChain {
         case SEEK_END: base = length
         default: return Int64(swift_AVERROR(EINVAL))
         }
-        guard base + offset >= 0 else { return Int64(swift_AVERROR(EINVAL)) }
-        position = base + offset
+        let (target, overflow) = base.addingReportingOverflow(offset)
+        guard !overflow, target >= 0 else { return Int64(swift_AVERROR(EINVAL)) }
+        position = target
         return position
     }
 

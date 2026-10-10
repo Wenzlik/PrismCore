@@ -2291,6 +2291,7 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             var finalSegment = media
             finalSegment.append(try writer.finish())
+            var tailIndex: Int?
             let finalDuration = max(0.001, Double(closingPTS - (segmentStartPTS ?? closingPTS)) * tickSeconds)
             if !finalSegment.isEmpty, segmentStartPTS != nil {
                 let file = String(format: "seg%05d.m4s", segmentIndex)
@@ -2300,7 +2301,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
-                residentSegments.markProduced(index: segmentIndex)
+                tailIndex = segmentIndex
                 // The tail segment is progress too: without it, a recovery
                 // that healed into the last segment leaves the next `.unknown`
                 // failure — anywhere, after a seek back — read as the same
@@ -2324,6 +2325,13 @@ final class HLSRemuxer: @unchecked Sendable {
             for rendition in renditions {
                 try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF)
             }
+            // Only now is the tail's whole cut on disk — the renditions'
+            // files are written by `finish` above, after the variant's
+            // `publish`. Clearing the superseded mark at the publish (as this
+            // path used to) let a fetch, or a `cachedAudio` read, take the
+            // OLD offset's `audioN/` file of the tail as current; see the
+            // same ordering in `emitSegment`.
+            if let tailIndex { residentSegments.markProduced(index: tailIndex) }
             // A sub-first-target source cuts here for the first time, so this
             // can be the write the readiness gate is waiting on.
             landed?.broadcast()
