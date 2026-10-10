@@ -20,15 +20,18 @@ source-compatible.)
   unbounded, so it read and bridged toward EOF and never cut the segment
   AVPlayer was waiting on (field: a TrueHD Atmos MKV, plan at ~3045 ms, 12
   and 18 planned segments, playback stuck at the same source position in two
-  runs). An index loaded from the source must now reach the end — its last
-  keyframe within the larger of one segment target and its own largest
-  keyframe gap plus 1 s of the video's end (the container's duration when
-  the stream states none) — or it is no plan, so the build falls back to
-  `.uniform(.budgetExpired)`: the session runs sequentially, the late index
-  load (coordinated HTTP) gets its chance and the harvest stores the whole
-  map for the next play. Cached maps are not re-judged: a complete one is
-  complete by construction, a partial one keeps its covered-prefix + stride
-  tail. Repro over HTTP (Cues answered half, the
+  runs). A map that claims to be complete must now reach the container's
+  end — the end its last entry runs to. After an index load that may have
+  stopped partway (budget expired, a failed read or seek) the last keyframe
+  must lie within the larger of one segment target and the map's own
+  largest keyframe gap plus 1 s; any other map (an index loaded whole, a
+  harvest) within the 60 s gap cap plus 1 s, so a final GOP longer than the
+  rest or audio outlasting the picture still plans, and no plan's last
+  entry spans minutes of source again. A refused map is no plan: the build
+  falls back to `.uniform(.budgetExpired)`, the session runs sequentially,
+  the late index load (coordinated HTTP) gets its chance and the harvest
+  stores the whole map for the next play. Partial cached maps keep their
+  covered-prefix + stride tail. Repro over HTTP (Cues answered half, the
   rest starved past 3 s, `seek_clock.mkv`): before, 9 entries with a 46 s
   last one; after, sequential, every `EXTINF` ≤ 12 s, `ENDLIST`, late load
   stores the whole map and the successor plans from it.

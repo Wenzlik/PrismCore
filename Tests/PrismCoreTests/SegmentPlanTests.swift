@@ -25,11 +25,13 @@ struct SegmentPlanTests {
         // Gap and span pass; through 3.5.2 so did the plan, with one 3586 s
         // entry the producer only closed at EOF — the field stall.
         let prefix: [Int64] = stride(from: 0, through: 14_000, by: 2_000).map(Int64.init)
-        #expect(SegmentPlan.keyframePlan(
-            keyframes: prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6,
-            firstSegmentSeconds: 2, mustReachSeconds: 3600
-        ) == nil)
-        #expect(!SegmentPlan.reachesEnd(prefix, endSeconds: 3600, tickSeconds: tick, targetSeconds: 6))
+        for interrupted in [true, false] {
+            #expect(SegmentPlan.keyframePlan(
+                keyframes: prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6,
+                firstSegmentSeconds: 2, indexLoadInterrupted: interrupted
+            ) == nil)
+        }
+        #expect(!SegmentPlan.reachesEnd(prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6))
         #expect(!SegmentPlan.indexCoversThroughEnd(
             lastKeyframePTS: 14_000, tickSeconds: tick,
             durationSeconds: 3600, targetSeconds: 6
@@ -39,7 +41,7 @@ struct SegmentPlanTests {
         let whole: [Int64] = stride(from: 0, through: 3_598_000, by: 2_000).map(Int64.init)
         let entries = try #require(SegmentPlan.keyframePlan(
             keyframes: whole, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6,
-            firstSegmentSeconds: 2, mustReachSeconds: 3600
+            firstSegmentSeconds: 2, indexLoadInterrupted: true
         ))
         #expect(entries.map(\.duration).max()! <= 8)
         #expect(SegmentPlan.indexCoversThroughEnd(
@@ -47,25 +49,34 @@ struct SegmentPlanTests {
             durationSeconds: 3600, targetSeconds: 6
         ))
 
-        // A long-GOP file's last keyframe sits up to a GOP short of the end
-        // with nothing missing: 10 s GOPs, last keyframe 10.5 s from the end
-        // (a partial final GOP), still a whole map.
+        // An interrupted load is held to the file's cadence: 10 s GOPs whose
+        // last keyframe sits 10.5 s from the end (a partial final GOP) are
+        // whole...
         let longGOP: [Int64] = stride(from: 0, through: 590_000, by: 10_000).map(Int64.init)
         #expect(SegmentPlan.keyframePlan(
             keyframes: longGOP, durationSeconds: 600.5, tickSeconds: tick, targetSeconds: 6,
-            mustReachSeconds: 600.5
+            indexLoadInterrupted: true
         ) != nil)
-        // ...but the same cadence stopping a minute early is a prefix.
+        // ...and the same cadence stopping 40 s early is a prefix.
         #expect(SegmentPlan.keyframePlan(
-            keyframes: Array(longGOP.dropLast(6)), durationSeconds: 600.5, tickSeconds: tick, targetSeconds: 6,
-            mustReachSeconds: 600.5
+            keyframes: Array(longGOP.dropLast(4)), durationSeconds: 600.5, tickSeconds: tick, targetSeconds: 6,
+            indexLoadInterrupted: true
         ) == nil)
-        // A cached map is not asked: one stored complete was a harvest that
-        // read to EOF (or an index the store held to the end) — complete by
-        // construction, whatever the container's duration says.
+        // An index loaded whole may end on a GOP longer than every earlier
+        // one, or under audio that outlasts the picture — 20 s here — and
+        // still plans; nothing complete may end a minute or more short.
+        let finalLongGOP: [Int64] = stride(from: 0, through: 40_000, by: 2_000).map(Int64.init)
         #expect(SegmentPlan.keyframePlan(
-            keyframes: prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6
+            keyframes: finalLongGOP, durationSeconds: 60, tickSeconds: tick, targetSeconds: 6
         ) != nil)
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: finalLongGOP, durationSeconds: 60, tickSeconds: tick, targetSeconds: 6,
+            indexLoadInterrupted: true
+        ) == nil)
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: stride(from: 0, through: 58_000, by: 2_000).map(Int64.init),
+            durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6
+        ) == nil)
     }
 
     @Test("A budget-expired index load that leaves a prefix degrades to the stride the late load can replace")

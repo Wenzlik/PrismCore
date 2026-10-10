@@ -153,22 +153,34 @@ struct LazyBridgedRenditionTests {
         #expect(plan.indexCoversEnd == true)
         #expect(plan.maxSegmentSeconds <= 6.01, "\(plan)")
 
+        // Segment first, then init: a lazy rendition's first SEGMENT fetch
+        // re-anchors production on that segment (an init fetch would anchor
+        // wherever the playhead was).
         func firstSeconds(_ directory: String, _ segment: Int) async throws -> Double {
             let prefix = directory.isEmpty ? "" : directory + "/"
-            let (initData, _) = try await URLSession.uncached.data(from: base.appendingPathComponent(prefix + "init.mp4"))
             let (media, response) = try await URLSession.uncached.data(
                 from: base.appendingPathComponent(prefix + String(format: "seg%05d.m4s", segment))
             )
             #expect((response as? HTTPURLResponse)?.statusCode == 200, "\(prefix)\(segment)")
+            let (initData, _) = try await URLSession.uncached.data(from: base.appendingPathComponent(prefix + "init.mp4"))
             return try Self.firstPacketSeconds(initSegment: initData, media: media)
         }
-        // Segments open at 0, 2 and 8 s (a 2 s head, then 6 s entries).
-        // The alternate's first fetch arms it and re-anchors production
-        // FORWARD to segment 2, then a fetch of segment 1 re-anchors it
-        // BACK; each answer starts where the playlist says, on both TrueHD
-        // bridges and the video.
+        // Segments open at 0, 2 and 8 s (a 2 s head, then 6 s entries). The
+        // whole file is produced first — the producer parks at EOF — with the
+        // TrueHD alternate never fed.
+        let work = await session.workDirectory
+        let audio1 = work.appendingPathComponent("audio1")
+        await waitUntil { self.files(in: work.appendingPathComponent("audio0")).contains("seg00002.m4s") }
+        #expect(files(in: audio1) == ["index.m3u8"])
+        // FORWARD: its first fetch re-anchors production on segment 2 —
+        // segment 1 is never made on the way — and the answer starts at 8 s.
         #expect(abs(try await firstSeconds("audio1", 2) - 8) < 0.25)
+        #expect(!files(in: audio1).contains("seg00001.m4s"), "production walked from the head instead of seeking")
+        // BACKWARD: segment 1 does not exist, so this fetch is a re-anchor
+        // to 2 s, and the TrueHD bridge — flushed, not rebuilt — answers there.
         #expect(abs(try await firstSeconds("audio1", 1) - 2) < 0.25)
+        // The DEFAULT bridge and the video are rewritten by the same
+        // re-anchors and still open where the playlist says.
         #expect(abs(try await firstSeconds("audio0", 2) - 8) < 0.25)
         #expect(abs(try await firstSeconds("audio0", 1) - 2) < 0.25)
         #expect(abs(try await firstSeconds("", 1) - 2) < 0.1)
