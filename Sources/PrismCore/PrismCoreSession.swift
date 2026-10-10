@@ -189,6 +189,67 @@ public actor PrismCoreSession {
         return stopped ? nil : image
     }
 
+    /// Resident audio of the playing base rendition, decoded to mono PCM —
+    /// for music recognition, or anything else that wants to hear what the
+    /// viewer just heard without asking the engine for one more byte.
+    ///
+    /// Reads only what is already on disk. It never opens the source, asks
+    /// the producer to seek or re-anchor, reports a fetch to the demand seam,
+    /// or arms a lazy rendition: a backward read the engine took for a seek
+    /// would move the playhead it schedules production around and stall the
+    /// picture the viewer is watching. So `nil` is common and cheap — any
+    /// part of the interval not resident (never produced, evicted, a lazy
+    /// rendition nobody selected, or written with an audio offset a re-anchor
+    /// has since replaced), and before `start()` or after `stop()`.
+    ///
+    /// - Parameters:
+    ///   - seconds: where the clip starts, on `residentRanges`' source axis.
+    ///     The audio offset in force is applied, so the clip is what is heard
+    ///     at `seconds`.
+    ///   - duration: clamped to `CachedAudioClip.maximumDuration` (30 s); not
+    ///     positive or not finite is `nil`. The clip can fall short of it by
+    ///     up to 50 ms at the very start of the audio.
+    ///   - renditionName: the master's `EXT-X-MEDIA` `NAME` of the rendition
+    ///     to read (the viewer's non-default pick); `nil` reads the DEFAULT
+    ///     rendition, or the variant's own track in the muxed shape.
+    /// - Throws: `CachedAudioError.unknownRendition` for a name the master
+    ///   does not declare — a host that keeps asking with it would otherwise
+    ///   read "not resident yet" forever. FFmpeg errors from the decode;
+    ///   `CancellationError` when the task is cancelled.
+    ///
+    /// Decodes on a decoder of its own, off this actor and off the producer's
+    /// thread. Served bytes are untouched, so passthrough is unaffected.
+    public func cachedAudio(
+        from seconds: Double, duration: Double, renditionName: String? = nil
+    ) async throws -> CachedAudioClip? {
+        guard started, !stopped, seconds.isFinite, duration.isFinite, duration > 0 else { return nil }
+        let renditions = remuxer.audioRenditionDirectories
+        let directory: String
+        if let renditionName {
+            guard let match = renditions.first(where: { $0.name == renditionName }) else {
+                // The names are registered before the first segment lands,
+                // so with nothing resident yet this may just be early.
+                if renditions.isEmpty, remuxer.residentSegments.ranges.isEmpty { return nil }
+                throw CachedAudioError.unknownRendition(renditionName)
+            }
+            directory = match.directory
+        } else {
+            directory = renditions.first?.directory ?? ""
+        }
+        let span = min(duration, CachedAudioClip.maximumDuration)
+        guard let files = remuxer.residentSegments.openAudioRun(
+            from: seconds, to: seconds + span, directory: directory, root: workDirectory
+        ) else { return nil }
+        let clip = try await CachedAudioDecoder.decode(files, from: seconds, duration: span)
+        return stopped ? nil : clip
+    }
+
+    public enum CachedAudioError: Error, Equatable {
+        /// `cachedAudio`'s `renditionName` names no audio rendition of the
+        /// served master (in the muxed shape there are none to name).
+        case unknownRendition(String)
+    }
+
     public enum SessionError: Error {
         /// The remux produced no playable playlist within the startup budget.
         case startupTimedOut(underlying: (any Error)?)
@@ -322,6 +383,8 @@ public actor PrismCoreSession {
     let workDirectory: URL
     private let server: LoopbackHTTPServer
     private let remuxer: HLSRemuxer
+    /// Internal for the tests that prove a cache read never touches it.
+    nonisolated let demand: DemandCoordinator
     /// The producer's per-write broadcast: what `start()` sleeps on until
     /// the video variant is playable, and what the provider's pending serves
     /// sleep on until their file lands (replacing two 10 ms polls).
@@ -691,6 +754,7 @@ public actor PrismCoreSession {
         // never publish a plan, and the provider then behaves exactly like
         // the plain directory provider.
         let demand = DemandCoordinator()
+        self.demand = demand
         let landed = self.landed
         let remuxer = HLSRemuxer(
             sourceURL: url,

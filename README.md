@@ -991,6 +991,7 @@ let playlist = try await session.start()
 let ranges = session.residentRanges
 let routes = session.audioTrackDeliveries
 let preview = try await session.cachedThumbnail(at: sourceSeconds)
+let clip = try await session.cachedAudio(from: sourceSeconds - 10, duration: 10)
 ```
 
 `residentRanges` and `cachedThumbnail` use **source timestamps**, including a
@@ -999,6 +1000,14 @@ timeline. These are video-cache ranges, not AVPlayer's loaded ranges or a
 promise that a seek has no latency. Cache misses return `nil` without asking
 the source for data; previews show the segment's opening picture. Fragments
 above 64 MiB also return `nil`. The image cache holds at most 16 MiB / 32 images.
+
+`cachedAudio(from:duration:renditionName:)` is the same contract for sound:
+the resident audio of the playing rendition (`renditionName` is the master's
+`NAME`; `nil` means the DEFAULT one) decoded to 48 kHz mono Float32, at most
+30 s, with the audio offset applied so a clip is what was heard at that time.
+It never fetches, seeks, re-anchors or arms a lazy rendition, so it is safe
+to call while the title plays; `nil` means some of the interval is not on
+disk, and an unknown `renditionName` throws `CachedAudioError.unknownRendition`.
 
 `audioDelivery` summarizes available base routes, while `audioTrackDeliveries`
 lists each source track, including an unavailable one. The host owns actual

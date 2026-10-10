@@ -22,6 +22,14 @@ source-compatible.)
   shape (muxed fallback, HDR source on a display not vouched HDR-ready) has no
   `EXT-X-STREAM-INF` to say it on.
 
+- **The tail segment no longer turns servable before its renditions are
+  rewritten.** After an audio-delay re-anchor, the final cut (`finish`)
+  cleared the index's superseded mark at the variant's `publish`, before the
+  `audioN/` files of that index were written — the window `emitSegment`
+  already closes for every other index. A fetch of the tail's rendition (or a
+  `cachedAudio` read) in it got the old offset's file. The mark now clears
+  after every rendition has finished.
+
 ### Added
 
 - **`inBandClosedCaptions`** on every session initializer (and carried by
@@ -32,6 +40,27 @@ source-compatible.)
   A source with no scouted captions (or an unseekable one the scout skips)
   still gets `NONE`. `MasterPlaylistBuilder.VariantDescription` gains
   `closedCaptions: [ClosedCaptionRendition]` (empty = `NONE`).
+- **`PrismCoreSession.cachedAudio(from:duration:renditionName:)`** →
+  `CachedAudioClip?` (`startSeconds`, `sampleRate` = 48 000, `samples`: mono
+  Float32 with the non-LFE channels averaged and the LFE dropped), for music
+  recognition on the remux path. It reads **only** what is already on disk:
+  never opens the source, never reports a fetch to the demand seam
+  (`noteFetch` / `requestProduction`), never seeks or re-anchors the
+  producer, never arms a lazy rendition. A loopback fetch of an old segment
+  is taken as the playhead since 3.5.1 and moves production away from the
+  picture being watched — a recogniser listening backwards that way stalled
+  playback. The segment files are looked up and opened under the same
+  eviction lock `cachedThumbnail` uses (an unlink afterwards cannot take the
+  bytes away), a superseded index (audio-delay re-anchor) counts as not
+  resident, and the decode runs on a decoder of its own, off the session's
+  actor and the producer's thread. Times are on the `residentRanges` axis
+  with the audio offset applied, so a clip is what is heard at `seconds`.
+  `nil` whenever any part of the interval is not resident, before `start()`
+  and after `stop()`; `duration` is clamped to 30 s. `renditionName` is the
+  master's `NAME` of the rendition to read (default: the DEFAULT one, or the
+  variant's own track in the muxed shape); a name the master does not
+  declare throws the new `PrismCoreSession.CachedAudioError.unknownRendition`
+  rather than reading "not resident" forever. Purely additive.
 
 ## [3.5.1] — 2026-10-09
 
