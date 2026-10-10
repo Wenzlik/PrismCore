@@ -73,6 +73,9 @@ public actor SeekPreviewService {
     private var timeBase = AVRational(num: 1, den: 1)
     private var durationSeconds: Double = 0
     private var keyframeMap: [Int64]?
+    /// Where the map stops vouching: its last keyframe for a partial
+    /// harvest, past which the next keyframe may lie anywhere.
+    private var keyframeMapCoveredThrough: Int64 = .max
     private var closed = false
     private var opened = false
 
@@ -152,8 +155,12 @@ public actor SeekPreviewService {
         // Known keyframe for this position? The harvested cross-session map
         // answers exactly; without one, the learned coverage answers for
         // positions inside a proven [keyframe, seen] interval.
-        let mappedKeyframe = keyframeMap.flatMap { Self.keyframe(atOrBefore: targetPTS, in: $0) }
-            ?? coveredKeyframe(for: targetPTS)
+        // A partial map past its covered end would answer with its LAST
+        // keyframe — minutes early on a scrub into the unwatched tail — and
+        // pin that wrong picture to the cache; those positions seek instead.
+        let mappedKeyframe = keyframeMap.flatMap {
+            targetPTS <= keyframeMapCoveredThrough ? Self.keyframe(atOrBefore: targetPTS, in: $0) : nil
+        } ?? coveredKeyframe(for: targetPTS)
         if let mappedKeyframe, let hit = cache[mappedKeyframe] {
             touch(mappedKeyframe)
             return hit
@@ -340,7 +347,8 @@ public actor SeekPreviewService {
             if let entry = cache.lookup(identity: identity.key),
                entry.timeBaseNum == timeBase.num, entry.timeBaseDen == timeBase.den,
                entry.keyframePTS.count >= 2 {
-                keyframeMap = entry.keyframePTS.sorted()
+                keyframeMapCoveredThrough = entry.complete ? .max : (entry.coveredThroughPTS ?? .min)
+                keyframeMap = entry.keyframePTS.filter { $0 <= keyframeMapCoveredThrough }.sorted()
             }
         }
     }

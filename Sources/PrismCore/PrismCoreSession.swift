@@ -1332,6 +1332,17 @@ public actor PrismCoreSession {
                 checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },
                 planOrigin: plan?.0.rawValue,
                 planSegments: plan?.1,
+                plan: remuxer.builtPlan.map { built in
+                    .init(
+                        basis: SegmentPlan.describe(built.basis),
+                        segments: built.entries.count,
+                        maxSegmentSeconds: built.entries.map(\.duration).max() ?? 0,
+                        tailStartSeconds: built.entries.last.map { Double($0.startPTS) * built.tickSeconds } ?? 0,
+                        tailSeconds: built.entries.last?.duration ?? 0,
+                        indexCoversEnd: built.indexCoversEnd,
+                        indexBudgetExpired: built.indexBudgetExpired
+                    )
+                },
                 probeTiming: probeTiming.map(SessionDiagnosticReport.Startup.ProbeTiming.init),
                 failure: startupError.map(redaction.failure)
             ),

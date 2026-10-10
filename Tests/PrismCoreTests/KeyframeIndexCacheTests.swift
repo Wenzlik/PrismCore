@@ -365,7 +365,7 @@ struct KeyframeIndexCacheTests {
         #expect(media.range(of: Data("moof".utf8)) != nil)
     }
 
-    @Test("An index-load that could not reach the tail is not stored as a complete map, and the next play rebuilds it")
+    @Test("An index-load that could not reach the tail is neither planned on nor stored; the play's own harvest gives the next play the whole map")
     func interruptedIndexLoadIsNotStoredAsComplete() throws {
         let cacheDirectory = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: cacheDirectory) }
@@ -382,9 +382,7 @@ struct KeyframeIndexCacheTests {
 
         // Play 1: the tail is unreachable while the plan is built, and
         // reachable from the moment the plan exists — a network that recovered
-        // right after the index load gave up. The store decision under test is
-        // made from the in-memory index, so lifting the seal here changes
-        // nothing about it; it only lets production run to EOF.
+        // right after the index load gave up.
         let first = HLSRemuxer(
             sourceURL: source, outputDirectory: output,
             demand: DemandCoordinator(), input: { TailSealedInput(bytes: bytes, seal: seal) },
@@ -395,53 +393,25 @@ struct KeyframeIndexCacheTests {
             if case .segmentPlanReady(let origin, _) = phase {
                 firstOrigin.value = origin
                 seal.lift()
+                // A planned producer parks at EOF; this one must not.
+                if origin != .sequential { first.cancel() }
             }
         }
-        try Self.runUntilPlaylistWritten(first, in: output)
-        // The scenario only bites when the prefix was good enough to PLAN on
-        // — a degraded play would take the harvest path instead and prove
-        // nothing. A VOD playlist is that plan.
+        try first.run()
+        // Not planned on: through 3.5.2 the prefix passed the plan's
+        // witnesses and the 16 s past it became ONE entry that only closed at
+        // EOF. Now it is a prefix, and the play runs sequentially.
+        #expect(first.builtPlan?.indexCoversEnd == false,
+                "the sealed tail did not leave a prefix — the regression is not being exercised")
+        #expect(firstOrigin.value == .sequential)
         let firstText = try String(
             contentsOf: output.appendingPathComponent("index.m3u8"), encoding: .utf8
         )
-        #expect(firstText.contains("#EXT-X-PLAYLIST-TYPE:VOD"),
-                "the sealed-tail play did not plan on the prefix — the regression is not being exercised")
-        #expect(firstOrigin.value == .builtFromSource)
+        #expect(!firstText.contains("#EXT-X-PLAYLIST-TYPE:VOD"))
+        #expect(firstText.contains("#EXT-X-ENDLIST"))
 
-        // Nothing is kept. The prefix says nothing about the 16 s past it, and
-        // stored as a complete map it would be permanent: play 2 would plan on
-        // it, skip the index load that now succeeds, and never harvest the
-        // difference (the plan's own witnesses cannot tell a prefix from a
-        // whole file).
-        let afterFirst = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
-            .filter { $0.hasSuffix(".json") }
-        for sidecar in afterFirst {
-            let entry = try JSONDecoder().decode(
-                KeyframeIndexCache.Entry.self,
-                from: Data(contentsOf: cacheDirectory.appendingPathComponent(sidecar))
-            )
-            #expect(!entry.complete, "a prefix index was persisted as a complete map")
-        }
-        #expect(afterFirst.isEmpty, "an unproven prefix index was persisted at all")
-
-        // Play 2, same source with the tail reachable: the index load runs to
-        // the Cues, and THAT is what gets stored — the map repairs itself
-        // rather than inheriting play 1's prefix.
-        let secondOutput = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: secondOutput) }
-        let second = HLSRemuxer(
-            sourceURL: source, outputDirectory: secondOutput,
-            demand: DemandCoordinator(), input: { TailSealedInput(bytes: bytes, seal: .open) },
-            keyframeCacheDirectory: cacheDirectory
-        )
-        let secondOrigin = PlanOriginBox()
-        second.onStartupPhase = { phase in
-            if case .segmentPlanReady(let origin, _) = phase { secondOrigin.value = origin }
-        }
-        try Self.runUntilPlaylistWritten(second, in: secondOutput)
-        // Built from the source again — nothing poisoned the cache for it to
-        // plan from.
-        #expect(secondOrigin.value == .builtFromSource)
+        // What is stored is the harvest of the play — every keyframe it read,
+        // head to EOF — never the prefix the index load left.
         let sidecars = try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path)
             .filter { $0.hasSuffix(".json") }
         #expect(sidecars.count == 1)
@@ -454,6 +424,21 @@ struct KeyframeIndexCacheTests {
         // The fixture is 30.023 s at a 2 s cadence: a whole-file index ends at
         // 28 s, a play-1 prefix would end around 14 s.
         #expect((entry.keyframePTS.max() ?? 0) >= 24_000, "\(entry.keyframePTS)")
+
+        // Play 2 plans on it.
+        let secondOutput = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: secondOutput) }
+        let second = HLSRemuxer(
+            sourceURL: source, outputDirectory: secondOutput,
+            demand: DemandCoordinator(), input: { TailSealedInput(bytes: bytes, seal: .open) },
+            keyframeCacheDirectory: cacheDirectory
+        )
+        let secondOrigin = PlanOriginBox()
+        second.onStartupPhase = { phase in
+            if case .segmentPlanReady(let origin, _) = phase { secondOrigin.value = origin }
+        }
+        try Self.runUntilPlaylistWritten(second, in: secondOutput)
+        #expect(secondOrigin.value == .keyframeIndexCache)
     }
 
     /// Runs a PLANNED remuxer far enough to have written its playlists, then

@@ -126,6 +126,54 @@ struct LazyBridgedRenditionTests {
         #expect(abs(firstSeconds - 8.0) < 0.25, "first sample at \(firstSeconds) s")
     }
 
+    @Test("TrueHD: the bridged DEFAULT and a lazy TrueHD alternate serve the planned time across a forward and a backward seek")
+    func trueHDSeeksLandOnThePlan() async throws {
+        // h264_truehd_14s.mkv: 14 s of testsrc2, 2 s keyframes, Cues; a 5.1
+        // TrueHD `eng` track flagged default and a stereo TrueHD `ces` one,
+        // both digital silence (FFmpeg's experimental TrueHD encoder makes
+        // anything louder megabytes). Generated with system ffmpeg:
+        //   -f lavfi -i testsrc2=size=320x180:rate=24
+        //   -f lavfi -i anullsrc=channel_layout=5.1:sample_rate=48000
+        //   -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000
+        //   -t 14 -c:v libx264 -crf 35 -g 48 -c:a truehd -strict -2
+        // It pins timing and the seek path, never TrueHD-Atmos fidelity —
+        // that needs real media and a device.
+        let session = try PrismCoreSession(url: try fixture("h264_truehd_14s.mkv"))
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        let base = playlist.deletingLastPathComponent()
+
+        #expect(await session.audioRenditionProductions == [
+            .init(streamIndex: 1, dialogueBoost: nil, encodes: true, production: .eager),
+            .init(streamIndex: 2, dialogueBoost: nil, encodes: true, production: .lazy),
+        ])
+        // The plan covers the file on keyframes, no entry past a target.
+        let plan = try #require(await session.diagnosticReport().startup.plan)
+        #expect(plan.basis == "keyframeIndex")
+        #expect(plan.indexCoversEnd == true)
+        #expect(plan.maxSegmentSeconds <= 6.01, "\(plan)")
+
+        func firstSeconds(_ directory: String, _ segment: Int) async throws -> Double {
+            let prefix = directory.isEmpty ? "" : directory + "/"
+            let (initData, _) = try await URLSession.uncached.data(from: base.appendingPathComponent(prefix + "init.mp4"))
+            let (media, response) = try await URLSession.uncached.data(
+                from: base.appendingPathComponent(prefix + String(format: "seg%05d.m4s", segment))
+            )
+            #expect((response as? HTTPURLResponse)?.statusCode == 200, "\(prefix)\(segment)")
+            return try Self.firstPacketSeconds(initSegment: initData, media: media)
+        }
+        // Segments open at 0, 2 and 8 s (a 2 s head, then 6 s entries).
+        // The alternate's first fetch arms it and re-anchors production
+        // FORWARD to segment 2, then a fetch of segment 1 re-anchors it
+        // BACK; each answer starts where the playlist says, on both TrueHD
+        // bridges and the video.
+        #expect(abs(try await firstSeconds("audio1", 2) - 8) < 0.25)
+        #expect(abs(try await firstSeconds("audio1", 1) - 2) < 0.25)
+        #expect(abs(try await firstSeconds("audio0", 2) - 8) < 0.25)
+        #expect(abs(try await firstSeconds("audio0", 1) - 2) < 0.25)
+        #expect(abs(try await firstSeconds("", 1) - 2) < 0.1)
+    }
+
     /// Opens init + one fragment as one file and returns the first packet's
     /// presentation time — the fragment's `tfdt`, as a demuxer reads it.
     private static func firstPacketSeconds(initSegment: Data, media: Data) throws -> Double {

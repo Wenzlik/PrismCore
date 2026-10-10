@@ -235,6 +235,9 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         public var planOrigin: String?
         /// Planned segment count; 0 for a sequential session.
         public var planSegments: Int?
+        /// The plan `start()` built, used or not (a uniform plan runs
+        /// sequential). `nil` without one (no duration, no demand mode).
+        public var plan: Plan?
         /// The routing probe's phases, for a session built from a
         /// `ProbedSource` (or a report taken from one).
         public var probeTiming: ProbeTiming?
@@ -246,6 +249,25 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             /// `firstVideoSegmentWritten` or `playlistServable`.
             public var phase: String
             public var elapsedSeconds: Double
+        }
+
+        /// The plan's shape — what a stall report needs to tell "the planner
+        /// promised one segment for the rest of the film" from a slow origin.
+        public struct Plan: Sendable, Equatable, Codable {
+            /// `keyframeIndex`, `uniform.budgetExpired`,
+            /// `uniform.untrustedIndex` or `uniform.noIndex`.
+            public var basis: String
+            public var segments: Int
+            /// The longest entry: the playlist's largest `EXTINF`.
+            public var maxSegmentSeconds: Double
+            /// The last entry, which runs to the container's end.
+            public var tailStartSeconds: Double
+            public var tailSeconds: Double
+            /// Whether the keyframe map reached the source's end; `nil` with
+            /// no keyframes at all.
+            public var indexCoversEnd: Bool?
+            /// Whether the index-load seek ran out of its budget.
+            public var indexBudgetExpired: Bool
         }
 
         public struct ProbeTiming: Sendable, Equatable, Codable {

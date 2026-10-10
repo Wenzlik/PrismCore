@@ -16,7 +16,7 @@ import Libavutil
 /// video keyframe at-or-after `(N+1) × targetSeconds`, so every segment opens
 /// decodable on its own. The keyframe positions come from the demuxer's index
 /// (Matroska Cues / MP4 `stss`+`stts`, loaded by a bounded seek); an index is
-/// only trusted past two witnesses, because index quality varies wildly:
+/// only trusted past three witnesses, because index quality varies wildly:
 ///
 /// - **gap**: the largest distance between consecutive keyframes must stay
 ///   under a cap. A clustered MPEG-TS index can gap by thousands of seconds,
@@ -25,6 +25,10 @@ import Libavutil
 ///   duration. A remote MKV whose Cues tail read failed leaves only the
 ///   open-time keyframes, bunched at the head — tiny gaps (witness 1 passes)
 ///   but nothing reaches even the first boundary.
+/// - **end**: a map that claims to be complete must reach the container's
+///   end. An index-load seek cut short by its budget leaves a head prefix
+///   that passes both witnesses above, and planned as complete its whole
+///   unseen remainder became one segment that only closed at EOF.
 ///
 /// An untrusted index degrades to a **uniform plan**: fixed-duration entries
 /// whose positions are timestamps, not keyframes. The producer then seeks by
@@ -65,6 +69,12 @@ struct SegmentPlan: Equatable {
     /// The video stream's time base the entries' PTS live on.
     let timeBaseNum: Int32
     let timeBaseDen: Int32
+    /// What the index looked like, for the diagnostic report — a field
+    /// question after a stall is "did the plan cover the film": whether the
+    /// keyframes reached the end (`nil` with none), and whether the
+    /// index-load seek ran out of budget.
+    var indexCoversEnd: Bool? = nil
+    var indexBudgetExpired = false
 
     /// Largest tolerated keyframe gap before the index is declared junk.
     /// Generous: open-GOP 10 s intervals are real; 60 s is not a VOD cadence.
@@ -210,19 +220,40 @@ struct SegmentPlan: Equatable {
             keyframes = indexedKeyframes(of: stream)
         }
 
+        // Where the keyframes must reach: the VIDEO's end when the container
+        // states it (an MP4 whose audio runs past the picture would otherwise
+        // read as a prefix), the container's duration when it does not (a
+        // Matroska, usually).
+        var videoEndSeconds = durationSeconds
+        if stream.pointee.duration > 0, stream.pointee.duration != Int64.min {
+            let start = stream.pointee.start_time == Int64.min ? 0 : stream.pointee.start_time
+            videoEndSeconds = min(durationSeconds, Double(start + stream.pointee.duration) * tick)
+        }
+        let coveredThroughPTS = cachedKeyframes != nil ? cachedCoveredThroughPTS : nil
+        let trusted = coveredThroughPTS.map { limit in keyframes.filter { $0 <= limit } } ?? keyframes
+        let coversEnd: Bool? = trusted.isEmpty ? nil : reachesEnd(
+            trusted.sorted(), endSeconds: videoEndSeconds, tickSeconds: tick, targetSeconds: targetSeconds
+        )
         if let planned = keyframePlan(
             keyframes: keyframes,
             durationSeconds: durationSeconds,
             tickSeconds: tick,
             targetSeconds: targetSeconds,
             firstSegmentSeconds: firstSegmentSeconds,
-            coveredThroughPTS: cachedKeyframes != nil ? cachedCoveredThroughPTS : nil
+            coveredThroughPTS: coveredThroughPTS,
+            // Only the demuxer's index has to prove it reached the end. A
+            // cached map is complete by construction (a harvest that read to
+            // EOF, or an index the store already held to the end), and a
+            // partial one says where it stops.
+            mustReachSeconds: cachedKeyframes == nil ? videoEndSeconds : nil
         ) {
             return (SegmentPlan(
                 entries: planned,
                 basis: .keyframeIndex,
                 timeBaseNum: timeBase.num,
-                timeBaseDen: timeBase.den
+                timeBaseDen: timeBase.den,
+                indexCoversEnd: coversEnd,
+                indexBudgetExpired: budgetExpired
             ), rewound)
         }
 
@@ -235,7 +266,9 @@ struct SegmentPlan: Equatable {
                 budgetExpired ? .budgetExpired : (keyframes.isEmpty ? .noIndex : .untrustedIndex)
             ),
             timeBaseNum: timeBase.num,
-            timeBaseDen: timeBase.den
+            timeBaseDen: timeBase.den,
+            indexCoversEnd: coversEnd,
+            indexBudgetExpired: budgetExpired
         ), rewound)
     }
 
@@ -289,12 +322,12 @@ struct SegmentPlan: Equatable {
     /// falls inside the final target-length of the container's duration.
     ///
     /// This is the only proof of END coverage available without reading the
-    /// file. The plan's own witnesses do NOT give it — they ask for a gap no
+    /// file. The gap and span witnesses do NOT give it — they ask for a gap no
     /// wider than the cap and a span of at least one target, both of which a
     /// head prefix satisfies — so anything that must distinguish "the whole
-    /// file" from "as far as we got" asks here (review finding: an index-load
-    /// seek that ran out of budget leaves exactly such a prefix, and the plan
-    /// accepts it).
+    /// file" from "as far as we got" asks here — `keyframePlan`'s end witness
+    /// included, since an index-load seek that ran out of budget leaves
+    /// exactly such a prefix.
     static func indexCoversThroughEnd(
         lastKeyframePTS: Int64,
         tickSeconds: Double,
@@ -304,8 +337,27 @@ struct SegmentPlan: Equatable {
         Double(lastKeyframePTS) * tickSeconds >= durationSeconds - Double(targetSeconds)
     }
 
-    /// The keyframe-aligned plan, or nil when the index fails its witnesses.
-    /// Pure — unit-tested against synthetic keyframe sets.
+    /// Whether a sorted keyframe map reaches the end of the source, with the
+    /// file's own cadence as the tolerance, never tighter than a segment: a
+    /// 10 s GOP ends up to 10 s short of the duration with nothing missing,
+    /// and the last GOP is a partial one (the extra second) — the reasoning
+    /// `SourceStructureReader` gives for its verdict.
+    static func reachesEnd(
+        _ sorted: [Int64], endSeconds: Double, tickSeconds: Double, targetSeconds: Int
+    ) -> Bool {
+        guard let last = sorted.last else { return false }
+        let largestGap = zip(sorted, sorted.dropFirst()).map { $1 - $0 }.max() ?? 0
+        let tolerance = max(Double(targetSeconds), Double(largestGap) * tickSeconds + 1)
+        return indexCoversThroughEnd(
+            lastKeyframePTS: last, tickSeconds: tickSeconds,
+            durationSeconds: endSeconds, targetSeconds: Int(tolerance.rounded(.up))
+        )
+    }
+
+    /// The keyframe-aligned plan, or nil when the index fails its witnesses —
+    /// the end witness only when `mustReachSeconds` names the end a
+    /// demuxer index has to reach (`reachesEnd`). Pure — unit-tested against
+    /// synthetic keyframe sets.
     ///
     /// `firstSegmentSeconds` is the first entry's target; `nil` gives the
     /// first entry the same target as the rest (the pre-1.11 shape, kept so
@@ -330,21 +382,36 @@ struct SegmentPlan: Equatable {
         tickSeconds: Double,
         targetSeconds: Int,
         firstSegmentSeconds: Int? = nil,
-        coveredThroughPTS: Int64? = nil
+        coveredThroughPTS: Int64? = nil,
+        mustReachSeconds: Double? = nil
     ) -> [Entry]? {
         let trusted = coveredThroughPTS.map { limit in keyframes.filter { $0 <= limit } } ?? keyframes
         guard trusted.count >= 2 else { return nil }
         let sorted = trusted.sorted()
 
         // Witness 1: no gap over the cap.
-        var previous = sorted[0]
-        for keyframe in sorted.dropFirst() {
-            if Double(keyframe - previous) * tickSeconds > maxTrustedGapSeconds { return nil }
-            previous = keyframe
+        var largestGap: Int64 = 0
+        for (earlier, later) in zip(sorted, sorted.dropFirst()) {
+            largestGap = max(largestGap, later - earlier)
         }
+        if Double(largestGap) * tickSeconds > maxTrustedGapSeconds { return nil }
         // Witness 2: coverage spans at least one target duration.
         let span = Double(sorted.last! - sorted.first!) * tickSeconds
         guard span >= Double(targetSeconds) else { return nil }
+        // Witness 3, for a demuxer index: it reaches the end. Witnesses 1 and
+        // 2 are just as happy with a head prefix — which is what an
+        // index-load seek leaves when its budget runs out partway through the
+        // Cues — and a map without `coveredThroughPTS` plans everything after
+        // its last keyframe as ONE entry. On a two-hour film that entry was
+        // the rest of the film: the producer's boundary for the last segment
+        // is unbounded, so it read and converted toward EOF and never cut the
+        // segment AVPlayer was waiting on (3.5.0–3.5.2, a TrueHD Matroska
+        // behind a slow proxy: 12 planned segments, playback stuck a minute
+        // in). Refused here, the build degrades to `.uniform(.budgetExpired)`
+        // and the late index load gets its chance.
+        if let mustReachSeconds, !reachesEnd(
+            sorted, endSeconds: mustReachSeconds, tickSeconds: tickSeconds, targetSeconds: targetSeconds
+        ) { return nil }
 
         // Segment N ends at the first keyframe at-or-after its start plus its
         // target: the head's short one, then `targetSeconds` for every other.
@@ -381,10 +448,6 @@ struct SegmentPlan: Equatable {
             // limitation, accepted for the un-watched remainder of a source
             // that otherwise has no seekable shape at all; the harvest closes
             // it on the next contiguous play.
-            var largestGap: Int64 = 0
-            for (earlier, later) in zip(sorted, sorted.dropFirst()) {
-                largestGap = max(largestGap, later - earlier)
-            }
             let tailStep = max(step, (Double(largestGap) * tickSeconds).rounded(.up) / tickSeconds)
             var start = Double(startPTS)
             while Double(endPTS) - start > 0.01 / tickSeconds {
@@ -427,6 +490,19 @@ struct SegmentPlan: Equatable {
             stride = Double(targetSeconds)
         }
         return entries
+    }
+
+    var tickSeconds: Double { Double(timeBaseNum) / Double(timeBaseDen) }
+
+    /// `keyframeIndex`, or `uniform.` and the reason — the report's and the
+    /// log's spelling.
+    static func describe(_ basis: Basis) -> String {
+        switch basis {
+        case .keyframeIndex: "keyframeIndex"
+        case .uniform(.budgetExpired): "uniform.budgetExpired"
+        case .uniform(.untrustedIndex): "uniform.untrustedIndex"
+        case .uniform(.noIndex): "uniform.noIndex"
+        }
     }
 
     // MARK: - Lookup

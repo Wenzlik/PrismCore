@@ -18,32 +18,83 @@ struct SegmentPlanTests {
         #expect(entries.map(\.duration) == [6, 6, 6, 2])
     }
 
-    @Test("A plan proves nothing about END coverage — a head prefix plans just as happily")
-    func planningIsNotProofOfCoverage() throws {
+    @Test("A head prefix is not a complete map — it never plans the rest of the film as one entry")
+    func headPrefixIsNotPlannedAsComplete() throws {
         // The shape an index load leaves behind when its budget runs out on a
         // one-hour source: keyframes every 2 s through 14 s and nothing after.
+        // Gap and span pass; through 3.5.2 so did the plan, with one 3586 s
+        // entry the producer only closed at EOF — the field stall.
         let prefix: [Int64] = stride(from: 0, through: 14_000, by: 2_000).map(Int64.init)
-        // The witnesses pass — no gap over the cap, more than one target of
-        // span — so the planner accepts it and plans the other 3586 s as a
-        // single entry.
-        let entries = try #require(SegmentPlan.keyframePlan(
+        #expect(SegmentPlan.keyframePlan(
             keyframes: prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6,
-            firstSegmentSeconds: 2
-        ))
-        #expect(entries.map(\.startPTS) == [0, 2_000, 8_000, 14_000])
-        #expect(entries.last?.duration == 3586)
-
-        // Which is why the keyframe cache asks a different question before it
-        // calls a map complete, and gets a different answer.
+            firstSegmentSeconds: 2, mustReachSeconds: 3600
+        ) == nil)
+        #expect(!SegmentPlan.reachesEnd(prefix, endSeconds: 3600, tickSeconds: tick, targetSeconds: 6))
         #expect(!SegmentPlan.indexCoversThroughEnd(
             lastKeyframePTS: 14_000, tickSeconds: tick,
             durationSeconds: 3600, targetSeconds: 6
         ))
-        // A real whole-file index ends inside the last target length.
+
+        // The whole index plans, and no entry outgrows a target plus a GOP.
+        let whole: [Int64] = stride(from: 0, through: 3_598_000, by: 2_000).map(Int64.init)
+        let entries = try #require(SegmentPlan.keyframePlan(
+            keyframes: whole, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6,
+            firstSegmentSeconds: 2, mustReachSeconds: 3600
+        ))
+        #expect(entries.map(\.duration).max()! <= 8)
         #expect(SegmentPlan.indexCoversThroughEnd(
             lastKeyframePTS: 3_598_000, tickSeconds: tick,
             durationSeconds: 3600, targetSeconds: 6
         ))
+
+        // A long-GOP file's last keyframe sits up to a GOP short of the end
+        // with nothing missing: 10 s GOPs, last keyframe 10.5 s from the end
+        // (a partial final GOP), still a whole map.
+        let longGOP: [Int64] = stride(from: 0, through: 590_000, by: 10_000).map(Int64.init)
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: longGOP, durationSeconds: 600.5, tickSeconds: tick, targetSeconds: 6,
+            mustReachSeconds: 600.5
+        ) != nil)
+        // ...but the same cadence stopping a minute early is a prefix.
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: Array(longGOP.dropLast(6)), durationSeconds: 600.5, tickSeconds: tick, targetSeconds: 6,
+            mustReachSeconds: 600.5
+        ) == nil)
+        // A cached map is not asked: one stored complete was a harvest that
+        // read to EOF (or an index the store held to the end) — complete by
+        // construction, whatever the container's duration says.
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: prefix, durationSeconds: 3600, tickSeconds: tick, targetSeconds: 6
+        ) != nil)
+    }
+
+    @Test("A budget-expired index load that leaves a prefix degrades to the stride the late load can replace")
+    func expiredPrefixDegradesToBudgetExpired() async throws {
+        // seek_clock.mkv: 90 s, keyframes every 2 s, Cues (919 B) at the tail.
+        // The Cues trickle in slower than the budget, so the demuxer holds
+        // whichever CuePoints arrived — a contiguous head prefix.
+        let fixture = try #require(Bundle.module.url(
+            forResource: "seek_clock", withExtension: "mkv", subdirectory: "Fixtures"
+        ))
+        let bytes = try Data(contentsOf: fixture)
+        let origin = try ScriptedHTTPServer { request in
+            let reply = ScriptedHTTPServer.ranged(bytes, for: request, validators: ["ETag": "\"v1\""])
+            let start = request.headers["range"].flatMap {
+                Int($0.dropFirst("bytes=".count).split(separator: "-").first ?? "")
+            } ?? 0
+            return start >= 1_000_000 ? .trickle(reply, chunk: 16, interval: 0.05) : reply
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+
+        let plan = try #require(SegmentPlanProbe.plan(
+            url: root.appendingPathComponent("seek_clock.mkv"), targetSeconds: 6, indexLoadBudget: .seconds(1)
+        ))
+        #expect(plan.basis == .uniform(.budgetExpired))
+        #expect(plan.indexBudgetExpired)
+        #expect(plan.indexCoversEnd == false, "the trickle let the whole Cues in — nothing was exercised")
+        #expect(plan.entries.map(\.duration).max()! <= 6)
+        #expect(abs(plan.entries.reduce(0) { $0 + $1.duration } - 90) < 0.1)
     }
 
     @Test("A partial map plans its prefix on keyframes and the tail on the stride")
