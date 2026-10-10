@@ -8,6 +8,31 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **In-band CEA-608/708 captions no longer appear by themselves.** The master's
+  `EXT-X-STREAM-INF` said nothing about closed captions, so AVPlayer found the
+  A/53 captions in the video's SEI on its own and listed them — on iOS
+  sometimes switched on — next to the WebVTT rendition the engine already
+  serves of the same service and next to the host's own subtitles (field
+  report: a film showing the host's subtitles and the "(Transcribed)" CC at
+  once). Every variant now carries `CLOSED-CAPTIONS=NONE`, which per the HLS
+  spec makes the player ignore in-band captions. The engine's WebVTT caption
+  renditions and the cue tap are unchanged. Masters only: the media-direct
+  shape (muxed fallback, HDR source on a display not vouched HDR-ready) has no
+  `EXT-X-STREAM-INF` to say it on.
+
+### Added
+
+- **`inBandClosedCaptions`** on every session initializer (and carried by
+  clones in `Options`), default `false`. `true` declares each caption service
+  the startup scout found as `#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="cc",
+  …,DEFAULT=NO,AUTOSELECT=NO,INSTREAM-ID="CCn"` and names the group with
+  `CLOSED-CAPTIONS="cc"`, for a host that wants AVPlayer's own 608 rendering.
+  A source with no scouted captions (or an unseekable one the scout skips)
+  still gets `NONE`. `MasterPlaylistBuilder.VariantDescription` gains
+  `closedCaptions: [ClosedCaptionRendition]` (empty = `NONE`).
+
 ## [3.5.1] — 2026-10-09
 
 The keyframe sidecar can be keyed by the host's own name for a source, so a

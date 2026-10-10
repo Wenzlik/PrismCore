@@ -231,7 +231,7 @@ struct MasterPlaylistBuilderTests {
         AUTOSELECT=YES,CHANNELS="16/JOC"
         #EXT-X-STREAM-INF:BANDWIDTH=24000000,AVERAGE-BANDWIDTH=18500000,\
         CODECS="hvc1.2.4.L153.B0,ec-3",RESOLUTION=3840x2160,FRAME-RATE=23.976,VIDEO-RANGE=PQ,\
-        AUDIO="aud"
+        AUDIO="aud",CLOSED-CAPTIONS=NONE
         index.m3u8
 
         """)
