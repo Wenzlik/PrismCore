@@ -8,6 +8,17 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.2] — 2026-10-10
+
+Every master now says `CLOSED-CAPTIONS=NONE`, so AVPlayer stops surfacing the
+in-band CEA-608/708 captions next to the host's subtitles (#134;
+`inBandClosedCaptions: true` opts back into declaring them). And
+`cachedAudio(from:duration:renditionName:)` hands a host already-resident audio
+as 48 kHz mono PCM for music recognition, with no effect on playback (#135).
+The new API is additive with defaulted parameters; it also fixes a window in
+which the tail segment's audio renditions were served from the previous
+audio-delay offset.
+
 ### Fixed
 
 - **In-band CEA-608/708 captions no longer appear by themselves.** The master's
@@ -3000,7 +3011,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...HEAD
+[3.5.2]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...3.5.2
 [3.5.1]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...3.5.1
 [3.5.0]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...3.5.0
 [3.4.0]: https://github.com/Wenzlik/PrismCore/compare/3.3.0...3.4.0
