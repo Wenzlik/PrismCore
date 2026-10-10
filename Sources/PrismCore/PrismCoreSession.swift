@@ -256,6 +256,10 @@ public actor PrismCoreSession {
         /// How much of the cue tap's past is kept for a late handler's replay.
         /// A `.bounded` value reads back clamped, as it is in force.
         public var subtitleCueHistory: SubtitleCueHistory
+        /// Declare the captions riding in the video's SEI to AVPlayer as
+        /// in-band `CLOSED-CAPTIONS` renditions. `false` (the default) writes
+        /// `CLOSED-CAPTIONS=NONE` instead — see the initializer's doc.
+        public var inBandClosedCaptions: Bool = false
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -528,7 +532,8 @@ public actor PrismCoreSession {
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
-        subtitleCueHistory: SubtitleCueHistory = .complete
+        subtitleCueHistory: SubtitleCueHistory = .complete,
+        inBandClosedCaptions: Bool = false
     ) throws {
         try self.init(
             url: url,
@@ -549,7 +554,8 @@ public actor PrismCoreSession {
             coordinatedHTTP: coordinatedHTTP,
             input: input,
             reachability: reachability,
-            subtitleCueHistory: subtitleCueHistory
+            subtitleCueHistory: subtitleCueHistory,
+            inBandClosedCaptions: inBandClosedCaptions
         )
     }
 
@@ -615,6 +621,18 @@ public actor PrismCoreSession {
     ///   cue for the session's lifetime; `.bounded` keeps the newest only —
     ///   see `SubtitleCueHistory` for what a host opting in gives up, and
     ///   `subtitleCueHistoryStats` for what was let go.
+    /// - Parameter inBandClosedCaptions: what the master says about the
+    ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
+    ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
+    ///   them by itself and lists them — and on iOS may switch them on — next
+    ///   to the WebVTT rendition this engine already serves of each service
+    ///   (and next to whatever the host draws). `true` declares each service
+    ///   the startup scout found as a `TYPE=CLOSED-CAPTIONS` rendition
+    ///   (`DEFAULT=NO,AUTOSELECT=NO`), for a host that wants AVPlayer's own
+    ///   608 rendering; the WebVTT renditions stay, so the menu lists both.
+    ///   A source the scout found no captions in (or never scanned: an
+    ///   unseekable input) still gets `NONE`. Masters only — the media-direct
+    ///   shape has nowhere to say either.
     public init(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -632,7 +650,8 @@ public actor PrismCoreSession {
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
-        subtitleCueHistory: SubtitleCueHistory = .complete
+        subtitleCueHistory: SubtitleCueHistory = .complete,
+        inBandClosedCaptions: Bool = false
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -649,7 +668,8 @@ public actor PrismCoreSession {
             audioDelaySeconds: AudioDelay.normalized(audioDelaySeconds),
             coordinatedHTTP: coordinatedHTTP || probed?.interruptGuard.usesCoordinatedHTTP == true,
             reachability: reachability,
-            subtitleCueHistory: subtitleCueHistory.normalized
+            subtitleCueHistory: subtitleCueHistory.normalized,
+            inBandClosedCaptions: inBandClosedCaptions
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -688,6 +708,7 @@ public actor PrismCoreSession {
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
+            inBandClosedCaptions: inBandClosedCaptions,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -758,7 +779,8 @@ public actor PrismCoreSession {
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
-        subtitleCueHistory: SubtitleCueHistory = .complete
+        subtitleCueHistory: SubtitleCueHistory = .complete,
+        inBandClosedCaptions: Bool = false
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -776,7 +798,8 @@ public actor PrismCoreSession {
             coordinatedHTTP: coordinatedHTTP,
             input: input,
             reachability: reachability,
-            subtitleCueHistory: subtitleCueHistory
+            subtitleCueHistory: subtitleCueHistory,
+            inBandClosedCaptions: inBandClosedCaptions
         )
     }
 
@@ -883,7 +906,8 @@ public actor PrismCoreSession {
             reachability: options.reachability,
             // Carried so a fallback cannot quietly go back to `.complete`
             // and grow the memory the host bounded on purpose.
-            subtitleCueHistory: options.subtitleCueHistory
+            subtitleCueHistory: options.subtitleCueHistory,
+            inBandClosedCaptions: options.inBandClosedCaptions
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the

@@ -315,6 +315,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// or bridge decision changes, and every track is still offered.
     private let preferredAudioLanguage: String?
     private let preferredSubtitleLanguage: String?
+    /// Declare the scouted caption services as in-band `CLOSED-CAPTIONS` too,
+    /// instead of `NONE`. See `PrismCoreSession.Options.inBandClosedCaptions`.
+    private let inBandClosedCaptions: Bool
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
@@ -582,6 +585,7 @@ final class HLSRemuxer: @unchecked Sendable {
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
+        inBandClosedCaptions: Bool = false,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -614,6 +618,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.dialogueBoost = dialogueBoost
         self.preferredAudioLanguage = preferredAudioLanguage
         self.preferredSubtitleLanguage = preferredSubtitleLanguage
+        self.inBandClosedCaptions = inBandClosedCaptions
     }
 
     func cancel() {
@@ -891,6 +896,13 @@ final class HLSRemuxer: @unchecked Sendable {
             needsRewindToHead = true
         }
 
+        // Captions have no metadata of their own; the video stream's
+        // language tag is the only declaration a container ever makes
+        // about them, and it is usually right for CC1.
+        let closedCaptionLanguage = avMetadataValue(
+            input.pointee.streams[Int(videoIndex)]!.pointee.metadata, "language"
+        )
+
         // Subtitle renditions are set up before the muxer: their packets never
         // reach it (in-band timed text is not HLS-conformant — muxing it in
         // gets the whole stream rejected by AVPlayer), they become WebVTT files
@@ -899,12 +911,7 @@ final class HLSRemuxer: @unchecked Sendable {
             input: input,
             preferredLanguage: preferredSubtitleLanguage,
             closedCaptions: closedCaptions,
-            // Captions have no metadata of their own; the video stream's
-            // language tag is the only declaration a container ever makes
-            // about them, and it is usually right for CC1.
-            closedCaptionLanguage: avMetadataValue(
-                input.pointee.streams[Int(videoIndex)]!.pointee.metadata, "language"
-            )
+            closedCaptionLanguage: closedCaptionLanguage
         )
         let tapsClosedCaptions = subtitles.hasClosedCaptions
 
@@ -1369,6 +1376,21 @@ final class HLSRemuxer: @unchecked Sendable {
                 // produced either way, but only the master's SUBTITLES group
                 // puts them in the legible selection group.
                 variant.subtitles = subtitles.renditions
+                // Only services the scout actually found: a declared channel
+                // the video does not carry is an empty row in the CC menu.
+                // No finding (none present, or the scout never ran on an
+                // unseekable source) leaves the builder's NONE standing.
+                if inBandClosedCaptions, let closedCaptions {
+                    variant.closedCaptions = closedCaptions.channels.map { channel in
+                        MasterPlaylistBuilder.ClosedCaptionRendition(
+                            name: ClosedCaptionReader.renditionName(
+                                channel: channel, language: closedCaptionLanguage
+                            ),
+                            language: closedCaptionLanguage,
+                            channel: channel
+                        )
+                    }
+                }
                 try Data(try MasterPlaylistBuilder.build(variant).utf8).write(
                     to: outputDirectory.appendingPathComponent(Self.masterPlaylistFileName),
                     options: .atomic

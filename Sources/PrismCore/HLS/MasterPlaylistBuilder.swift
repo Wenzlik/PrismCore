@@ -136,6 +136,27 @@ public enum MasterPlaylistBuilder {
         }
     }
 
+    /// One CEA-608 service carried **in-band** in the video's SEI, declared so
+    /// AVPlayer exposes it natively (`TYPE=CLOSED-CAPTIONS`).
+    ///
+    /// Opt-in only: the engine already serves each service it finds as a
+    /// WebVTT `SubtitleRendition`, and a variant that declares nothing gets
+    /// `CLOSED-CAPTIONS=NONE` — see `streamInfLine`.
+    public struct ClosedCaptionRendition: Sendable, Equatable {
+        public var groupID: String
+        public var name: String
+        public var language: String?
+        /// 1…4, printed as `INSTREAM-ID="CC1"`…`"CC4"`.
+        public var channel: Int
+
+        public init(groupID: String = "cc", name: String, language: String? = nil, channel: Int) {
+            self.groupID = groupID
+            self.name = name
+            self.language = language
+            self.channel = channel
+        }
+    }
+
     public struct VariantDescription: Sendable, Equatable {
         /// Relative URI of the media playlist the remuxer writes.
         public var mediaPlaylistURI: String
@@ -161,6 +182,9 @@ public enum MasterPlaylistBuilder {
         /// WebVTT subtitle renditions, in declaration order. Empty means the
         /// manifest says nothing about subtitles — the pre-phase-6 shape.
         public var subtitles: [SubtitleRendition]
+        /// In-band caption services to declare. Empty — the default — prints
+        /// `CLOSED-CAPTIONS=NONE`, which hides them from AVPlayer.
+        public var closedCaptions: [ClosedCaptionRendition]
 
         public init(
             mediaPlaylistURI: String = "index.m3u8",
@@ -173,7 +197,8 @@ public enum MasterPlaylistBuilder {
             dolbyVision: DolbyVisionConfiguration? = nil,
             displayIsDolbyVisionCapable: Bool = false,
             audioRenditions: [AudioRendition] = [],
-            subtitles: [SubtitleRendition] = []
+            subtitles: [SubtitleRendition] = [],
+            closedCaptions: [ClosedCaptionRendition] = []
         ) {
             self.mediaPlaylistURI = mediaPlaylistURI
             self.bandwidth = bandwidth
@@ -186,6 +211,7 @@ public enum MasterPlaylistBuilder {
             self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
             self.audioRenditions = audioRenditions
             self.subtitles = subtitles
+            self.closedCaptions = closedCaptions
         }
     }
 
@@ -230,6 +256,9 @@ public enum MasterPlaylistBuilder {
         }
         for subtitle in variant.subtitles {
             lines.append(mediaLine(for: subtitle))
+        }
+        for caption in variant.closedCaptions {
+            lines.append(mediaLine(for: caption))
         }
         lines.append(try streamInfLine(for: variant))
         lines.append(variant.mediaPlaylistURI)
@@ -290,6 +319,24 @@ public enum MasterPlaylistBuilder {
         return "#EXT-X-MEDIA:" + attributes.joined(separator: ",")
     }
 
+    /// `EXT-X-MEDIA` for an in-band caption service. No `URI` (the spec forbids
+    /// one: the bytes are in the video), and never DEFAULT/AUTOSELECT, for the
+    /// reason `SubtitleRendition` gives — engaging captions is the viewer's call.
+    private static func mediaLine(for caption: ClosedCaptionRendition) -> String {
+        var attributes = [
+            "TYPE=CLOSED-CAPTIONS",
+            "GROUP-ID=\(quoted(caption.groupID))",
+            "NAME=\(quoted(caption.name))",
+        ]
+        if let language = caption.language, !language.isEmpty {
+            attributes.append("LANGUAGE=\(quoted(language))")
+        }
+        attributes.append("DEFAULT=NO")
+        attributes.append("AUTOSELECT=NO")
+        attributes.append("INSTREAM-ID=\(quoted("CC\(caption.channel)"))")
+        return "#EXT-X-MEDIA:" + attributes.joined(separator: ",")
+    }
+
     private static func streamInfLine(for variant: VariantDescription) throws -> String {
         var attributes = ["BANDWIDTH=\(variant.bandwidth)"]
         if let average = variant.averageBandwidth {
@@ -334,6 +381,17 @@ public enum MasterPlaylistBuilder {
         // One group for every subtitle rendition; the first one names it.
         if let group = variant.subtitles.first?.groupID {
             attributes.append("SUBTITLES=\(quoted(group))")
+        }
+        // Always stated. Absent, AVPlayer finds the A/53 captions in the
+        // video's SEI by itself and lists (and may auto-engage) them next to
+        // the WebVTT rendition the engine already made of the same service —
+        // two caption tracks, one of them drawn unasked. NONE tells it the
+        // variant has none to offer. The builder writes one variant, so the
+        // spec's "same value on every EXT-X-STREAM-INF" holds by construction.
+        if let group = variant.closedCaptions.first?.groupID {
+            attributes.append("CLOSED-CAPTIONS=\(quoted(group))")
+        } else {
+            attributes.append("CLOSED-CAPTIONS=NONE")
         }
         return "#EXT-X-STREAM-INF:" + attributes.joined(separator: ",")
     }
