@@ -8,6 +8,19 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A 3-channel source bridged to AAC plays on Apple players again.** The AAC
+  layout was `av_channel_layout_default(n)`, whose 3-channel answer is "2.1"
+  (FL FR LFE). That layout has no MPEG-4 channelConfiguration, so FFmpeg's
+  `aac` encoder signalled it with a Program Config Element, and AudioToolbox
+  rejects PCE-only configs (the rendition failed AVPlayer's asset check, just
+  as 5.1(side) did before #104). The bridge now names the layout per channel
+  count — mono, stereo, 3.0, 4.0, 5.0, 5.1 — each with an implicit
+  configuration; swresample still routes side surrounds into the back pair.
+  The EAC3 target is unchanged. Every FFmpeg standard layout is now tested to
+  reach the encoder without a PCE.
+
 ## [3.5.3] — 2026-10-11
 
 A Matroska whose Cues outlast the 3 s index budget no longer stalls playback

@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import Libavcodec
 import Libavformat
 @testable import PrismCore
@@ -639,5 +640,172 @@ struct AudioBridgePipelineTests {
         defer { bridge.close() }
         #expect(bridge.outputChannelCount == 2)
         #expect(try aacChannelConfiguration(of: bridge) == 2)
+    }
+    @Test("A 3-channel source reaches aac as 3.0, never as the PCE-only 2.1", arguments: ["3.0", "2.1"])
+    func aacThreeChannelsAvoidPCE(layout: String) throws {
+        guard let bridge = try makeAACBridge(layout: layout) else { return }
+        defer { bridge.close() }
+        #expect(bridge.outputChannelCount == 3)
+        #expect(try aacChannelConfiguration(of: bridge) == 3)
+    }
+
+    @Test("Side-surround 5.0 and 6.1 sources get the 5.0 and 5.1 configurations")
+    func aacSideAndSixOneAvoidPCE() throws {
+        for (layout, expected) in [("5.0(side)", 5), ("6.1", 6)] {
+            guard let bridge = try makeAACBridge(layout: layout) else { return }
+            defer { bridge.close() }
+            #expect(try aacChannelConfiguration(of: bridge) == expected, "\(layout)")
+        }
+    }
+
+    @Test("No standard FFmpeg layout makes the aac encoder fall back to a PCE")
+    func aacEveryStandardLayoutHasAConfiguration() throws {
+        guard avcodec_find_encoder(AV_CODEC_ID_AAC) != nil else { return }
+        var iterator: UnsafeMutableRawPointer?
+        var checked = 0
+        while let standard = av_channel_layout_standard(&iterator) {
+            var layout = standard.pointee
+            var name = [CChar](repeating: 0, count: 64)
+            av_channel_layout_describe(&layout, &name, name.count)
+            let described = String(cString: name)
+            let bridge = try #require(try makeAACBridge(layout: described))
+            defer { bridge.close() }
+            let channels = Int(min(layout.nb_channels, 6))
+            #expect(bridge.outputChannelCount == channels, "\(described)")
+            // channelConfiguration 1…6 is the channel count for mono … 5.1.
+            #expect(try aacChannelConfiguration(of: bridge) == channels, "\(described)")
+            checked += 1
+        }
+        #expect(checked > 20, "the standard-layout table came back short")
+    }
+
+    /// One packet of interleaved 16-bit PCM in `layout`, each channel's sample
+    /// produced by `signal(channel, sampleIndex)`.
+    private func makePacket(
+        layout: inout AVChannelLayout,
+        samples: Int32,
+        pts: Int64,
+        signal: (AVChannel, Int) -> Int16
+    ) -> UnsafeMutablePointer<AVPacket> {
+        let channels = Int(layout.nb_channels)
+        let order = (0..<channels).map { av_channel_layout_channel_from_index(&layout, UInt32($0)) }
+        let packet = av_packet_alloc()!
+        av_new_packet(packet, samples * Int32(channels) * 2)
+        packet.pointee.data.withMemoryRebound(to: Int16.self, capacity: Int(samples) * channels) { words in
+            for sample in 0..<Int(samples) {
+                for (slot, channel) in order.enumerated() {
+                    words[sample * channels + slot] = signal(channel, Int(pts) + sample)
+                }
+            }
+        }
+        packet.pointee.pts = pts
+        packet.pointee.dts = pts
+        packet.pointee.duration = Int64(samples)
+        return packet
+    }
+
+    @Test("Side surround is routed into the back pair, and centre and LFE keep their slots")
+    func aacSideSurroundIsRoutedToBack() throws {
+        guard avcodec_find_encoder(AV_CODEC_ID_AAC) != nil,
+              let decoder = avcodec_find_decoder(AV_CODEC_ID_AAC) else { return }
+        let bridge = try #require(try makeAACBridge(layout: "5.1(side)"))
+        defer { bridge.close() }
+
+        // The decoder is configured from exactly what the muxer would get.
+        let format = try #require(avformat_alloc_context())
+        defer { var format: UnsafeMutablePointer<AVFormatContext>? = format; avformat_free_context(format) }
+        let stream = try #require(avformat_new_stream(format, nil))
+        try bridge.configure(outputStream: stream)
+        var decoderCtx = avcodec_alloc_context3(decoder)
+        defer { avcodec_free_context(&decoderCtx) }
+        let context = try #require(decoderCtx)
+        try FFmpegError.check(avcodec_parameters_to_context(context, stream.pointee.codecpar), "parameters_to_context")
+        context.pointee.pkt_timebase = bridge.timeBase
+        try FFmpegError.check(avcodec_open2(context, decoder, nil), "avcodec_open2(aac decoder)")
+
+        // A distinct tone on SL, FC and LFE; every other channel silent.
+        let tones: [AVChannel: Double] = [AV_CHAN_SIDE_LEFT: 1_000, AV_CHAN_FRONT_CENTER: 500, AV_CHAN_LOW_FREQUENCY: 60]
+        let signal: (AVChannel, Int) -> Int16 = { channel, index in
+            guard let frequency = tones[channel] else { return 0 }
+            return Int16(8_000 * sin(2 * Double.pi * frequency * Double(index) / Double(Self.sampleRate)))
+        }
+        var sourceLayout = AVChannelLayout()
+        defer { av_channel_layout_uninit(&sourceLayout) }
+        try FFmpegError.check(av_channel_layout_from_string(&sourceLayout, "5.1(side)"), "layout")
+
+        var energy: [AVChannel: Double] = [:]
+        var frame = av_frame_alloc()
+        defer { av_frame_free(&frame) }
+        let decoded = try #require(frame)
+        let collect: AudioBridge.Emit = { packet in
+            try FFmpegError.check(avcodec_send_packet(context, packet), "avcodec_send_packet(aac)")
+            while avcodec_receive_frame(context, decoded) >= 0 {
+                defer { av_frame_unref(decoded) }
+                // The native aac decoder hands back planar float.
+                #expect(decoded.pointee.format == AV_SAMPLE_FMT_FLTP.rawValue)
+                for slot in 0..<Int(decoded.pointee.ch_layout.nb_channels) {
+                    let channel = av_channel_layout_channel_from_index(&decoded.pointee.ch_layout, UInt32(slot))
+                    let plane = UnsafeRawPointer(decoded.pointee.extended_data[slot]!)
+                        .assumingMemoryBound(to: Float.self)
+                    var sum = 0.0
+                    for index in 0..<Int(decoded.pointee.nb_samples) { sum += Double(plane[index] * plane[index]) }
+                    energy[channel, default: 0] += sum
+                }
+            }
+        }
+        for index in 0..<48 {
+            let packet = makePacket(layout: &sourceLayout, samples: 1_000, pts: Int64(index) * 1_000, signal: signal)
+            defer { var packet: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&packet) }
+            try bridge.feed(packet, emit: collect)
+        }
+        try bridge.flush(emit: collect)
+
+        let loudest = energy.values.max() ?? 0
+        try #require(loudest > 0, "nothing decoded")
+        // Within 30 dB of the loudest, and silent channels 40 dB under it:
+        // AAC's quantization noise sits far below either line.
+        for channel in [AV_CHAN_BACK_LEFT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY] {
+            #expect((energy[channel] ?? 0) > loudest / 1_000, "\(channel) lost its signal: \(energy)")
+        }
+        for channel in [AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_BACK_RIGHT] {
+            #expect((energy[channel] ?? 0) < loudest / 10_000, "\(channel) picked up a signal: \(energy)")
+        }
+        #expect(energy[AV_CHAN_SIDE_LEFT] == nil, "the output layout still has side channels")
+    }
+
+    @Test("A non-aac encoder keeps the source layout it supports — only aac is standardized")
+    func nonAACKeepsTheSourceLayout() throws {
+        // eac3 where the build has it; FLAC (in every MPVKit build) stands in
+        // for the same list-or-anything negotiation otherwise.
+        let targets = [AV_CODEC_ID_EAC3, AV_CODEC_ID_FLAC].filter { avcodec_find_encoder($0) != nil }
+        try #require(!targets.isEmpty)
+        for target in targets {
+            for name in ["2.1", "5.1(side)", "5.0(side)"] {
+                let par = avcodec_parameters_alloc()!
+                defer { var par: UnsafeMutablePointer<AVCodecParameters>? = par; avcodec_parameters_free(&par) }
+                par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+                par.pointee.codec_id = AV_CODEC_ID_PCM_S16LE
+                par.pointee.format = AV_SAMPLE_FMT_S16.rawValue
+                par.pointee.sample_rate = Self.sampleRate
+                par.pointee.bits_per_coded_sample = 16
+                try FFmpegError.check(av_channel_layout_from_string(&par.pointee.ch_layout, name), name)
+                par.pointee.block_align = par.pointee.ch_layout.nb_channels * 2
+                let bridge = try AudioBridge(
+                    codecpar: par,
+                    timeBase: AVRational(num: 1, den: Self.sampleRate),
+                    globalHeader: true,
+                    targetCodec: target
+                )
+                defer { bridge.close() }
+                let format = try #require(avformat_alloc_context())
+                defer { var format: UnsafeMutablePointer<AVFormatContext>? = format; avformat_free_context(format) }
+                let stream = try #require(avformat_new_stream(format, nil))
+                try bridge.configure(outputStream: stream)
+                #expect(
+                    av_channel_layout_compare(&stream.pointee.codecpar.pointee.ch_layout, &par.pointee.ch_layout) == 0,
+                    "\(bridge.routeDescription)"
+                )
+            }
+        }
     }
 }
