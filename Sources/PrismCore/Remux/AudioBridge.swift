@@ -280,7 +280,9 @@ final class AudioBridge {
             // TrueHD/DTS can report an unresolved layout before the first frame
             // is decoded. 5.1 is the useful guess for this codec class; the
             // resampler reconfigures its *input* side per frame anyway, so a
-            // wrong guess costs a downmix, not a broken session.
+            // wrong guess costs a downmix, not a broken session. Its "2.1" for
+            // three channels never reaches an aac encoder: `aacLayout` keys
+            // on the channel count alone.
             av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : 6)
         }
 
@@ -831,15 +833,14 @@ final class AudioBridge {
             // reliably parse PCE-only channel configs, which silently fails
             // AVPlayer's asset validation for the whole HLS master (no
             // errorLog/accessLog detail).
-            // `av_channel_layout_default` builds the standard "back"-surround
-            // layout for a channel count instead, which always has a plain
-            // implicit channelConfiguration and decodes normally — trading
-            // side/back positional fidelity AVPlayer couldn't render anyway
-            // for a rendition that actually plays.
+            // `aacLayout` picks the standard "back"-surround layout for a
+            // channel count instead, which always has a plain implicit
+            // channelConfiguration and decodes normally — trading side/back
+            // positional fidelity AVPlayer couldn't render anyway for a
+            // rendition that actually plays.
             let encoderName = avcodec_get_name(encoder.pointee.id).map { String(cString: $0) } ?? "?"
             if encoderName == "aac", source.nb_channels > 0 {
-                av_channel_layout_default(&result, min(source.nb_channels, 6))
-                return result
+                return try aacLayout(channels: source.nb_channels)
             }
             try FFmpegError.check(
                 av_channel_layout_copy(&result, &source),
@@ -874,13 +875,41 @@ final class AudioBridge {
         // describe.
         let encoderName = avcodec_get_name(encoder.pointee.id).map { String(cString: $0) } ?? "?"
         if encoderName == "aac" {
-            av_channel_layout_default(&chosen, min(chosen.nb_channels, 6))
+            return try aacLayout(channels: chosen.nb_channels)
         }
         try FFmpegError.check(
             av_channel_layout_copy(&result, &chosen),
             "av_channel_layout_copy(negotiated)"
         )
         return result
+    }
+
+    /// The aac encoder's layout for a channel count: one of the layouts it
+    /// signals with an implicit channelConfiguration (`aac_normal_chan_layouts`
+    /// in libavcodec), never one that needs a PCE.
+    ///
+    /// Not `av_channel_layout_default`: its 3-channel answer is "2.1" (FL FR
+    /// LFE), which has no channelConfiguration, so the encoder writes a PCE
+    /// and Apple's decoder rejects the rendition — the same failure the
+    /// side-surround standardization above exists to avoid. The other
+    /// defaults happen to be normal layouts, but naming every count keeps one
+    /// FFmpeg table from deciding playability. The resampler routes a
+    /// side-surround source's SL/SR into BL/BR by itself; no reorder here.
+    private static func aacLayout(channels: Int32) throws -> AVChannelLayout {
+        let name = switch channels {
+        case ...1: "mono"
+        case 2: "stereo"
+        case 3: "3.0"
+        case 4: "4.0"
+        case 5: "5.0"
+        default: "5.1"
+        }
+        var layout = AVChannelLayout()
+        try FFmpegError.check(
+            av_channel_layout_from_string(&layout, name),
+            "av_channel_layout_from_string(\(name))"
+        )
+        return layout
     }
 
     /// 48 kHz unless the source already sits on another rate the encoder

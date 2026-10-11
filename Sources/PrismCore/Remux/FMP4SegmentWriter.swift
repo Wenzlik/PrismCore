@@ -47,6 +47,19 @@ final class FMP4SegmentWriter {
     /// is carried across a seek.
     private var leadingDTS: [Int: LeadingDTSBackfill<UnsafeMutablePointer<AVPacket>>] = [:]
     private var ioBuffer: UnsafeMutableRawPointer?
+    /// Per output stream, the timeline base of the init segment being served
+    /// (`timelineBase(ofStream:)` of the writer that minted it), or `nil`
+    /// while none has been written. Set before `open`; restart only. A
+    /// restarted writer shifts every packet by minus this, so its tfdt lands
+    /// on the timeline of the init the player already holds.
+    var servedTimelineBase: [Int: Int64]?
+    private var restart = false
+    /// A restart once an init is served: no edit list, packets shifted onto
+    /// its base. A restart before that mints the init itself, edit list and
+    /// all, the way every restart did before.
+    private var alignsToServedInit: Bool { restart && servedTimelineBase != nil }
+    /// The first DTS and PTS each output stream handed movenc, shift included.
+    private var firstMuxed: [Int: (dts: Int64, pts: Int64)] = [:]
 
     /// input stream index → output stream index
     private(set) var streamMap: [Int: Int32] = [:]
@@ -99,6 +112,7 @@ final class FMP4SegmentWriter {
         plan: [StreamPlan],
         restart: Bool = false
     ) throws -> Data {
+        self.restart = restart
         var outputOpt: UnsafeMutablePointer<AVFormatContext>?
         try FFmpegError.check(
             avformat_alloc_output_context2(&outputOpt, nil, "mp4", nil),
@@ -203,6 +217,17 @@ final class FMP4SegmentWriter {
             ? "+delay_moov+frag_custom+default_base_moof+frag_discont"
             : "+delay_moov+frag_custom+default_base_moof"
         av_dict_set(&options, "movflags", flags, 0)
+        // No edit list on a restart once an init is served, so its tfdt is
+        // exactly the DTS it is fed (the shift onto that init's base
+        // included). With one, movenc's frag_discont writes tfdt = DTS + the
+        // first packet's composition offset instead, and the player reads
+        // that through the SERVED init's edit list, which has its own
+        // offsets: an open-GOP anchor keyframe (4 frames of offset against
+        // the head's 2) presented 83 ms late, and AAC whose head writer
+        // trimmed 1024 priming samples played 21 ms early. A restart that
+        // mints the first init keeps the edit list: it is what places a
+        // B-frame keyframe whose DTS is below zero.
+        if alignsToServedInit { av_dict_set(&options, "use_editlist", "0", 0) }
         av_dict_set(&options, "avoid_negative_ts", "disabled", 0)
         // Without this movenc refuses to write the Dolby Vision configuration
         // box and says so: "Not writing 'dvcC'/'dvvC' box. Requires -strict
@@ -219,6 +244,30 @@ final class FMP4SegmentWriter {
         )
         avio_flush(avio)
         return takeBufferedBytes()
+    }
+
+    /// The source DTS (output time base) that this writer's tfdt 0 stands for.
+    ///
+    /// A fresh movenc zero-bases each track at its first packet and writes the
+    /// edit list that undoes it — a media_time of the B-frame delay, or of the
+    /// priming samples a negative first DTS carries — so its base is that first
+    /// DTS. A restarted one with an edit list (frag_discont) writes tfdt = DTS
+    /// − (first DTS − first PTS); one aligned to a served init shares its base
+    /// by construction. Whichever writer minted the served init, every later
+    /// restart has to share its base, or its segments sit off by the
+    /// difference. `nil` until the stream has muxed a packet (the moov then has
+    /// no edit list for that track, so absolute time — base 0 — is what plays).
+    func timelineBase(ofStream index: Int) -> Int64? {
+        if alignsToServedInit { return servedTimelineBase?[index] ?? 0 }
+        guard let first = firstMuxed[index] else { return nil }
+        return restart ? first.dts - first.pts : first.dts
+    }
+
+    /// `timelineBase(ofStream:)` of every output stream that has one.
+    var timelineBases: [Int: Int64] {
+        var bases: [Int: Int64] = [:]
+        for index in streamMap.values { bases[Int(index)] = timelineBase(ofStream: Int(index)) }
+        return bases
     }
 
     /// Whether the deferred moov has been emitted yet.
@@ -244,8 +293,8 @@ final class FMP4SegmentWriter {
         try repairAndMux(packet)
     }
 
-    /// Repair the packet's timestamps, apply the audio delay, and hand it to the
-    /// muxer.
+    /// Repair the packet's timestamps, apply the audio delay and the timeline
+    /// shift, and hand it to the muxer.
     private func repairAndMux(_ packet: UnsafeMutablePointer<AVPacket>) throws {
         guard let output else { return }
         let index = Int(packet.pointee.stream_index)
@@ -257,25 +306,44 @@ final class FMP4SegmentWriter {
             sanitizer.sanitize(packet, recordingInto: timestampRepairs)
             sanitizers[index] = sanitizer
         }
+        var ticks = alignsToServedInit ? -(servedTimelineBase?[index] ?? 0) : 0
         if audioDelaySeconds != 0, index >= 0, index < Int(output.pointee.nb_streams),
            let stream = output.pointee.streams[index],
            stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
-            let ticks = Int64((AudioDelay.normalized(audioDelaySeconds) / av_q2d(stream.pointee.time_base)).rounded())
-            // `avoid_negative_ts` is disabled (tfdt must carry absolute time
-            // on restart), so a negative delay must not push a packet below
-            // zero: movenc writes tfdt as an UNSIGNED 64-bit field and a
-            // negative dts would wrap. Audio that would present before the
-            // timeline's origin is inaudible anyway (a priming packet
-            // included) — dropped only when it is the shift that put it there;
-            // a zero or positive delay leaves a source's own timestamps alone.
-            let pts = packet.pointee.pts, dts = packet.pointee.dts
-            if ticks < 0,
-               (pts != swift_AV_NOPTS_VALUE() && pts + ticks < 0)
-                || (dts != swift_AV_NOPTS_VALUE() && dts + ticks < 0) {
-                return
-            }
+            ticks += Int64((AudioDelay.normalized(audioDelaySeconds) / av_q2d(stream.pointee.time_base)).rounded())
+        }
+        // `avoid_negative_ts` is disabled (tfdt must carry absolute time on
+        // restart), and movenc writes tfdt as an UNSIGNED 64-bit field, so
+        // nothing may reach it that would make one negative. A fresh muxer
+        // zero-bases its own first DTS: there only a negative shift (a delay,
+        // or a timeline base above zero) can put a packet below it, and a
+        // source's own negative timestamps are left alone. A restart aligned
+        // to a served init writes the DTS itself, so it takes nothing below
+        // zero whatever the shifts add up to — the shift onto the head's
+        // timeline can outweigh a small negative delay and still leave the
+        // priming packet under it. A restart with an edit list writes its
+        // first packet's PTS, so there it is the PTS. A packet that would
+        // present before the timeline's origin is never heard or seen anyway
+        // (a priming packet included), so it is dropped. That includes audio
+        // a smaller delay moves ahead of the start the served init gives the
+        // track: a session that began with a positive delay has an init whose
+        // edit list opens the track with an empty edit of that delay, and the
+        // player holding it can place nothing earlier. (Before the shift, a
+        // restart wrote absolute time under that edit and the whole film kept
+        // the old delay; now only those first moments go unheard.)
+        let pts = packet.pointee.pts, dts = packet.pointee.dts
+        func belowZero(_ value: Int64) -> Bool { value != swift_AV_NOPTS_VALUE() && value + ticks < 0 }
+        let drops = alignsToServedInit ? belowZero(pts) || belowZero(dts)
+            : restart ? belowZero(pts)
+            : ticks < 0 && (belowZero(pts) || belowZero(dts))
+        if drops { return }
+        if ticks != 0 {
             if pts != swift_AV_NOPTS_VALUE() { packet.pointee.pts = pts + ticks }
             if dts != swift_AV_NOPTS_VALUE() { packet.pointee.dts = dts + ticks }
+        }
+        if firstMuxed[index] == nil, packet.pointee.dts != swift_AV_NOPTS_VALUE(),
+           packet.pointee.pts != swift_AV_NOPTS_VALUE() {
+            firstMuxed[index] = (packet.pointee.dts, packet.pointee.pts)
         }
         try FFmpegError.check(
             av_interleaved_write_frame(output, packet),

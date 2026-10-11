@@ -8,6 +8,34 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A 3-channel source bridged to AAC plays on Apple players again.** The AAC
+  layout was `av_channel_layout_default(n)`, whose 3-channel answer is "2.1"
+  (FL FR LFE). That layout has no MPEG-4 channelConfiguration, so FFmpeg's
+  `aac` encoder signalled it with a Program Config Element, and AudioToolbox
+  rejects PCE-only configs (the rendition failed AVPlayer's asset check, just
+  as 5.1(side) did before #104). The bridge now names the layout per channel
+  count — mono, stereo, 3.0, 4.0, 5.0, 5.1 — each with an implicit
+  configuration; swresample still routes side surrounds into the back pair.
+  The EAC3 target is unchanged. Every FFmpeg standard layout is now tested to
+  reach the encoder without a PCE.
+- **Audio and video stay where the plan put them after a seek.** A re-anchor
+  builds new muxers (`frag_discont`), and their `tfdt` disagreed with the
+  init segment AVPlayer had already cached: movenc wrote tfdt = DTS + the
+  first packet's composition offset, while the head muxer's init trims its
+  own first DTS through the edit list. After every demand seek, audio whose
+  first packet is priming (copied AAC from Matroska, and every AAC bridge —
+  Opus, TrueHD, DTS, …) played 21 ms early (an EAC3 bridge has the same
+  mechanism with less priming; this build has no eac3 encoder to measure
+  it), and an open-GOP source whose
+  anchor keyframe carries more composition offset than the first frame
+  showed its picture 83 ms late (two frames at 24 fps; measured in AVPlayer).
+  A restarted muxer now writes no edit list and is shifted onto the served
+  init's timeline base (`FMP4SegmentWriter.servedTimelineBase`), and an audio
+  rendition's init is first-write-wins like the video's, so a re-anchor no
+  longer rewrites the `EXT-X-MAP` under a player that already holds it.
+
 ## [3.5.3] — 2026-10-11
 
 A Matroska whose Cues outlast the 3 s index budget no longer stalls playback
