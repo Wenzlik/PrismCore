@@ -203,7 +203,7 @@ final class AudioRenditionWriter {
     private func openMuxer(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool) throws {
         writer.audioDelaySeconds = audioDelaySeconds
         writer.timestampRepairs = timestampRepairs
-        writer.timelineShift = (servedTimelineBase ?? [:]).mapValues { -$0 }
+        writer.servedTimelineBase = servedTimelineBase
         let index = Int32(track.streamIndex)
         let plan: FMP4SegmentWriter.StreamPlan
         if let bridge {

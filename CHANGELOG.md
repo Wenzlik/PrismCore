@@ -32,7 +32,7 @@ source-compatible.)
   anchor keyframe carries more composition offset than the first frame
   showed its picture 83 ms late (two frames at 24 fps; measured in AVPlayer).
   A restarted muxer now writes no edit list and is shifted onto the served
-  init's timeline base (`FMP4SegmentWriter.timelineShift`), and an audio
+  init's timeline base (`FMP4SegmentWriter.servedTimelineBase`), and an audio
   rendition's init is first-write-wins like the video's, so a re-anchor no
   longer rewrites the `EXT-X-MAP` under a player that already holds it.
 

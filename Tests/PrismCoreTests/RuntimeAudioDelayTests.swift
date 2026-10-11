@@ -249,6 +249,34 @@ struct RuntimeAudioDelayTests {
         } catch { await session.stop(); throw error }
     }
 
+    @Test("A delay smaller than the priming frame still writes nothing below the origin")
+    func smallNegativeDelayNeverWrapsTheTimeline() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_30s.mkv"), forceMuxedShape: true)
+        do {
+            let playlist = try await session.start()
+            let root = await session.workDirectory
+            _ = try await URLSession.uncached.data(
+                from: playlist.deletingLastPathComponent().appendingPathComponent("seg00000.m4s"))
+            let file = root.appendingPathComponent("seg00000.m4s")
+            let before = try Data(contentsOf: file)
+            let baselineAudio = try #require(try segmentTimestamps(root: root, index: 0)[AVMEDIA_TYPE_AUDIO])
+
+            // 10 ms is less than the priming frame below zero, so the
+            // re-anchored muxer's shift onto the head's timeline (+ that
+            // frame) outweighs it: the combined shift is positive, and the
+            // priming packet still lands below zero.
+            let outcome = await session.setAudioDelaySeconds(-0.01)
+            try #require(outcome == .pendingReanchor)
+            let rewritten = await waitUntil { (try? Data(contentsOf: file)).map { $0 != before } ?? false }
+            #expect(rewritten, "the re-anchored segment was never rewritten")
+
+            let audio = try #require(try segmentTimestamps(root: root, index: 0)[AVMEDIA_TYPE_AUDIO])
+            #expect(audio.allSatisfy { $0 < 60 }, "an unsigned tfdt wrap reads as astronomical: \(audio.prefix(3))")
+            #expect(audio.allSatisfy { $0 >= baselineAudio.first! })
+            await session.stop()
+        } catch { await session.stop(); throw error }
+    }
+
     @Test("Discarding the segments written with the old offset leaves nothing to serve")
     func supersedeAllRemovesEverySegmentFile() throws {
         let root = FileManager.default.temporaryDirectory

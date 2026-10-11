@@ -1888,7 +1888,7 @@ final class HLSRemuxer: @unchecked Sendable {
             writer = FMP4SegmentWriter()
             writer.audioDelaySeconds = audioDelaySeconds
             writer.timestampRepairs = timestampRepairLedger
-            writer.timelineShift = (servedTimelineBase ?? [:]).mapValues { -$0 }
+            writer.servedTimelineBase = servedTimelineBase
             _ = try writer.open(input: input, plan: plan, restart: true)
             streamMap = writer.streamMap
             for rendition in renditions {

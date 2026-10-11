@@ -92,6 +92,49 @@ struct ReanchorTimelineTests {
         #expect(try await fetch("audio0/init.mp4") == audioInit)
     }
 
+    /// The re-anchor that comes before any init exists — a producer recovery
+    /// during startup, a lazy rendition armed at the head — mints the init
+    /// itself, and keeps the edit list that places a keyframe whose DTS is
+    /// below zero (the B-frame delay at the head).
+    @Test("A restart that mints the first init places its keyframe, head included", arguments: [0.0, 20.0])
+    func restartWithoutServedInitPlacesItsKeyframe(at seconds: Double) throws {
+        let url = try fixture("reanchor_opengop_opus.mkv")
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, url.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        let videoIndex = av_find_best_stream(context, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
+        try #require(videoIndex >= 0)
+        let sourceTimeBase = context.pointee.streams[Int(videoIndex)]!.pointee.time_base
+        let target = Int64(seconds / av_q2d(sourceTimeBase))
+        try FFmpegError.check(av_seek_frame(context, videoIndex, target, AVSEEK_FLAG_BACKWARD), "av_seek_frame")
+
+        let writer = FMP4SegmentWriter()
+        _ = try writer.open(input: context, plan: [.init(inputIndex: videoIndex)], restart: true)
+        let output = try #require(writer.context)
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        var keyframes = 0
+        while av_read_frame(context, pkt) >= 0 {
+            defer { av_packet_unref(pkt) }
+            guard pkt.pointee.stream_index == videoIndex else { continue }
+            if pkt.pointee.flags & AV_PKT_FLAG_KEY != 0 {
+                keyframes += 1
+                if keyframes == 2 { break }
+            }
+            av_packet_rescale_ts(pkt, sourceTimeBase, output.pointee.streams[0]!.pointee.time_base)
+            pkt.pointee.stream_index = 0
+            pkt.pointee.pos = -1
+            try writer.write(pkt)
+        }
+        let (initSegment, media) = try writer.cutSegment()
+        let timing = try Self.keyframeTiming(initSegment: try #require(initSegment), media: media)
+        #expect(abs(timing.seconds - seconds) < 0.002, "keyframe presents at \(timing.seconds) s (\(timing.detail))")
+        _ = try writer.finish()
+    }
+
     // MARK: - Reading the boxes
 
     private struct Box { let type: String; let body: Range<Int> }
