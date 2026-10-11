@@ -8,6 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.4] — 2026-10-11
+
+A source with three audio channels bridged to AAC plays on Apple players again
+(the layout is now 3.0, signalled without a Program Config Element), and audio
+and video stay on the plan's timeline after a seek: a re-anchored muxer now
+writes onto the timeline of the init segment the player already holds instead
+of drifting by the priming (audio 21 ms early) or the anchor's composition
+offset (picture 83 ms late on an open-GOP source).
+
 ### Fixed
 
 - **A 3-channel source bridged to AAC plays on Apple players again.** The AAC
@@ -35,6 +44,17 @@ source-compatible.)
   init's timeline base (`FMP4SegmentWriter.servedTimelineBase`), and an audio
   rendition's init is first-write-wins like the video's, so a re-anchor no
   longer rewrites the `EXT-X-MAP` under a player that already holds it.
+
+### Known limitation
+
+- **Reducing an initial positive audio delay drops the head of the audio.**
+  When a session starts with a positive audio delay and the delay is later
+  reduced, the served audio init opens the track with an empty edit of the
+  old delay; audio that would now land before that edit cannot be placed, so
+  roughly the old delay's length is dropped from the start of the audio (only
+  at the head; the rest of the film follows the new delay). On 3.5.3 the
+  reduced delay did not take effect at all — the whole film kept the old
+  offset. Pinned by `RuntimeAudioDelayTests`.
 
 ## [3.5.3] — 2026-10-11
 
@@ -3103,7 +3123,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...HEAD
+[3.5.4]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...3.5.4
 [3.5.3]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...3.5.3
 [3.5.2]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...3.5.2
 [3.5.1]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...3.5.1
