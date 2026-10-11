@@ -665,9 +665,11 @@ struct AudioBridgePipelineTests {
         var checked = 0
         while let standard = av_channel_layout_standard(&iterator) {
             var layout = standard.pointee
-            var name = [CChar](repeating: 0, count: 64)
-            av_channel_layout_describe(&layout, &name, name.count)
-            let described = String(cString: name)
+            var name = [UInt8](repeating: 0, count: 64)
+            name.withUnsafeMutableBufferPointer {
+                $0.withMemoryRebound(to: CChar.self) { _ = av_channel_layout_describe(&layout, $0.baseAddress, $0.count) }
+            }
+            let described = String(decoding: name.prefix { $0 != 0 }, as: UTF8.self)
             let bridge = try #require(try makeAACBridge(layout: described))
             defer { bridge.close() }
             let channels = Int(min(layout.nb_channels, 6))
@@ -713,7 +715,7 @@ struct AudioBridgePipelineTests {
 
         // The decoder is configured from exactly what the muxer would get.
         let format = try #require(avformat_alloc_context())
-        defer { var format: UnsafeMutablePointer<AVFormatContext>? = format; avformat_free_context(format) }
+        defer { avformat_free_context(format) }
         let stream = try #require(avformat_new_stream(format, nil))
         try bridge.configure(outputStream: stream)
         var decoderCtx = avcodec_alloc_context3(decoder)
@@ -798,7 +800,7 @@ struct AudioBridgePipelineTests {
                 )
                 defer { bridge.close() }
                 let format = try #require(avformat_alloc_context())
-                defer { var format: UnsafeMutablePointer<AVFormatContext>? = format; avformat_free_context(format) }
+                defer { avformat_free_context(format) }
                 let stream = try #require(avformat_new_stream(format, nil))
                 try bridge.configure(outputStream: stream)
                 #expect(
