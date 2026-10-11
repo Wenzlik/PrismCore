@@ -8,6 +8,57 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A budget-cut keyframe index no longer plans the rest of the film as one
+  segment** (3.5.0–3.5.2). When the index-load seek's 3 s budget ran out
+  partway through a Matroska's Cues, the demuxer kept the CuePoints it had
+  parsed — a contiguous head prefix — and `keyframePlan` accepted it: no gap
+  over the cap, more than a target of span. The plan was published as a
+  complete VOD whose last entry ran from the prefix's last keyframe to the
+  container's end, and the producer's boundary for a last segment is
+  unbounded, so it read and bridged toward EOF and never cut the segment
+  AVPlayer was waiting on (field: a TrueHD Atmos MKV, plan at ~3045 ms, 12
+  and 18 planned segments, playback stuck at the same source position in two
+  runs). A map that claims to be complete must now reach the container's
+  end — the end its last entry runs to. After an index load that may have
+  stopped partway (budget expired, a failed read or seek) the last keyframe
+  must lie within the larger of one segment target and the map's own
+  largest keyframe gap plus 1 s; any other map (an index loaded whole, a
+  harvest) within the 60 s gap cap plus 1 s, so a final GOP longer than the
+  rest or audio outlasting the picture still plans, and no plan's last
+  entry spans minutes of source again. A refused map is no plan: the session
+  runs sequentially and the harvest stores the whole map for the next play;
+  when the budget is what ran out the basis is `.uniform(.budgetExpired)`
+  and the late index load (coordinated HTTP) gets its chance (a failed read
+  or seek inside the budget is `.untrustedIndex`, with no late load). Partial cached maps keep their
+  covered-prefix + stride tail. Repro over HTTP (Cues answered half, the
+  rest starved past 3 s, `seek_clock.mkv`): before, 9 entries with a 46 s
+  last one; after, sequential, every `EXTINF` ≤ 12 s, `ENDLIST`, late load
+  stores the whole map and the successor plans from it.
+- **The seek preview no longer trusts a partial keyframe map past its covered
+  end.** A scrub into the unwatched tail resolved to the map's last keyframe
+  and cached that picture for the position; it now seeks.
+- **`.producerStalled` measures from the last completed segment, not the last
+  packet read.** A producer reading toward a cut it never makes kept the old
+  clock fresh, so the stall above was never reported. `lastPTS` is still the
+  newest packet read — far past the waited segment means reading without
+  cutting.
+
+### Added
+
+- **`SessionDiagnosticReport.Startup.plan`** (additive, optional): the built
+  plan's `basis` (`keyframeIndex` / `uniform.<reason>`), `segments`,
+  `maxSegmentSeconds` (the plan's longest entry — the largest `EXTINF` only
+  when the plan was published; a uniform plan runs sequential), `tailStartSeconds` /
+  `tailSeconds`, `indexCoversEnd` and `indexBudgetExpired` — present for a
+  degraded plan too.
+- **TrueHD seek coverage**: `h264_truehd_14s.mkv` (synthetic, 5.1 + stereo
+  TrueHD, silent) pins the bridged DEFAULT and a lazy TrueHD alternate to the
+  planned time across a forward and a backward re-anchor — after EOF (bridges
+  rebuilt) and mid-file over a bandwidth-limited origin (live bridges reset;
+  a no-op `AudioBridge.reset()` fails it).
+
 ## [3.5.2] — 2026-10-10
 
 Every master now says `CLOSED-CAPTIONS=NONE`, so AVPlayer stops surfacing the

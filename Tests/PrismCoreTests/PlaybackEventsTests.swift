@@ -9,6 +9,7 @@ import os
 private final class ParkingInput: CancellablePrismCoreInput, @unchecked Sendable {
     private let bytes: [UInt8]
     private let parkAfterBytes: Int
+    private let crawlAfterBytes: Int
     private let lock = NSCondition()
     private var position = 0
     private var delivered = 0
@@ -17,9 +18,12 @@ private final class ParkingInput: CancellablePrismCoreInput, @unchecked Sendable
 
     struct Released: Error {}
 
-    init(data: Data, parkAfterBytes: Int) {
+    /// Past `crawlAfterBytes` every read waits 100 ms and answers 1 KB: a
+    /// transport that never stops, just barely moves.
+    init(data: Data, parkAfterBytes: Int, crawlAfterBytes: Int = .max) {
         bytes = [UInt8](data)
         self.parkAfterBytes = parkAfterBytes
+        self.crawlAfterBytes = crawlAfterBytes
     }
 
     var length: Int64? { Int64(bytes.count) }
@@ -40,7 +44,9 @@ private final class ParkingInput: CancellablePrismCoreInput, @unchecked Sendable
         }
         // Small answers, like a real transport, so the park lands inside the
         // copy loop rather than inside one giant probe read.
-        let count = min(buffer.count, 16 * 1024, bytes.count - position)
+        let crawling = delivered >= crawlAfterBytes
+        if crawling { lock.wait(until: Date().addingTimeInterval(0.1)) }
+        let count = min(buffer.count, crawling ? 1024 : 16 * 1024, bytes.count - position)
         guard count > 0 else { return 0 }
         bytes.withUnsafeBytes {
             buffer.baseAddress!.copyMemory(from: $0.baseAddress!.advanced(by: position), byteCount: count)
@@ -135,6 +141,51 @@ struct PlaybackEventsTests {
         #expect(since >= .seconds(5))
         // The producer did read packets before it parked; the event says where.
         #expect((lastPTS ?? 0) > 0)
+    }
+
+    @Test("A producer that keeps reading but cuts nothing is reported stalled")
+    func producerReadingWithoutCuttingReportsTheStall() async throws {
+        // Past the head the transport crawls at ~10 KB/s, so the last
+        // segment (~4 s of a ~42 KB/s file) takes ~17 s of reads that never
+        // stop. Through 3.5.2 the clock was the last READ, and a producer
+        // reading toward a cut it never made — one planned segment for the
+        // rest of a film — reported nothing while playback waited.
+        let input = ParkingInput(data: try fixture("h264_aac_30s"), parkAfterBytes: .max, crawlAfterBytes: 200_000)
+        defer { input.cancelInFlightOperation() }
+        let session = try PrismCoreSession(
+            url: URL(fileURLWithPath: "/prismcore-tests-no-such-directory/crawling.mkv"),
+            input: { input }
+        )
+        let playlist = try await session.start()
+        let events = await session.playbackEvents()
+        let stalled = Task { () -> PlaybackEvent? in
+            for await event in events { if case .producerStalled = event { return event } }
+            return nil
+        }
+
+        let (master, _) = try await URLSession.uncached.data(from: playlist)
+        var variant = playlist
+        if let uri = PrismCoreSession.playlistURIs(inMaster: String(decoding: master, as: UTF8.self)).last {
+            variant = playlist.deletingLastPathComponent().appendingPathComponent(uri)
+        }
+        let (media, _) = try await URLSession.uncached.data(from: variant)
+        let last = try #require(String(decoding: media, as: UTF8.self)
+            .split(separator: "\n").last { $0.hasSuffix(".m4s") })
+        let fetch = Task {
+            _ = try? await URLSession.uncached.data(from: variant.deletingLastPathComponent().appendingPathComponent(String(last)))
+        }
+
+        let event = await withTimeout(.seconds(12)) { await stalled.value }
+        fetch.cancel()
+        await session.stop()
+
+        guard case .producerStalled(let since, let lastPTS)?? = event else {
+            Issue.record("no .producerStalled within 12 s of a crawling read: \(String(describing: event))")
+            return
+        }
+        #expect(since >= .seconds(5))
+        #expect((lastPTS ?? 0) > 20, "the producer never got to the last segment's reads")
+        #expect(!input.isParked)
     }
 
     @Test("A 429 and a 206 that cross never leave the host on a throttle")

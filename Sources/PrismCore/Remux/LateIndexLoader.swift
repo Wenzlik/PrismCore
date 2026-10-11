@@ -29,7 +29,8 @@ import Libavutil
 /// replaced between the two opens yields different digests and nothing is
 /// written. And the map must pass what a map stored by the producer passes:
 /// `keyframePlan`'s witnesses and `indexCoversThroughEnd` — a scan the budget
-/// cut short leaves a head prefix that the witnesses alone would accept.
+/// cut short leaves a head prefix, and the store keeps its own segment-target
+/// test on top of the plan's end witness.
 ///
 /// What it costs the producer is kept to what it must: it starts only after
 /// the first video segment (startup is untouched), its reader takes the

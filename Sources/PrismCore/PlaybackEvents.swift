@@ -23,9 +23,13 @@ public enum PlaybackEvent: Sendable, Equatable {
     /// empty WebVTT for subtitles). AVPlayer usually reports an error next.
     case serveTimedOut(path: String)
 
-    /// A request is waiting on the producer and the producer has not read a
-    /// packet for `since`. `lastPTS` is the newest packet timestamp it did
-    /// read, in seconds on the source's timeline (`nil` before the first).
+    /// A request is waiting on the producer and the producer has not cut a
+    /// segment for `since` — whether or not it is still reading. `lastPTS` is
+    /// the newest packet timestamp it did read, in seconds on the source's
+    /// timeline (`nil` before the first): one far past the waited segment
+    /// means reading without cutting, one standing still means a starved
+    /// read. (Through 3.5.2 the clock was the last read, which a producer
+    /// reading toward a boundary it never reached kept resetting.)
     ///
     /// Measured only while a serve is pending, and never while the producer
     /// is deliberately parked, so a paused player does not look stalled.

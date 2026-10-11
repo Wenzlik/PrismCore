@@ -89,6 +89,89 @@ struct LateIndexLoadTests {
         #expect(play.thread.failureIfAny == nil)
     }
 
+    @Test("Cues that arrive after the 3 s budget: no segment spans the unindexed rest, the late load fills the index, the play reaches its end")
+    func slowCuesNeverPlanTheRestAsOneSegment() async throws {
+        let cache = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let output = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        // seek_clock.mkv: 90 s, a keyframe every 2 s, its 919 B of Cues at
+        // the tail. The first read of the Cues comes back short — a legal
+        // 206 for their first half — and the read for the rest starves past
+        // the real 3 s startup budget: the plan's index load ends holding a
+        // head prefix of CuePoints (~45 s of 90). That prefix is what
+        // 3.5.0–3.5.2 planned as complete: one entry from there to 90 s,
+        // closed only at EOF — the field stall, compressed. Every later
+        // request is served whole, the late load's included.
+        let bytes = try media("seek_clock.mkv")
+        let cues = try #require(bytes.range(of: Data([0x1C, 0x53, 0xBB, 0x6B]), options: .backwards)).lowerBound
+        let shortChanged = LockedFlag(), starved = LockedFlag()
+        let origin = try ScriptedHTTPServer { request in
+            let start = Self.range(request) ?? 0
+            if start == cues, !shortChanged.isSet {
+                shortChanged.set()
+                let half = ScriptedHTTPServer.Request(
+                    path: request.path, headers: ["range": "bytes=\(cues)-\(cues + (bytes.count - cues) / 2)"]
+                )
+                return ScriptedHTTPServer.ranged(bytes, for: half, validators: ["ETag": "\"v1\""])
+            }
+            if start > cues, !starved.isSet {
+                starved.set()
+                return .stall
+            }
+            return ScriptedHTTPServer.ranged(bytes, for: request, validators: ["ETag": "\"v1\""])
+        }
+        let root = try await origin.start()
+        defer { origin.stop() }
+        let url = root.appendingPathComponent("movie.mkv")
+
+        let play = HeldPlay(url: url, cache: cache, output: output, indexLoadBudget: SegmentPlan.indexLoadBudget)
+        defer { play.release() }
+        #expect(await until(.seconds(30)) { play.planOrigin != nil })
+        guard play.planOrigin == .sequential else {
+            // Planned on the prefix: a demand-mode producer parks at EOF, so
+            // end it rather than wait on it.
+            Issue.record("the budget-cut prefix was planned on: \(String(describing: play.remuxer.builtPlan))")
+            play.remuxer.cancel()
+            play.release()
+            await play.thread.join()
+            return
+        }
+        #expect(await until(.seconds(30)) { play.segmentPlanAvailable != nil },
+                "the late load never stored the index the budget cut short")
+        let built = try #require(play.remuxer.builtPlan)
+        #expect(built.basis == .uniform(.budgetExpired))
+        #expect(built.indexCoversEnd == false, "the Cues arrived inside the budget — nothing was exercised")
+        #expect(starved.isSet, "the index load never asked for the rest of the Cues")
+
+        play.release()
+        await play.thread.join()
+        #expect(play.thread.failureIfAny == nil)
+        // The play itself: whole, and cut at its cadence all the way through.
+        let playlist = try String(contentsOf: output.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        #expect(playlist.contains("#EXT-X-ENDLIST"))
+        let durations = playlist.split(separator: "\n").compactMap { line -> Double? in
+            guard line.hasPrefix("#EXTINF:") else { return nil }
+            return Double(line.dropFirst("#EXTINF:".count).prefix { $0 != "," })
+        }
+        #expect(durations.max() ?? .infinity <= 12, "\(durations)")
+        #expect(abs(durations.reduce(0, +) - 90) < 0.5, "\(durations)")
+
+        // The stored map is the whole index, and the successor plans on it
+        // with no entry longer than a target plus a GOP.
+        let entry = try JSONDecoder().decode(
+            KeyframeIndexCache.Entry.self, from: Data(contentsOf: try #require(sidecars(cache).first))
+        )
+        #expect(entry.complete)
+        let entries = try #require(SegmentPlan.keyframePlan(
+            keyframes: entry.keyframePTS, durationSeconds: 90.021, tickSeconds: 0.001, targetSeconds: 6
+        ))
+        #expect(entries.map(\.duration).max()! <= 8)
+        let (successorOrigin, successorSegments) = try await Self.sessionPlan(url, cache: cache)
+        #expect(successorOrigin == .keyframeIndexCache)
+        #expect(successorSegments == play.segmentPlanAvailable)
+    }
+
     @Test("A late load whose store fails announces nothing — the successor would miss and stay sequential")
     func unwritableCacheAnnouncesNothing() async throws {
         let scratch = try makeTempDirectory()

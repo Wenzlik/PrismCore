@@ -15,13 +15,16 @@ final class ScriptedHTTPServer: @unchecked Sendable {
         let headers: [String: String]
     }
 
-    enum Reply {
+    enum Reply: Sendable {
         case respond(status: Int, headers: [String: String] = [:], body: Data)
         /// Hold the connection open and never answer: a starved origin.
         case stall
         /// Close the connection without a byte of response: an origin, or a
         /// proxy in front of it, that went away mid-request.
         case drop
+        /// `reply`'s head at once, then its body `chunk` bytes per `interval`:
+        /// an origin (or a range proxy) that delivers, just slowly.
+        indirect case trickle(Reply, chunk: Int, interval: Double)
     }
 
     private let queue = DispatchQueue(label: "prismcore.tests.scripted-origin")
@@ -123,19 +126,42 @@ final class ScriptedHTTPServer: @unchecked Sendable {
             }
             let request = Request(path: URLComponents(string: target)?.path ?? target, headers: headers)
             log.append(request)
-            switch handler(request) {
-            case .stall:
-                break
-            case .drop:
-                close(connection)
-            case .respond(let status, let extra, let body):
-                var head = "HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n"
-                for (name, value) in extra { head += "\(name): \(value)\r\n" }
-                head += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            answer(connection, handler(request))
+        }
+    }
+
+    private func answer(_ connection: NWConnection, _ reply: Reply, pace: (chunk: Int, interval: Double)? = nil) {
+        switch reply {
+        case .stall:
+            break
+        case .drop:
+            close(connection)
+        case .trickle(let inner, let chunk, let interval):
+            answer(connection, inner, pace: (max(1, chunk), interval))
+        case .respond(let status, let extra, let body):
+            var head = "HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n"
+            for (name, value) in extra { head += "\(name): \(value)\r\n" }
+            head += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            guard let pace else {
                 connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in
                     self.close(connection)
                 })
+                return
             }
+            connection.send(content: Data(head.utf8), completion: .contentProcessed { _ in
+                self.drip(connection, body, offset: 0, pace: pace)
+            })
+        }
+    }
+
+    private func drip(_ connection: NWConnection, _ body: Data, offset: Int, pace: (chunk: Int, interval: Double)) {
+        guard connections[ObjectIdentifier(connection)] != nil else { return }
+        guard offset < body.count else { close(connection); return }
+        queue.asyncAfter(deadline: .now() + pace.interval) { [self] in
+            let end = min(body.count, offset + pace.chunk)
+            connection.send(content: body.subdata(in: offset..<end), completion: .contentProcessed { error in
+                if error != nil { self.close(connection) } else { self.drip(connection, body, offset: end, pace: pace) }
+            })
         }
     }
 }

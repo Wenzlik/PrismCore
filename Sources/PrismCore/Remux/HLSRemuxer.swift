@@ -154,6 +154,12 @@ final class HLSRemuxer: @unchecked Sendable {
     /// section the cancel takes after setting it.
     private var lateIndexLoader: LateIndexLoader?
 
+    /// The plan `run()` built — used or not (a uniform plan runs sequential)
+    /// — for the diagnostic report. Written once by the producer thread.
+    private let builtPlanLock = NSLock()
+    private var builtPlanStorage: SegmentPlan?
+    var builtPlan: SegmentPlan? { builtPlanLock.withLock { builtPlanStorage } }
+
     /// The late index load's thread, once launched. Test seam.
     var lateIndexLoadThread: ProducerThread? { activeGuardLock.withLock { lateIndexLoader?.thread } }
 
@@ -401,18 +407,26 @@ final class HLSRemuxer: @unchecked Sendable {
     }
 
     private func countSourceBytes(_ bytes: Int32, ptsSeconds: Double?) {
-        let now = ProcessInfo.processInfo.systemUptime
         sourceBytesLock.lock()
         if bytes > 0 { sourceBytesReadStorage &+= Int64(bytes) }
-        // Stamped under the byte counter's lock, which the packet already
-        // pays for: a second lock per packet would buy the watchdog nothing.
-        lastReadUptime = now
+        // Under the byte counter's lock, which the packet already pays for:
+        // a second lock per packet would buy the watchdog nothing.
         if let ptsSeconds { lastReadPTS = ptsSeconds }
         sourceBytesLock.unlock()
     }
 
+    /// A segment landed: the only progress a waiting player can use.
+    private func noteSegmentCut() {
+        let now = ProcessInfo.processInfo.systemUptime
+        sourceBytesLock.withLock { lastCutUptime = now }
+    }
+
     // The stall watchdog's view of the copy loop, under `sourceBytesLock`.
-    private var lastReadUptime: TimeInterval = 0
+    // The clock is the last CUT, not the last read: a producer reading
+    // toward a boundary it never reaches (one planned segment spanning the
+    // rest of a film, 3.5.0–3.5.2) read packets the whole time, so a
+    // read-based clock reported nothing while playback waited for minutes.
+    private var lastCutUptime: TimeInterval = 0
     private var lastReadPTS: Double?
     /// Parked on purpose (lead full, EOF waiting for demand) or no longer
     /// running. Without it a paused player — which parks the producer while
@@ -425,8 +439,8 @@ final class HLSRemuxer: @unchecked Sendable {
         sourceBytesLock.withLock {
             producerIdle = idle
             // Leaving a park is progress: the stall clock starts from here,
-            // not from the last packet before a ten-minute pause.
-            if !idle { lastReadUptime = now }
+            // not from the last cut before a ten-minute pause.
+            if !idle { lastCutUptime = now }
         }
     }
 
@@ -437,16 +451,17 @@ final class HLSRemuxer: @unchecked Sendable {
     }
 
     /// For a serve that has been waiting since `waitingSince` (uptime): a
-    /// `.producerStalled` once the copy loop has read nothing for `threshold`
-    /// of that wait. Once per stall, however many serves are waiting on it —
-    /// AVPlayer holds video and audio requests open together.
+    /// `.producerStalled` once the producer has cut no segment for
+    /// `threshold` of that wait, reading or not. Once per stall, however
+    /// many serves are waiting on it — AVPlayer holds video and audio
+    /// requests open together.
     func stallReport(waitingSince: TimeInterval, threshold: TimeInterval) -> PlaybackEvent? {
         let now = ProcessInfo.processInfo.systemUptime
         return sourceBytesLock.withLock {
-            guard !producerIdle, reportedStallEpoch != lastReadUptime else { return nil }
-            let since = now - max(lastReadUptime, waitingSince)
+            guard !producerIdle, reportedStallEpoch != lastCutUptime else { return nil }
+            let since = now - max(lastCutUptime, waitingSince)
             guard since >= threshold else { return nil }
-            reportedStallEpoch = lastReadUptime
+            reportedStallEpoch = lastCutUptime
             return .producerStalled(since: .seconds(since), lastPTS: lastReadPTS)
         }
     }
@@ -1051,6 +1066,7 @@ final class HLSRemuxer: @unchecked Sendable {
             avformat_flush(input)
         }
         let plannedPlan: SegmentPlan? = builtPlan?.basis == .keyframeIndex ? builtPlan : nil
+        builtPlanLock.withLock { builtPlanStorage = builtPlan }
         let planIsPartial = plannedPlan != nil && cachedCoveredThrough != nil
         if let onStartupPhase {
             // The cached map and a freshly loaded index reach the same plan by
@@ -1090,7 +1106,9 @@ final class HLSRemuxer: @unchecked Sendable {
         // that prefix would be permanent: the next play would skip the index
         // load on the strength of it, never see `planIsPartial`, never
         // harvest, and plan the whole unseen remainder as one entry that only
-        // closes at EOF.
+        // closes at EOF. (`keyframePlan`'s end witness now refuses such a
+        // prefix for THIS play too; the store keeps its own, tighter test —
+        // the segment target, not the file's cadence.)
         //
         // An unproven prefix is therefore not stored at all — not even as a
         // partial map. Partial coverage means a CONTIGUOUS run from the head,
@@ -1747,6 +1765,7 @@ final class HLSRemuxer: @unchecked Sendable {
             if plannedPlan == nil {
                 try playlist.appendSegment(duration: duration, file: file)
             }
+            noteSegmentCut()
             onSegmentLanded?(segmentIndex)
             if !didAnnounceFirstSegment {
                 didAnnounceFirstSegment = true
@@ -2301,6 +2320,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil {
                     try playlist.appendSegment(duration: finalDuration, file: file)
                 }
+                noteSegmentCut()
                 tailIndex = segmentIndex
                 // The tail segment is progress too: without it, a recovery
                 // that healed into the last segment leaves the next `.unknown`

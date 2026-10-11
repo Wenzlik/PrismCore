@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import CoreGraphics
+import Libavformat
 @testable import PrismCore
 
 /// Scrub-bar thumbnails: one keyframe, CPU-decoded, scaled, cached by the
@@ -116,6 +117,45 @@ struct SeekPreviewTests {
         _ = try await service.thumbnail(at: 10.1)
         _ = try await service.thumbnail(at: 11.2)
         #expect(await service.decodeCount == 1)
+    }
+
+    @Test("A partial keyframe map answers only inside its covered prefix")
+    func partialKeyframeMapStopsAtItsCoveredEnd() async throws {
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCorePreviewKF-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try fixture("h264_aac_30s.mkv")
+
+        // The harvest of a play cancelled at 10 s: keyframes every 2 s through
+        // 10 s, and nothing known past it.
+        let interruptGuard = ReadInterruptGuard()
+        var context: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
+        #expect(avformat_open_input(&context, url.path, nil, nil) >= 0)
+        let opened = try #require(context)
+        let identity = try #require(KeyframeIndexCache.Identity(
+            opened: opened, sourceURL: url, interruptGuard: interruptGuard
+        ))
+        withExtendedLifetime(interruptGuard) { avformat_close_input(&context) }
+        KeyframeIndexCache(directory: cacheDirectory).store(.init(
+            identity: identity.key, timeBaseNum: 1, timeBaseDen: 1000,
+            keyframePTS: [0, 2000, 4000, 6000, 8000, 10000], complete: false, coveredThroughPTS: 10000
+        ))
+
+        let service = SeekPreviewService(url: url, keyframeIndexCacheDirectory: cacheDirectory)
+        defer { Task { await service.close() } }
+        // Inside the prefix the map still resolves before any decode...
+        let inside = try await service.thumbnail(at: 8.2)
+        _ = try await service.thumbnail(at: 9.9)
+        #expect(await service.usesKeyframeMap)
+        #expect(await service.decodeCount == 1)
+        // ...but past it the map's last keyframe is not the answer: it would
+        // show the 10 s picture for 24 s, and cache it there.
+        let tail = try await service.thumbnail(at: 24)
+        #expect(await service.decodeCount == 2)
+        #expect(rgbaBytes(inside) != rgbaBytes(tail))
+        let pastPrefix = try await service.thumbnail(at: 10.1)
+        #expect(rgbaBytes(pastPrefix) != rgbaBytes(tail))
     }
 
     @Test("The binary search lands on the keyframe at or before the position")
