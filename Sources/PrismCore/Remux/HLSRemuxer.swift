@@ -1717,6 +1717,12 @@ final class HLSRemuxer: @unchecked Sendable {
         /// And a re-anchored muxer mints its moov again — the one already served
         /// must not change under AVPlayer's cached `EXT-X-MAP`, so the first write
         /// wins.
+        /// Per output stream, the timeline base of the writer whose init
+        /// segment is being served — what every re-anchored writer shifts
+        /// onto (`FMP4SegmentWriter.timelineBase(ofStream:)`). `nil` until
+        /// the init is written.
+        var servedTimelineBase: [Int: Int64]?
+
         func writeInitSegmentIfAbsent(_ initSegment: Data) throws {
             let initURL = outputDirectory.appendingPathComponent(Self.initFileName)
             guard !FileManager.default.fileExists(atPath: initURL.path) else { return }
@@ -1740,6 +1746,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 bytes = withAtmos
             }
             try bytes.write(to: initURL, options: .atomic)
+            servedTimelineBase = writer.timelineBases
         }
 
         func emitSegment(endPTS: Int64) throws {
@@ -1881,6 +1888,7 @@ final class HLSRemuxer: @unchecked Sendable {
             writer = FMP4SegmentWriter()
             writer.audioDelaySeconds = audioDelaySeconds
             writer.timestampRepairs = timestampRepairLedger
+            writer.timelineShift = (servedTimelineBase ?? [:]).mapValues { -$0 }
             _ = try writer.open(input: input, plan: plan, restart: true)
             streamMap = writer.streamMap
             for rendition in renditions {

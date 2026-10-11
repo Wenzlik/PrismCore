@@ -203,6 +203,7 @@ final class AudioRenditionWriter {
     private func openMuxer(input: UnsafeMutablePointer<AVFormatContext>, restart: Bool) throws {
         writer.audioDelaySeconds = audioDelaySeconds
         writer.timestampRepairs = timestampRepairs
+        writer.timelineShift = (servedTimelineBase ?? [:]).mapValues { -$0 }
         let index = Int32(track.streamIndex)
         let plan: FMP4SegmentWriter.StreamPlan
         if let bridge {
@@ -289,12 +290,24 @@ final class AudioRenditionWriter {
         }
     }
 
-    /// Write the init segment, adding the JOC declaration the muxer omits.
+    /// The served init's timeline base (`FMP4SegmentWriter.timelineBase`),
+    /// which every re-anchored muxer shifts onto. `nil` until it is written.
+    private var servedTimelineBase: [Int: Int64]?
+
+    /// Write the init segment the first time one is minted, adding the JOC
+    /// declaration the muxer omits.
     ///
     /// FFmpeg writes a `dec3` without the TS 103 420 extension even for a
     /// stream-copied Atmos track, and that omission is the difference between
     /// Atmos and plain DD+ at the speaker.
+    ///
+    /// First write wins, as for the video's: a re-anchored muxer mints its
+    /// moov again, and AVPlayer keeps the `EXT-X-MAP` it already fetched, so a
+    /// rewrite would only make the file disagree with what is playing — the
+    /// restarted moov carries no edit list, the head's trims the encoder's
+    /// priming.
     private func writeInitSegment(_ initSegment: Data) throws {
+        guard servedTimelineBase == nil else { return }
         let bytes = atmosComplexityIndex.flatMap {
             EAC3Configuration.patch(initSegment: initSegment, atmosComplexityIndex: $0)
         } ?? initSegment
@@ -302,6 +315,7 @@ final class AudioRenditionWriter {
             to: directory.appendingPathComponent(Self.initFileName),
             options: .atomic
         )
+        servedTimelineBase = writer.timelineBases
     }
 
     /// Look for the JOC declaration in this track's first readable E-AC-3
