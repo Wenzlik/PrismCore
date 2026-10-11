@@ -27,10 +27,11 @@ source-compatible.)
   largest keyframe gap plus 1 s; any other map (an index loaded whole, a
   harvest) within the 60 s gap cap plus 1 s, so a final GOP longer than the
   rest or audio outlasting the picture still plans, and no plan's last
-  entry spans minutes of source again. A refused map is no plan: the build
-  falls back to `.uniform(.budgetExpired)`, the session runs sequentially,
-  the late index load (coordinated HTTP) gets its chance and the harvest
-  stores the whole map for the next play. Partial cached maps keep their
+  entry spans minutes of source again. A refused map is no plan: the session
+  runs sequentially and the harvest stores the whole map for the next play;
+  when the budget is what ran out the basis is `.uniform(.budgetExpired)`
+  and the late index load (coordinated HTTP) gets its chance (a failed read
+  or seek inside the budget is `.untrustedIndex`, with no late load). Partial cached maps keep their
   covered-prefix + stride tail. Repro over HTTP (Cues answered half, the
   rest starved past 3 s, `seek_clock.mkv`): before, 9 entries with a 46 s
   last one; after, sequential, every `EXTINF` ≤ 12 s, `ENDLIST`, late load
@@ -48,7 +49,8 @@ source-compatible.)
 
 - **`SessionDiagnosticReport.Startup.plan`** (additive, optional): the built
   plan's `basis` (`keyframeIndex` / `uniform.<reason>`), `segments`,
-  `maxSegmentSeconds` (the largest `EXTINF`), `tailStartSeconds` /
+  `maxSegmentSeconds` (the plan's longest entry — the largest `EXTINF` only
+  when the plan was published; a uniform plan runs sequential), `tailStartSeconds` /
   `tailSeconds`, `indexCoversEnd` and `indexBudgetExpired` — present for a
   degraded plan too.
 - **TrueHD seek coverage**: `h264_truehd_14s.mkv` (synthetic, 5.1 + stereo
