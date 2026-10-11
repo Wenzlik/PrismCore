@@ -277,6 +277,38 @@ struct RuntimeAudioDelayTests {
         } catch { await session.stop(); throw error }
     }
 
+    @Test("Taking back a delay the session started with moves the audio back, within what the served init can place")
+    func reducingAnInitialDelayTakesEffect() async throws {
+        let session = try PrismCoreSession(
+            url: try fixture("h264_aac_30s.mkv"), forceMuxedShape: true, audioDelaySeconds: 0.5
+        )
+        do {
+            let playlist = try await session.start()
+            let root = await session.workDirectory
+            _ = try await URLSession.uncached.data(
+                from: playlist.deletingLastPathComponent().appendingPathComponent("seg00000.m4s"))
+            let file = root.appendingPathComponent("seg00000.m4s")
+            let before = try Data(contentsOf: file)
+            let baselineAudio = try #require(try segmentTimestamps(root: root, index: 0)[AVMEDIA_TYPE_AUDIO])
+
+            let outcome = await session.setAudioDelaySeconds(0)
+            try #require(outcome == .pendingReanchor)
+            let rewritten = await waitUntil { (try? Data(contentsOf: file)).map { $0 != before } ?? false }
+            #expect(rewritten, "the re-anchored segment was never rewritten")
+
+            let audio = try #require(try segmentTimestamps(root: root, index: 0)[AVMEDIA_TYPE_AUDIO])
+            #expect(audio.allSatisfy { $0 < 60 }, "an unsigned tfdt wrap reads as astronomical: \(audio.prefix(3))")
+            // The correction took effect: the same audio, half a second earlier.
+            #expect(abs(audio.last! - (baselineAudio.last! - 0.5)) <= audioFrameSeconds,
+                    "last audio at \(audio.last!) s, \(baselineAudio.last!) s before the change")
+            // The init the player holds begins this track with an empty edit
+            // of the old delay; nothing can be placed before it, so the audio
+            // that would is not written at all (rather than wrapped).
+            #expect(audio.first! >= baselineAudio.first! - audioFrameSeconds)
+            await session.stop()
+        } catch { await session.stop(); throw error }
+    }
+
     @Test("Discarding the segments written with the old offset leaves nothing to serve")
     func supersedeAllRemovesEverySegmentFile() throws {
         let root = FileManager.default.temporaryDirectory

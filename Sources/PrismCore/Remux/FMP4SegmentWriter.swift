@@ -324,7 +324,13 @@ final class FMP4SegmentWriter {
         // priming packet under it. A restart with an edit list writes its
         // first packet's PTS, so there it is the PTS. A packet that would
         // present before the timeline's origin is never heard or seen anyway
-        // (a priming packet included), so it is dropped.
+        // (a priming packet included), so it is dropped. That includes audio
+        // a smaller delay moves ahead of the start the served init gives the
+        // track: a session that began with a positive delay has an init whose
+        // edit list opens the track with an empty edit of that delay, and the
+        // player holding it can place nothing earlier. (Before the shift, a
+        // restart wrote absolute time under that edit and the whole film kept
+        // the old delay; now only those first moments go unheard.)
         let pts = packet.pointee.pts, dts = packet.pointee.dts
         func belowZero(_ value: Int64) -> Bool { value != swift_AV_NOPTS_VALUE() && value + ticks < 0 }
         let drops = alignsToServedInit ? belowZero(pts) || belowZero(dts)
