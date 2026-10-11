@@ -8,6 +8,19 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.3] — 2026-10-11
+
+A Matroska whose Cues outlast the 3 s index budget no longer stalls playback
+after a seek (3.5.0–3.5.2): a keyframe map cut short by the clock is no longer
+published as a complete plan, so its last segment cannot run to the end of the
+film. When the budget runs out on the Cues and the source is not read through
+the coordinated HTTP reader (a local file or a mounted share), there is no late
+index load: the first play runs sequentially (no seekable plan), and with a
+keyframe cache the map the harvest stores plans the next play. The seek
+preview stops trusting a partial map past its covered end, `.producerStalled`
+now reports a producer that reads without cutting, and the diagnostic report
+gains `Startup.plan` (additive).
+
 ### Fixed
 
 - **A budget-cut keyframe index no longer plans the rest of the film as one
@@ -3062,7 +3075,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...HEAD
+[3.5.3]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...3.5.3
 [3.5.2]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...3.5.2
 [3.5.1]: https://github.com/Wenzlik/PrismCore/compare/3.5.0...3.5.1
 [3.5.0]: https://github.com/Wenzlik/PrismCore/compare/3.4.0...3.5.0
