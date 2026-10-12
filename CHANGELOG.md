@@ -8,6 +8,13 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs:** README gains a *Used by* table (Aether, Tentacle TV), a *Contact /
+  Support* section and a summary of the licence exception's conditions;
+  README and NOTICE.md no longer claim FFmpeg is always linked dynamically —
+  MPVKit's prebuilt xcframeworks are static libraries.
+
 ## [3.5.4] — 2026-10-11
 
 A source with three audio channels bridged to AAC plays on Apple players again
