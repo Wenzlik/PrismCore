@@ -299,7 +299,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     var heldHistoryForTesting: (cues: Int, bytes: Int) {
         lock.withLock {
             let held = emittedCues.compactMap { $0 }
-            return (held.count, held.map(\.bytes).reduce(0, +))
+            return (cues: held.count, bytes: held.map(\.bytes).reduce(0, +))
         }
     }
 

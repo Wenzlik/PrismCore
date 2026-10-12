@@ -91,7 +91,7 @@ final class HLSRemuxer: @unchecked Sendable {
     /// checking the *relationship* needs this; a host reporting one value at a
     /// time is fine with the plain properties.
     var audioDelayReport: (serving: Double, pending: Double?) {
-        audioDelayLock.withLock { (effectiveAudioDelaySeconds, requestedAudioDelaySeconds) }
+        audioDelayLock.withLock { (serving: effectiveAudioDelaySeconds, pending: requestedAudioDelaySeconds) }
     }
 
     private let audioDelayLock = NSLock()
@@ -1389,7 +1389,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     storedLazyRenditionPlaylistURIs = Set(
                         renditions.filter(\.isLazy).map(\.playlistURI)
                     )
-                    storedAudioRenditionDirectories = renditions.map { ($0.renditionName, $0.directoryName) }
+                    storedAudioRenditionDirectories = renditions.map { (name: $0.renditionName, directory: $0.directoryName) }
                 }
                 variant.audioRenditions = renditions.enumerated().map { ordinal, rendition in
                     // DEFAULT on the first rendition only, which is the track

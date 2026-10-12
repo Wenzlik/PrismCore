@@ -110,7 +110,7 @@ final class PlaybackEventSink: @unchecked Sendable {
 
     /// What `recent` holds, oldest first, and how many older ones it let go.
     var retained: (events: [(at: ContinuousClock.Instant, event: PlaybackEvent)], dropped: Int) {
-        lock.withLock { (recent, dropped) }
+        lock.withLock { (events: recent, dropped: dropped) }
     }
 
     func yield(_ event: PlaybackEvent) {

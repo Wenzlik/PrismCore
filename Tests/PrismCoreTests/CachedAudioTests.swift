@@ -66,7 +66,7 @@ struct CachedAudioTests {
         }
         return master.split(separator: "\n").filter { $0.contains("TYPE=AUDIO") }.compactMap { line in
             guard let name = attribute("NAME", line), let uri = attribute("URI", line) else { return nil }
-            return (name, uri)
+            return (name: name, uri: uri)
         }
     }
 

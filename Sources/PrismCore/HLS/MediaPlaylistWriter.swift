@@ -95,7 +95,7 @@ final class MediaPlaylistWriter {
     /// appended; the manifest is a promise the producer keeps on demand.
     func writePlannedVOD(durations: [Double], fileName: (Int) -> String) throws {
         entries = durations.enumerated().map { (index, duration) in
-            (duration, fileName(index))
+            (duration: duration, file: fileName(index))
         }
         entriesText = ""
         longestDuration = 0

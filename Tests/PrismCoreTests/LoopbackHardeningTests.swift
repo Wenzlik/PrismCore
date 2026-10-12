@@ -48,11 +48,11 @@ private final class RawClient {
                     }
                 }
                 if let data = chunk.0 { box.append(data) }
-                if isSatisfied(box.text) { return (box.text, false) }
-                if chunk.1 || chunk.2 { return (box.text, true) }
+                if isSatisfied(box.text) { return (text: box.text, closed: false) }
+                if chunk.1 || chunk.2 { return (text: box.text, closed: true) }
             }
         }
-        return result ?? (box.text, false)
+        return result ?? (text: box.text, closed: false)
     }
 
     func close() {
