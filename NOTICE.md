@@ -11,13 +11,15 @@ or later, with an Application Store Exception** — see [`LICENSE`](LICENSE).
 ## The Application Store Exception, in one paragraph
 
 LGPL section 6 asks that the users of a work built on PrismCore be able to relink
-it against a modified PrismCore. A signed `.ipa` cannot allow that, so plain LGPL
+it against a modified PrismCore, and that its terms permit modifying and
+reverse-engineering it for that. A signed `.ipa` cannot allow that, so plain LGPL
 and the App Store are in tension — which is a poor reason for a library like this
 one to be unusable by the apps it was written for. The exception releases an
-adopter from that requirement *for store distribution only*. It does not release
+adopter from those requirements *for store distribution only*. It does not release
 anyone from LGPL on PrismCore itself: modify the library and those modifications
 stay LGPL and have to be published. Using it unmodified asks two things — say in
-your app that it includes PrismCore and where the source is, and honour FFmpeg's
+your app that it includes PrismCore, with a copy of its licence and where the
+source is, and honour FFmpeg's
 own terms below, which are unchanged by any of this.
 
 ## Why LGPL rather than something permissive
@@ -25,8 +27,8 @@ own terms below, which are unchanged by any of this.
 Because one file's ancestry asks for it, and pretending otherwise would be the
 kind of thing nobody notices until it matters.
 
-PrismCore *links* FFmpeg dynamically (see below), and dynamic linking alone would
-have left our own code free to carry any licence. But
+Linking against FFmpeg alone would have left our own code free to carry any
+licence (see below for how it is linked). But
 `Sources/PrismCore/Remux/EAC3Syncframe.swift` is a different case: its E-AC-3
 bitstream walk was written **by reading FFmpeg's `libavcodec/ac3_parser.c`**,
 field order and widths included, because the placement of the JOC signal in
@@ -45,20 +47,21 @@ FFmpeg's version.
 | | licence | how it is used |
 |---|---|---|
 | [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
-| [MPVKit](https://github.com/mpvkit/MPVKit) | LGPL-3.0 | supplies the above as prebuilt **dynamic** xcframeworks |
+| [MPVKit](https://github.com/mpvkit/MPVKit) | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries) |
 | [libdovi](https://github.com/quietvoid/dovi_tool) | MIT | Dolby Vision RPU parsing and the Profile 7 → 8.1 conversion |
 
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
-through MPVKit, which is where their corresponding sources and build recipes live,
-and they are linked dynamically — so the LGPL's relinking requirement is satisfied
-by replacing the xcframeworks in MPVKit.
+through MPVKit, which is where their corresponding sources and build recipes live.
+How FFmpeg is linked depends on the build a host uses: MPVKit's prebuilt
+xcframeworks are static libraries, so FFmpeg is linked statically into the app;
+a host that supplies dynamic FFmpeg frameworks links it dynamically. Which of the
+ways LGPL section 6 offers applies follows from that choice.
 
-Anything built on PrismCore inherits those obligations: ship the licence texts,
-say which versions you used, and keep the FFmpeg libraries replaceable. The
-Application Store Exception above covers PrismCore's own code and does not reach
-FFmpeg — but nothing here makes FFmpeg's terms harder than they already are for
-any app that ships it, and embedding the frameworks dynamically (which is how
-MPVKit delivers them) is what satisfies them.
+Anything built on PrismCore inherits FFmpeg's obligations: ship the licence texts,
+say which versions you used, and meet section 6 of the LGPL for the way your build
+links FFmpeg. The Application Store Exception above covers PrismCore's own code
+and does not reach FFmpeg — but nothing here makes FFmpeg's terms harder than they
+already are for any app that ships it.
 
 ## Attribution
 

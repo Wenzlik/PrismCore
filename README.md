@@ -44,12 +44,16 @@ MPEG-2, VC-1, interlaced H.264), there is a software path — libavcodec into
 
 ## Used by
 
-- **[Aether](https://aetherplayer.com)** — a native media player for Apple
-  platforms. PrismCore is the engine every non-Apple container routes through:
-  ahead of libmpv, behind plain AVFoundation for the files it can already open.
-  The remux path is on by default there; the software path is opt-in.
+| App | Platforms |
+| --- | --- |
+| [Aether](https://aetherplayer.com) | iOS, iPadOS, tvOS, macOS, visionOS |
+| [Tentacle TV](https://github.com/Knaox/Tentacle-TV) | tvOS |
 
-Shipping something on PrismCore? Open an issue and it gets listed here.
+In Aether, PrismCore is the engine every non-Apple container routes through:
+ahead of libmpv, behind plain AVFoundation for the files it can already open.
+
+Shipping something on PrismCore? Open a pull request that adds one row to this
+table: the app's name, a link, and its platforms.
 
 ## What it handles
 
@@ -824,8 +828,11 @@ Deliberate omissions, so you don't have to read the source to find them:
 | visionOS | 1.0 |
 | Swift | 6.0 |
 
-FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s **dynamic**
+FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s prebuilt
 xcframeworks — no FFmpeg source is redistributed here and nothing needs building.
+Those xcframeworks are static libraries, so FFmpeg ends up linked statically into
+the app; a host that supplies dynamic FFmpeg frameworks instead links it
+dynamically.
 Dolby Vision RPU conversion goes through
 [libdovi](https://github.com/quietvoid/dovi_tool), which MPVKit already links.
 
@@ -915,25 +922,27 @@ PrismCore is **LGPL-2.1-or-later with an Application Store Exception** (see
 [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md)). In practice, for the two cases
 that come up:
 
-**Shipping a closed-source app, including on the App Store.** Add the package, use
-it, ship it. The exception exists precisely for this: LGPL section 6 asks that your
-users be able to relink your app against a modified PrismCore, which a signed `.ipa`
-cannot allow, and the exception releases you from that requirement for store
-distribution. Two things are asked of you in return:
+**Shipping a closed-source app through the App Store, TestFlight or a comparable
+store.** Add the package, use it, ship it. The exception exists precisely for this:
+LGPL section 6 asks that your users be able to relink your app against a modified
+PrismCore (and that your terms permit modifying and reverse-engineering it for
+that), which a signed `.ipa` cannot allow, and the exception releases you from
+those requirements for store distribution only — anywhere else, plain LGPL
+applies. Two things are asked of you in return:
 
 1. If you **modify PrismCore itself**, those modifications stay LGPL and have to be
    published. Using it unmodified — the normal case — carries no such obligation for
    your own code.
 2. Say so somewhere a user can find it (an About screen, an acknowledgements page):
-   that your app includes PrismCore, under which licence, and where the source
-   lives. Aether's About screen is a worked example.
+   that your app includes PrismCore, with a copy of its licence, and where the
+   source lives. Aether's About screen is a worked example.
 
 **FFmpeg is a separate obligation, and it is not new.** The exception covers
-PrismCore's own code only. FFmpeg reaches your app as dynamically linked frameworks
-under plain LGPL-2.1-or-later, which is satisfiable for a closed-source store app —
-that is what every FFmpeg-based app on the App Store already does — provided you
-embed them *dynamically*, ship the licence texts, and point at the build's source.
-If you already ship MPVKit, you are already doing all three.
+PrismCore's own code only. FFmpeg stays under plain LGPL-2.1-or-later — the same
+terms every FFmpeg-based app already ships under. Whether it is linked statically
+(MPVKit's prebuilt xcframeworks) or dynamically depends on the FFmpeg build your
+app uses, and how LGPL section 6 is met depends on that choice; see
+[`NOTICE.md`](NOTICE.md).
 
 Why LGPL rather than something permissive: `Sources/PrismCore/Remux/EAC3Syncframe.swift`
 was written by reading FFmpeg's `ac3_parser.c`, because the placement of the Atmos
@@ -1132,10 +1141,11 @@ Three rules, enforced rather than merely documented:
 same mechanism with the option preset, and count as that session's one
 successor.
 
-## Support
+## Contact / Support
 
-Questions, integration help and bug reports:
-**[GitHub Issues](https://github.com/Wenzlik/PrismCore/issues)**.
+Bugs and feature requests:
+**[GitHub Issues](https://github.com/Wenzlik/PrismCore/issues)**. Anything else:
+[support@aetherplayer.com](mailto:support@aetherplayer.com).
 
 ## Author
 
@@ -1152,6 +1162,21 @@ the receipts.
 
 Copyright © 2026 Václav Zmrhal.
 
-[LGPL-2.1-or-later with an Application Store Exception](LICENSE). See
-[Integrating it](#integrating-it) for what that means in practice, and
-[`NOTICE.md`](NOTICE.md) for the third-party components and their terms.
+PrismCore is licensed under the GNU Lesser General Public License, version 2.1
+or later, with the **PrismCore Application Store Exception** — see
+[`LICENSE`](LICENSE). The exception lets a combined work be distributed through
+the App Store, TestFlight or a comparable store without section 6's requirements
+to permit modification and reverse engineering of that work and to supply what a
+recipient needs to relink it against a modified PrismCore, on two conditions:
+
+1. Your app gives notice, somewhere a user can find it (an About screen, an
+   acknowledgements page, or the accompanying documentation), that it
+   incorporates PrismCore, with a copy of the licence and a reference to where
+   PrismCore's source can be obtained.
+2. If you modify PrismCore itself, the modified library stays under the LGPL and
+   you make your modifications available under it.
+
+The exception covers PrismCore's own code only, not FFmpeg or any other
+third-party component. See [Integrating it](#integrating-it) for what that means
+in practice, and [`NOTICE.md`](NOTICE.md) for the third-party components and
+their terms.
