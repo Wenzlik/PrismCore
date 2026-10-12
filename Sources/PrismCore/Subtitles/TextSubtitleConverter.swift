@@ -252,7 +252,7 @@ enum TextSubtitleConverter {
     /// `00:00:01,000 --> 00:00:03,000` (SRT) or `00:01.000 --> 00:03.000`
     /// (WebVTT short form), with any trailing cue settings ignored.
     static func parseTimingLine(_ line: String) -> (start: Double, end: Double)? {
-        parseTimingLineWithSettings(line).map { ($0.start, $0.end) }
+        parseTimingLineWithSettings(line).map { (start: $0.start, end: $0.end) }
     }
 
     /// The timing line with whatever followed the end timestamp — WebVTT cue

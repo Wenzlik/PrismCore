@@ -98,7 +98,7 @@ struct KeyframeIndexCacheTests {
             let response = HTTPURLResponse(
                 url: remote, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: headers
             )
-            return .observed(sourceURL: remote, strongETag: HTTPRangeInput.strongETag(of: response).map { ($0, remote) })
+            return .observed(sourceURL: remote, strongETag: HTTPRangeInput.strongETag(of: response).map { (tag: $0, url: remote) })
         }
         #expect(version(["ETag": "\"v1\""]) == .strongETag("\"v1\"", servedBy: remote))
         // Equivalent content is not the same bytes, and a date has one-second

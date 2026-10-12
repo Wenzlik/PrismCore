@@ -127,7 +127,7 @@ final class DemandCoordinator: @unchecked Sendable {
             guard let anchor = requestedAnchor, anchorIsDue(now: .now) else { return nil }
             defer { requestedAnchor = nil; anchorIsForced = false; requestedAt = nil }
             reanchorInFlight = anchor
-            return (anchor, anchorIsForced)
+            return (index: anchor, forced: anchorIsForced)
         }
     }
 

@@ -738,7 +738,7 @@ public actor LoopbackHTTPServer {
         await withCheckedContinuation { continuation in
             let once = ResumeOnce()
             connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { data, _, isComplete, error in
-                once.run { continuation.resume(returning: (data, isComplete, error != nil)) }
+                once.run { continuation.resume(returning: (data: data, isComplete: isComplete, failed: error != nil)) }
             }
         }
     }

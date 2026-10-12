@@ -205,7 +205,7 @@ final class ResidentSegmentStore: @unchecked Sendable {
                   let initial = try? FileHandle(forReadingFrom: root.appendingPathComponent("init.mp4")),
                   let media = try? FileHandle(forReadingFrom: mediaURL)
             else { return nil }
-            return (entry.key, initial, media)
+            return (index: entry.key, initial: initial, media: media)
         }) else { return nil }
         defer { try? opened.initial.close(); try? opened.media.close() }
         guard let initial = try? opened.initial.readToEnd(), let media = try? opened.media.readToEnd() else { return nil }

@@ -520,7 +520,7 @@ final class CEA608FieldDecoder {
 
     func splitPending(at boundary: Double) -> [(channel: Int, cue: SubtitleCue)] {
         channels.enumerated().compactMap { index, channel in
-            channel.splitPending(at: boundary).map { (index, $0) }
+            channel.splitPending(at: boundary).map { (channel: index, cue: $0) }
         }
     }
 

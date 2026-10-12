@@ -235,7 +235,7 @@ package enum SegmentVerifier {
                             + "which does not follow a sub-range of the same resource")
                     }
                 }
-                previousRange = range.map { (line, $0.end) }
+                previousRange = range.map { (uri: line, end: $0.end) }
                 // The walk advances to `sequence + 1`, so the last number a
                 // segment may carry is `Int.max - 1`; past that is a finding,
                 // not a trap.

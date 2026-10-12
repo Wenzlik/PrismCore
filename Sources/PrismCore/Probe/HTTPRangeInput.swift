@@ -360,7 +360,7 @@ final class HTTPRangeInput {
     private func observeFirstResponse(reporting currentValidator: String?, strongETag: String?) {
         guard !firstResponseSeen else { return }
         firstResponseSeen = true
-        failureLock.withLock { firstStrongETag = strongETag.map { ($0, url) } }
+        failureLock.withLock { firstStrongETag = strongETag.map { (tag: $0, url: url) } }
         let verdict: ValidatorObservation
         switch (expectedValidator, currentValidator) {
         case (nil, let reported?): verdict = .unchecked(reported)
