@@ -8,6 +8,23 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.5.5] — 2026-10-12
+
+Fix Xcode 27 compile error (labeled tuple in PlaybackEvents). No behaviour
+change.
+
+### Fixed
+
+- **PrismCore compiles with Xcode 27 again.** Xcode 27.0/27.1 rejected
+  `PlaybackEventSink.retained`: `lock.withLock { (recent, dropped) }` returned
+  an unlabeled tuple into a property typed `(events:, dropped:)`, so the
+  generic `R` was inferred two ways ("Conflicting arguments to generic
+  parameter 'R'"). That site and every other closure passed to a generic
+  function (`withLock`, `map`/`compactMap`, `Optional.map`,
+  `withCheckedContinuation`, `withTimeout`) that fed an unlabeled tuple into a
+  labeled tuple type now builds the labeled literal, so no inference relies
+  on tuple-label conversion. Public API unchanged (#142).
+
 ### Changed
 
 - **Docs:** README gains a *Used by* table (Aether, Tentacle TV), a *Contact /
@@ -3130,7 +3147,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...HEAD
+[3.5.5]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...3.5.5
 [3.5.4]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...3.5.4
 [3.5.3]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...3.5.3
 [3.5.2]: https://github.com/Wenzlik/PrismCore/compare/3.5.1...3.5.2
