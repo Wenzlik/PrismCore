@@ -239,6 +239,30 @@ struct TrueHDAtmosTests {
         }
     }
 
+    @Test("Lossless bridging lands every source layout on the one FLAC means for its channel count")
+    func flacLayoutsAreFLACs() throws {
+        let target = AudioBridge.targetCodec(for: .lossless)
+        try #require(target == AV_CODEC_ID_FLAC, "this FFmpeg build has no flac encoder")
+        // A 2.1 source copied through would be read back as 3.0 — its LFE in
+        // the centre speaker. FLAC's own layouts per count, resampled into.
+        for (source, expected) in [
+            ("2.1", "3.0"), ("5.1(side)", "5.1(side)"), ("5.1", "5.1(side)"), ("7.1(wide)", "7.1"), ("7.1", "7.1"),
+            ("stereo", "stereo"), ("6.1", "6.1"),
+        ] {
+            let par = makeCodecpar(channels: 2)
+            defer { var par: UnsafeMutablePointer<AVCodecParameters>? = par; avcodec_parameters_free(&par) }
+            av_channel_layout_uninit(&par.pointee.ch_layout)
+            #expect(av_channel_layout_from_string(&par.pointee.ch_layout, source) == 0)
+            par.pointee.block_align = par.pointee.ch_layout.nb_channels * 3
+            let bridge = try AudioBridge(
+                codecpar: par, timeBase: AVRational(num: 1, den: Self.sampleRate),
+                globalHeader: true, targetCodec: target
+            )
+            defer { bridge.close() }
+            #expect(bridge.routeDescription.contains("→ flac \(expected) "), "\(source): \(bridge.routeDescription)")
+        }
+    }
+
     @Test("A lossless bridge re-anchored to an earlier position starts clean there")
     func losslessResetReanchors() throws {
         let target = AudioBridge.targetCodec(for: .lossless)

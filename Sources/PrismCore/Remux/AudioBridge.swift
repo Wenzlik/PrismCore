@@ -847,6 +847,15 @@ final class AudioBridge {
         var source = source
         var result = AVChannelLayout()
 
+        // FLAC fixes the meaning of each channel count (RFC 9639 §9.1.3) and,
+        // like aac, publishes no list — so the any-layout branch below would
+        // copy a "2.1" (FL FR LFE) straight through, and the decoder would
+        // read it as FL FR FC: the LFE in the centre speaker. Its own layout
+        // for the count instead, and the resampler moves the channels.
+        if encoder.pointee.id == AV_CODEC_ID_FLAC, source.nb_channels > 0 {
+            return try flacLayout(channels: source.nb_channels)
+        }
+
         var raw: UnsafeRawPointer?
         var count: Int32 = 0
         let query = avcodec_get_supported_config(
@@ -935,6 +944,29 @@ final class AudioBridge {
         case 4: "4.0"
         case 5: "5.0"
         default: "5.1"
+        }
+        var layout = AVChannelLayout()
+        try FFmpegError.check(
+            av_channel_layout_from_string(&layout, name),
+            "av_channel_layout_from_string(\(name))"
+        )
+        return layout
+    }
+
+    /// FLAC's channel assignment for a count, as libavcodec's flac decoder
+    /// reads it back out of an MP4 (no channel-mask tag there: five and six
+    /// channels come back as the SIDE variants); wider than 8 is folded to
+    /// 7.1, the most FLAC carries.
+    private static func flacLayout(channels: Int32) throws -> AVChannelLayout {
+        let name = switch channels {
+        case ...1: "mono"
+        case 2: "stereo"
+        case 3: "3.0"
+        case 4: "quad"
+        case 5: "5.0(side)"
+        case 6: "5.1(side)"
+        case 7: "6.1"
+        default: "7.1"
         }
         var layout = AVChannelLayout()
         try FFmpegError.check(

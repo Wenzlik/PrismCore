@@ -68,7 +68,8 @@ package struct StartupCheckpointRun: Sendable {
         display: DisplayCapabilities = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true),
         keyframeIndexCacheDirectory: URL? = nil,
         keyframeIndexCacheIdentity: SourceCacheIdentity? = nil,
-        prewarm: Bool = false
+        prewarm: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed
     ) async throws -> StartupCheckpointRun {
         let prewarmOutcome: SourcePrewarmOutcome? = prewarm
             ? await PrismCoreEngine.prewarm(url: url, httpHeaders: httpHeaders)
@@ -83,7 +84,8 @@ package struct StartupCheckpointRun: Sendable {
             probed: probed,
             keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
             keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
-            coordinatedHTTP: coordinatedHTTP
+            coordinatedHTTP: coordinatedHTTP,
+            bridgedAudio: bridgedAudio
         )
         let checkpoints = try await session.startupCheckpoints()
         let collected = Collected()

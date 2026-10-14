@@ -220,7 +220,8 @@ enum BenchCommand {
                     coordinatedHTTP: options.coordinatedHTTP,
                     display: options.display,
                     keyframeIndexCacheDirectory: keyframeCache,
-                    keyframeIndexCacheIdentity: cacheIdentity
+                    keyframeIndexCacheIdentity: cacheIdentity,
+                    bridgedAudio: options.bridgedAudio
                 )
             } catch {
                 throw CLIFailure(code: .probeFailed, message: "probe failed: \(PrismCoreError.classify(error))")
