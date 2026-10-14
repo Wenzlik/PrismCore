@@ -303,6 +303,10 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         /// before the master is written and in the muxed shape.
         public var audioRenditionSummary: String?
         public var objectAudio: [ObjectAudio]
+        /// `audioTrackDeliveries`: how each source track is carried, and
+        /// whether its Atmos objects made it — the one place a TrueHD
+        /// track's "not preserved" shows in a field log.
+        public var audioTracks: [AudioTrack]? = nil
         public var dolbyVisionConversion: DolbyVisionConversion?
         public var retention: Retention
         /// The remux's terminal error, classified, once it died.
@@ -344,6 +348,14 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var encodes: Bool
             /// `eager`, `lazy` or `omitted`.
             public var production: String
+        }
+
+        public struct AudioTrack: Sendable, Equatable, Codable {
+            public var streamIndex: Int
+            /// `AudioDelivery`'s case name.
+            public var delivery: String
+            /// `ObjectAudioDelivery`'s case name.
+            public var objectAudio: String
         }
 
         public struct ObjectAudio: Sendable, Equatable, Codable {

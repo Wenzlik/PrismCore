@@ -63,36 +63,6 @@ struct TrueHDAtmosTests {
         #expect(TrueHDMajorSync.carriesObjectAudio(in: []) == nil)
     }
 
-    @Test("The bridge reads the major sync of what it is fed and reports it once")
-    func bridgeReportsSourceAtmos() throws {
-        guard avcodec_find_decoder(AV_CODEC_ID_TRUEHD) != nil else { return }
-        let par = avcodec_parameters_alloc()!
-        defer { var par: UnsafeMutablePointer<AVCodecParameters>? = par; avcodec_parameters_free(&par) }
-        par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
-        par.pointee.codec_id = AV_CODEC_ID_TRUEHD
-        par.pointee.sample_rate = 48_000
-        av_channel_layout_default(&par.pointee.ch_layout, 8)
-
-        let bridge = try AudioBridge(
-            codecpar: par, timeBase: AVRational(num: 1, den: 48_000), globalHeader: true
-        )
-        defer { bridge.close() }
-        var reports: [Bool] = []
-        bridge.onSourceObjectAudio = { reports.append($0) }
-
-        for bytes in [Self.plainUnit, Self.restartUnit(substreams: 4, substreamInfo: 0xBC), Self.restartUnit()] {
-            let packet = av_packet_alloc()!
-            defer { var packet: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&packet) }
-            av_new_packet(packet, Int32(bytes.count))
-            bytes.withUnsafeBytes { packet.pointee.data.update(from: $0.bindMemory(to: UInt8.self).baseAddress!, count: bytes.count) }
-            packet.pointee.pts = 0
-            // The units are not decodable audio (the checksum is not real), so
-            // the decoder may refuse them; the read happens before it does.
-            try? bridge.feed(packet) { _ in }
-        }
-        #expect(reports == [true])
-    }
-
     // MARK: - What a track reports
 
     @Test("objectAudio: preserved only when the bits are copied, not preserved when bridged, none without objects")
@@ -362,14 +332,79 @@ struct TrueHDAtmosSessionTests {
                 "\(report.playlists)")
     }
 
+    @Test("A TrueHD Atmos alternate nobody selected is read off the bitstream before any fetch")
+    func lazyAtmosAlternateIsReported() async throws {
+        // h264_truehd_14s.mkv with its stereo `ces` track's major syncs
+        // rewritten to declare the 16-channel presentation (four substreams,
+        // top bit of substream_info), checksums recomputed so the parser
+        // keeps the units. FFmpeg's TrueHD encoder cannot make Atmos, hence
+        // the patch. That track is a lazy rendition: it is never decoded, and
+        // its rendition never sees a packet, unless someone selects it — the
+        // answer has to come from the read loop.
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("prismcore-atmos-\(UUID().uuidString).mkv")
+        try Data(Self.declaringAtmos(onStereoTrackOf: try Data(contentsOf: try fixture("h264_truehd_14s.mkv"))))
+            .write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let session = try PrismCoreSession(url: source)
+        _ = try await session.start()
+        defer { Task { await session.stop() } }
+        #expect(await session.audioRenditionProductions.map(\.production) == [.eager, .lazy])
+
+        let store = await session.remuxer.audioDeliveryStore
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while store.objectAudioEvidence(index: 2) == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(store.objectAudioEvidence(index: 2) == true, "the lazy track's major sync was never read")
+        #expect(store.objectAudioEvidence(index: 1) == false)
+        #expect(session.audioTrackDeliveries.map(\.objectAudio) == [.none, .notPreserved])
+        #expect(await session.diagnosticReport().runtime?.audioTracks?.last?.objectAudio == "notPreserved")
+        let work = await session.workDirectory
+        #expect(!FileManager.default.fileExists(atPath: work.appendingPathComponent("audio1/init.mp4").path),
+                "the lazy rendition was produced, so this proves nothing about the read loop")
+    }
+
+    /// Rewrites every major sync with ONE substream (the fixture's stereo
+    /// track) to four substreams with the
+    /// Atmos bit, and re-signs it — CRC-16, polynomial 0x2D, over the header
+    /// minus its last four bytes, byte-swapped the way libavutil keeps a
+    /// non-reflected CRC, XORed with the 16-bit word before the checksum.
+    static func declaringAtmos(onStereoTrackOf data: Data) -> [UInt8] {
+        var bytes = [UInt8](data)
+        let header = 28
+        func crc(_ range: Range<Int>) -> UInt16 {
+            var crc: UInt16 = 0
+            for byte in bytes[range] {
+                crc ^= UInt16(byte) << 8
+                for _ in 0..<8 { crc = crc & 0x8000 != 0 ? (crc << 1) ^ 0x2D : crc << 1 }
+            }
+            return crc.byteSwapped
+        }
+        for index in 0..<(bytes.count - header)
+        where bytes[index] == 0xF8 && bytes[index + 1] == 0x72 && bytes[index + 2] == 0x6F
+            && bytes[index + 3] == 0xBA && bytes[index + 8] == 0xB7 && bytes[index + 9] == 0x52
+            && bytes[index + 16] >> 4 == 1 {
+            bytes[index + 16] = 0x40 | (bytes[index + 16] & 0x0F)
+            bytes[index + 17] |= 0x80
+            let word = UInt16(bytes[index + header - 4]) | UInt16(bytes[index + header - 3]) << 8
+            let checksum = crc(index..<(index + header - 4)) ^ word
+            bytes[index + header - 2] = UInt8(checksum & 0xFF)
+            bytes[index + header - 1] = UInt8(checksum >> 8)
+        }
+        return bytes
+    }
+
     @Test("lossless: an 8-channel source keeps all 8; compressed serves at most 6")
     func sevenOneSurvives() async throws {
         guard AudioBridge.targetCodec(for: .lossless) == AV_CODEC_ID_FLAC else { return }
         // h264_pcm71_1s.mkv: 1 s of testsrc2 (320x180, 24 fps, -g 24) and
         // 16-bit PCM, eight tones (200…800 Hz, 50 Hz on the LFE), made with
         // system ffmpeg:
-        //   eight `sine=f=…:d=1` inputs → join=inputs=8:channel_layout=7.1
-        //   -c:v libx264 -crf 35 -c:a pcm_s16le -metadata:s:a:0 language=eng
+        //   eight `sine=f=…:d=1` inputs → amerge=inputs=8,aformat=channel_layouts=7.1
+        //   -c:v libx264 -crf 35 -g 24 -c:a pcm_s16le -metadata:s:a:0 language=eng
+        // (channel N carries tone N: FL 200, FR 300, FC 400, LFE 50, BL 500,
+        // BR 600, SL 700, SR 800 Hz)
         // Matroska keeps the channel count, not the layout, so this also
         // pins an unspecified 8-channel layout landing on 7.1.
         for (format, expectChannels) in [(BridgedAudioFormat.lossless, "8"), (.compressed, "6")] {
@@ -423,6 +458,81 @@ struct TrueHDAtmosSessionTests {
         #expect(found.format == kAudioFormatFLAC)
         #expect(found.channels == 8)
         player.pause()
+    }
+
+    @Test("Apple's own FLAC decoder puts every 7.1 channel of the served rendition where the source had it")
+    func appleDecoderKeepsChannelOrder() async throws {
+        guard AudioBridge.targetCodec(for: .lossless) == AV_CODEC_ID_FLAC else { return }
+        // FLAC's 8-channel order (RFC 9639 §9.1.3: FL FR FC LFE BL BR SL SR)
+        // is FFmpeg's 7.1, so the bridge maps nothing — but an FFmpeg round
+        // trip cannot tell a swapped side/back pair from a right one. Apple's
+        // decoder can: each channel is a different tone, and each output
+        // channel's CoreAudio label must carry the tone the source put there.
+        let session = try PrismCoreSession(url: try fixture("h264_pcm71_1s.mkv"), bridgedAudio: .lossless)
+        let base = try await session.start().deletingLastPathComponent()
+        let (initData, _) = try await URLSession.uncached.data(from: base.appendingPathComponent("audio0/init.mp4"))
+        let (segment, _) = try await URLSession.uncached.data(from: base.appendingPathComponent("audio0/seg00000.m4s"))
+        await session.stop()
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("prismcore-flac71-\(UUID().uuidString).mp4")
+        try (initData + segment).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        let asset = AVURLAsset(url: file)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false, AVLinearPCMIsBigEndianKey: false,
+        ])
+        reader.add(output)
+        #expect(reader.startReading())
+        var samples: [Float] = []
+        var tag: AudioChannelLayoutTag?
+        var rate = 0.0
+        while let buffer = output.copyNextSampleBuffer() {
+            let description = try #require(CMSampleBufferGetFormatDescription(buffer))
+            var size = 0
+            tag = tag ?? CMAudioFormatDescriptionGetChannelLayout(description, sizeOut: &size)?.pointee.mChannelLayoutTag
+            rate = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee.mSampleRate ?? rate
+            let block = try #require(CMSampleBufferGetDataBuffer(buffer))
+            var length = 0
+            var pointer: UnsafeMutablePointer<CChar>?
+            CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &pointer)
+            pointer?.withMemoryRebound(to: Float.self, capacity: length / 4) {
+                samples += UnsafeBufferPointer(start: $0, count: length / 4)
+            }
+        }
+        var layoutTag = try #require(tag, "the decoded audio carries no channel layout")
+        var size: UInt32 = 0
+        AudioFormatGetPropertyInfo(kAudioFormatProperty_ChannelLayoutForTag, 4, &layoutTag, &size)
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: 8)
+        defer { raw.deallocate() }
+        AudioFormatGetProperty(kAudioFormatProperty_ChannelLayoutForTag, 4, &layoutTag, &size, raw)
+        let layout = raw.assumingMemoryBound(to: AudioChannelLayout.self)
+        let labels = withUnsafePointer(to: &layout.pointee.mChannelDescriptions) {
+            UnsafeBufferPointer(start: $0, count: Int(layout.pointee.mNumberChannelDescriptions)).map(\.mChannelLabel)
+        }
+        #expect(labels.count == 8, "tag \(String(layoutTag, radix: 16))")
+
+        // In a 7.1 layout CoreAudio's Ls/Rs are the side pair, Rls/Rrs the back.
+        let tone: [AudioChannelLabel: Double] = [
+            kAudioChannelLabel_Left: 200, kAudioChannelLabel_Right: 300, kAudioChannelLabel_Center: 400,
+            kAudioChannelLabel_LFEScreen: 50,
+            kAudioChannelLabel_RearSurroundLeft: 500, kAudioChannelLabel_RearSurroundRight: 600,
+            kAudioChannelLabel_LeftSurround: 700, kAudioChannelLabel_RightSurround: 800,
+            kAudioChannelLabel_LeftSurroundDirect: 700, kAudioChannelLabel_RightSurroundDirect: 800,
+        ]
+        let frames = samples.count / 8
+        try #require(frames > 4_096 && rate > 0)
+        for (channel, label) in labels.enumerated() {
+            var crossings = 0
+            for index in 1..<frames where (samples[(index - 1) * 8 + channel] < 0) != (samples[index * 8 + channel] < 0) {
+                crossings += 1
+            }
+            let hertz = Double(crossings) / 2 / (Double(frames) / rate)
+            let expected = try #require(tone[label], "unexpected label \(label) at \(channel)")
+            #expect(abs(hertz - expected) < 15, "channel \(channel) (label \(label)): \(hertz) Hz, expected \(expected)")
+        }
     }
 
     @Test("The muxed fallback goes back to compressed")

@@ -48,7 +48,8 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 
     /// Evidence first — the bitstream (`ObjectAudioFinding`, the TrueHD major
     /// sync) — and only then the container's claim, which is silent more
-    /// often than it is wrong.
+    /// often than it is wrong. DTS:X has no bitstream reader yet, so for it
+    /// the claim is all there is.
     init(sourceCarriesObjects: Bool, delivery: AudioDelivery) {
         guard sourceCarriesObjects else { self = .none; return }
         self = delivery == .streamCopy ? .preserved : .notPreserved
@@ -63,8 +64,9 @@ public enum BridgedAudioFormat: String, Sendable, Equatable {
     /// PCM still gets 5.1 as Dolby Digital Plus.
     case compressed
     /// FLAC with the source's own channels, up to 7.1, at up to 24 bits — a
-    /// TrueHD or DTS-HD MA track arrives bit-exact, its full 7.1 bed instead
-    /// of a lossy 5.1 fold-down. AVPlayer hands it to the system as
+    /// TrueHD or DTS-HD MA track arrives without loss when its layout is one
+    /// FLAC carries (stereo, 5.1, 7.1; another is remixed onto the nearest),
+    /// its full 7.1 bed instead of a lossy 5.1 fold-down. AVPlayer hands it to the system as
     /// multichannel PCM, so it suits a route that takes 8 channels (an Apple
     /// TV on HDMI: `AVAudioSession.maximumOutputNumberOfChannels >= 8`);
     /// on a stereo route it is downmixed by the system instead. Falls back to
@@ -123,6 +125,11 @@ final class AudioDeliveryStore: @unchecked Sendable {
 
     func noteSourceObjectAudio(index: Int, present: Bool) {
         lock.withLock { objectAudioEvidence[index] = present }
+    }
+
+    /// What a track's bitstream said, `nil` while it has not answered.
+    func objectAudioEvidence(index: Int) -> Bool? {
+        lock.withLock { objectAudioEvidence[index] }
     }
 }
 

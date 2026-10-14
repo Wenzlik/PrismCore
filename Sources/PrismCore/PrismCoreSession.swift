@@ -386,7 +386,9 @@ public actor PrismCoreSession {
     /// startup-cost benchmark can watch artifacts appear as they land.
     let workDirectory: URL
     private let server: LoopbackHTTPServer
-    private let remuxer: HLSRemuxer
+    /// Internal for the tests that need the bitstream's answer apart from
+    /// the container's claim (`AudioDeliveryStore.objectAudioEvidence`).
+    let remuxer: HLSRemuxer
     /// Internal for the tests that prove a cache read never touches it.
     nonisolated let demand: DemandCoordinator
     /// The producer's per-write broadcast: what `start()` sleeps on until
@@ -695,7 +697,8 @@ public actor PrismCoreSession {
     ///   is EAC3 at 128 kbps per channel, at most 5.1 — what every HDMI sink
     ///   takes as a bitstream. `.lossless` is FLAC with the source's own
     ///   channels up to 7.1, at up to 24 bits: a TrueHD track arrives as its
-    ///   whole 7.1 presentation, bit-exact, instead of a lossy 5.1 fold-down.
+    ///   whole 7.1 presentation, without loss, instead of a lossy 5.1
+    ///   fold-down.
     ///   Neither keeps Atmos objects — nothing public can (see
     ///   `ObjectAudioDelivery`); `.lossless` keeps everything else. Choose it
     ///   for a route that takes 8 channels
@@ -1399,6 +1402,10 @@ public actor PrismCoreSession {
                     .init(streamIndex: $0.streamIndex, complexityIndex: $0.complexityIndex,
                           claimedByMetadata: $0.claimedByMetadata, isObjectAudio: $0.isObjectAudio,
                           wasMissedByMetadata: $0.wasMissedByMetadata)
+                },
+                audioTracks: audioTrackDeliveries.map {
+                    .init(streamIndex: $0.streamIndex, delivery: $0.delivery.rawValue,
+                          objectAudio: $0.objectAudio.rawValue)
                 },
                 dolbyVisionConversion: dolbyVisionConversion.map {
                     .init(convertedRPUs: $0.convertedRPUs, failedRPUs: $0.failedRPUs,

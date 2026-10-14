@@ -29,7 +29,8 @@ import Libswresample
 /// A host whose route does take 8 channels can opt into the lossless
 /// alternative anyway (`BridgedAudioFormat.lossless`): FLAC at the source's
 /// channel count and 24 bits, which for TrueHD is its whole 7.1 presentation
-/// bit-exact — the most of a TrueHD Atmos track anything public can deliver.
+/// without loss (FLAC's 8-channel order is FFmpeg's 7.1, so nothing is
+/// remixed) — the most of a TrueHD Atmos track anything public can deliver.
 ///
 /// Shape of the pipeline, and why each stage exists:
 ///
@@ -62,15 +63,6 @@ import Libswresample
 final class AudioBridge {
     private(set) var progress = AudioBridgeProgress()
     var onProgress: ((AudioBridgeProgress) -> Void)?
-    /// What a TrueHD source's major sync said about Atmos, reported once
-    /// (`TrueHDMajorSync`). Here because every bridged packet passes through
-    /// `feed`, whichever output shape the remux serves.
-    var onSourceObjectAudio: ((Bool) -> Void)?
-    /// Packets the major-sync read may still look at; 0 once answered, and
-    /// from the start for any codec but TrueHD. A restart unit comes at least
-    /// every 128 access units, so the budget is a backstop for a stream the
-    /// read cannot follow, not a wait.
-    private var objectAudioSniffBudget = 0
 
     enum Failure: Error, CustomStringConvertible {
         /// FFmpeg was built without the `eac3` encoder (stock MPVKit). Nothing
@@ -262,7 +254,6 @@ final class AudioBridge {
 
         // Decoder.
         let codecID = codecpar.pointee.codec_id
-        if codecID == AV_CODEC_ID_TRUEHD { objectAudioSniffBudget = 256 }
         guard let decoder = avcodec_find_decoder(codecID) else {
             let name = avcodec_get_name(codecID).map { String(cString: $0) } ?? "unknown"
             throw Failure.decoderUnavailable(name)
@@ -350,7 +341,11 @@ final class AudioBridge {
         // EAC3 uses for the same layouts, comfortably transparent for a bed mix
         // and well inside what every HDMI sink accepts. A lossless target
         // ignores it.
-        encCtx.pointee.bit_rate = Int64(channels) * 128_000
+        // A lossless encoder ignores it, and a number there would only make
+        // `routeDescription` claim a rate the stream does not have.
+        if avcodec_descriptor_get(targetCodec).map({ $0.pointee.props & AV_CODEC_PROP_LOSSLESS == 0 }) ?? true {
+            encCtx.pointee.bit_rate = Int64(channels) * 128_000
+        }
         // Encoder time base is samples: the only tick that can't drift against
         // the sample count the FIFO hands out.
         encCtx.pointee.time_base = AVRational(num: 1, den: encCtx.pointee.sample_rate)
@@ -539,7 +534,8 @@ final class AudioBridge {
         let boost = boostFilter.map { " + dialogue boost (\($0.level.rawValue))" } ?? ""
         return "\(from) \(Self.describe(decoderCtx.pointee.ch_layout))"
             + " → \(to) \(Self.describe(encoderCtx.pointee.ch_layout))"
-            + " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" + boost
+            + (encoderCtx.pointee.bit_rate > 0 ? " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" : " lossless")
+            + boost
     }
 
     /// Fill an output stream's `codecpar` from the encoder — the parameters the
@@ -561,15 +557,6 @@ final class AudioBridge {
     /// input and output framing don't line up).
     func feed(_ packet: UnsafeMutablePointer<AVPacket>, emit: Emit) throws {
         guard !drained, let decoderCtx else { return }
-        if objectAudioSniffBudget > 0, let data = packet.pointee.data, packet.pointee.size > 0 {
-            objectAudioSniffBudget -= 1
-            if let atmos = TrueHDMajorSync.carriesObjectAudio(
-                in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
-            ) {
-                objectAudioSniffBudget = 0
-                onSourceObjectAudio?(atmos)
-            }
-        }
         progress.inputPackets += 1
         progress.encoderFrameSamples = Int(encoderCtx?.pointee.frame_size ?? 0)
         defer { onProgress?(progress) }
@@ -828,6 +815,11 @@ final class AudioBridge {
             if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
             try FFmpegError.check(result, "avcodec_receive_packet(encoder)")
             defer { av_packet_unref(packet) }
+            // flac's flush hands back an empty packet whose only content is
+            // the final STREAMINFO as side data. The init segment already has
+            // the header; an empty sample would only be bumped onto the
+            // timeline by the sanitizer and land in the last fragment.
+            guard packet.pointee.size > 0 else { continue }
             // EAC3 has no reordering, so dts follows pts; being explicit keeps
             // the muxer from inventing one.
             if packet.pointee.dts == swift_AV_NOPTS_VALUE() {

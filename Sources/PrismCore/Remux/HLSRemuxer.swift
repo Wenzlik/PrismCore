@@ -498,6 +498,15 @@ final class HLSRemuxer: @unchecked Sendable {
         }
     }
 
+    /// TrueHD streams whose major sync has not answered yet, with the packets
+    /// the read may still spend on each (`TrueHDMajorSync`). Read in the copy
+    /// loop, ahead of any rendition, because the answer is wanted for every
+    /// track at `start()` — a lazy or omitted rendition never sees a packet,
+    /// and a bridge is rebuilt after EOF. A restart unit comes at least every
+    /// 128 access units, so the budget is a backstop for a stream the read
+    /// cannot follow, not a wait. Producer thread only.
+    private var trueHDAtmosSniff: [Int: Int] = [:]
+
     func recordObjectAudio(_ finding: ObjectAudioFinding) {
         objectAudioLock.withLock { storedObjectAudio[finding.streamIndex] = finding }
         audioDeliveryStore.noteSourceObjectAudio(index: finding.streamIndex, present: finding.isObjectAudio)
@@ -878,6 +887,9 @@ final class HLSRemuxer: @unchecked Sendable {
         audioDeliveryStore.prepare(
             indexes: info.audioTracks.map(\.streamIndex),
             objectAudioClaims: Set(info.audioTracks.filter(\.isObjectAudio).map(\.streamIndex))
+        )
+        trueHDAtmosSniff = Dictionary(
+            uniqueKeysWithValues: info.audioTracks.filter { $0.codecName == "truehd" }.map { ($0.streamIndex, 256) }
         )
         // Chapters can't ride the served HLS (the format has no way to carry
         // them), so the session surfaces them as API instead — publish before
@@ -1274,9 +1286,6 @@ final class HLSRemuxer: @unchecked Sendable {
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
                 }
-                rendition.onSourceObjectAudio = { [audioDeliveryStore, index = Int(route.index)] present in
-                    audioDeliveryStore.noteSourceObjectAudio(index: index, present: present)
-                }
                 rendition.onBridgeProgress = { [audioDeliveryStore, index = Int(route.index)] progress in
                     audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
                 }
@@ -1465,9 +1474,6 @@ final class HLSRemuxer: @unchecked Sendable {
                     muxedBridge = bridge
                     bridge.onProgress = { [audioDeliveryStore, index = Int(audio.index)] progress in
                         audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
-                    }
-                    bridge.onSourceObjectAudio = { [audioDeliveryStore, index = Int(audio.index)] present in
-                        audioDeliveryStore.noteSourceObjectAudio(index: index, present: present)
                     }
                     audioDeliveryStore.update(index: Int(audio.index), delivery: .bridged)
                     plan.append(.init(inputIndex: audio.index) { outStream in
@@ -2140,6 +2146,18 @@ final class HLSRemuxer: @unchecked Sendable {
                 let streamIndex = Int(packet.pointee.stream_index)
                 let inStream = input.pointee.streams[streamIndex]!
                 let sourceTimeBase = inStream.pointee.time_base
+
+                if let budget = trueHDAtmosSniff[streamIndex], let data = packet.pointee.data,
+                   packet.pointee.size > 0 {
+                    if let atmos = TrueHDMajorSync.carriesObjectAudio(
+                        in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                    ) {
+                        trueHDAtmosSniff[streamIndex] = nil
+                        audioDeliveryStore.noteSourceObjectAudio(index: streamIndex, present: atmos)
+                    } else {
+                        trueHDAtmosSniff[streamIndex] = budget > 1 ? budget - 1 : nil
+                    }
+                }
 
                 if Int32(streamIndex) == videoIndex {
                     // Cut BEFORE writing a boundary keyframe, so the keyframe opens

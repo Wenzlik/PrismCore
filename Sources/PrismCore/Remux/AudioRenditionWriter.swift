@@ -45,9 +45,6 @@ final class AudioRenditionWriter {
     let playlist: MediaPlaylistWriter
     private var bridge: AudioBridge?
     var onBridgeProgress: ((AudioBridgeProgress) -> Void)?
-    /// Relayed from the bridge (`AudioBridge.onSourceObjectAudio`). Set by
-    /// the remuxer.
-    var onSourceObjectAudio: ((Bool) -> Void)?
     /// The encoder a `.bridge` route asks for. A boost rendition keeps the
     /// compressed default: it is a derived extra whose point is
     /// intelligibility, not fidelity.
@@ -203,7 +200,6 @@ final class AudioRenditionWriter {
                 targetCodec: bridgeTarget
             )
             bridge?.onProgress = onBridgeProgress
-            bridge?.onSourceObjectAudio = onSourceObjectAudio
         }
         try openMuxer(input: input, restart: restart)
     }

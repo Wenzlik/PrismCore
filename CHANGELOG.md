@@ -13,24 +13,31 @@ source-compatible.)
 - **`bridgedAudio: .lossless`**, a new session option, also in `Options` and
   carried by clones. TrueHD, DTS-HD MA, PCM and the other bridged codecs are
   encoded as **FLAC with the source's own channels up to 7.1, at 24 bits**,
-  instead of EAC3 5.1. A TrueHD track arrives as its whole 7.1 presentation,
-  bit-exact. That is the most of a TrueHD Atmos track anything public can
+  instead of EAC3 5.1. A TrueHD track arrives as its whole 7.1 presentation
+  without loss whenever its layout is one FLAC carries (stereo, 5.1, 7.1;
+  FLAC's 8-channel order is FFmpeg's 7.1, so nothing is remixed). That is the most of a TrueHD Atmos track anything public can
   deliver, because the objects are mixed into that presentation. The default
   stays `.compressed` (EAC3 5.1, AAC where the build has no `eac3` encoder).
   The option suits a route that takes 8 channels. Dialogue-boost renditions
   stay EAC3, and `makeMuxedFallbackSession()` goes back to `.compressed`.
   `prismcore-cli` takes it as `--bridged-audio compressed|lossless`, and the
-  diagnostic report names it. Verified: bit-exact 7.1 round trip at 24 bits,
-  every served segment decodes, macOS `AVPlayer` reads the rendition as
-  8-channel FLAC, and in the tvOS 26.5 simulator it reaches `readyToPlay` and
-  plays. Not yet verified on an Apple TV feeding an AVR.
+  diagnostic report names it. Verified: a 24-bit PCM 7.1 round trip through
+  the bridge is bit-exact (FFmpeg's TrueHD encoder cannot make a 7.1
+  fixture, so TrueHD itself is covered at 5.1). Every served segment
+  decodes. Apple's own FLAC decoder puts each of the 8 tones on the
+  CoreAudio label the source gave it. macOS `AVPlayer` reads the rendition
+  as 8-channel FLAC, and in the tvOS 26.5 simulator it reaches
+  `readyToPlay` and plays. Not yet verified on an Apple TV feeding an AVR.
 - **`AudioTrackDelivery.objectAudio`** (`ObjectAudioDelivery`: `.preserved`,
   `.notPreserved`, `.none`) says per track whether Dolby Atmos objects reach
   the player. A host can now label a bridged TrueHD Atmos track "Atmos not
   preserved" instead of inferring it from the codec. TrueHD Atmos is read off
-  the stream's major sync (`TrueHDMajorSync`, with a new `truehd-major-sync`
-  fuzz target), not off `AV_PROFILE_TRUEHD_ATMOS`, which is set only when the
-  probe happened to decode a frame.
+  the stream's major sync for every TrueHD track, selected or not
+  (`TrueHDMajorSync`, with a new `truehd-major-sync` fuzz target). It no longer
+  depends on `AV_PROFILE_TRUEHD_ATMOS`, which is set only when the probe
+  happened to decode a frame. DTS:X still relies on that kind of claim. The
+  diagnostic report lists each track's delivery and `objectAudio`
+  (`runtime.audioTracks`).
 
 ### Changed
 
