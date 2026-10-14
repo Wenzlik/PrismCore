@@ -311,11 +311,15 @@ final class DemandCoordinator: @unchecked Sendable {
             // wait timed out, though production from N reaches N+1 anyway.
             let headed = requestedAnchor ?? reanchorInFlight ?? producingIndex
             let continuous = previousDemandedIndex < 0 || abs(index - previousDemandedIndex) <= 1
-            // A forced join waiting to be taken is held even against a jump
-            // inside the window: the rendition re-armed by its fetch of N
-            // needs N whole, and production from N gets to the jump soon.
-            // A request outside the window is a seek elsewhere and wins.
-            if !force, continuous || anchorIsForced, headed >= 0,
+            // A forced join is held even against a jump inside the window,
+            // waiting to be taken or taken with its first segment not landed:
+            // the rendition re-armed by its fetch of N needs N whole, and
+            // production from N gets to the jump soon. (Taken, it used to lose
+            // that hold — a cached old-track fetch of N-1 between N and N+1
+            // made N+1 look like a seek, and N's wait timed out.) A request
+            // outside the window is a seek elsewhere and wins.
+            let headedIsForced = requestedAnchor != nil ? anchorIsForced : inFlightIsForced
+            if !force, continuous || headedIsForced, headed >= 0,
                index >= headed, index <= headed + Self.forwardWaitWindow {
                 return
             }

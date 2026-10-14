@@ -410,6 +410,35 @@ struct SuspendedRenditionTests {
         _ = await cancel.value
     }
 
+    @Test("A taken forced join keeps its index against read-ahead made discontinuous by an old-track fetch")
+    func takenJoinSurvivesInterleavedOldTrackFetch() async throws {
+        let (root, _, coordinator, provider) = try joiningRendition("PrismCoreTakenJoin", timeout: .seconds(2))
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard case .pending(let first) = await provider.data(forPath: Self.segmentPath(20)) else {
+            Issue.record("miss of 20 must be pending"); return
+        }
+        let taken = coordinator.takeAnchorRequestDetailed()
+        #expect(taken?.index == 20 && taken?.forced == true)
+        // The switch-back overlaps the old track: its cached 19 lands in the
+        // fetch history between 20 and the resumed track's 21.
+        coordinator.noteFetch(of: 19)
+        guard case .pending(let second) = await provider.data(forPath: Self.segmentPath(21)) else {
+            Issue.record("miss of 21 must be pending"); return
+        }
+        let serveFirst = Task { await first.resolve() }
+        let serveSecond = Task { await second.resolve() }
+        try await Task.sleep(for: DemandCoordinator.anchorDebounce * 2)
+        var position = 20
+        while let request = coordinator.takeAnchorRequestDetailed() { position = request.index }
+        #expect(position == 20, "read-ahead replaced the join production had taken")
+        for index in position...21 {
+            coordinator.setProducing(index: index)
+            try Data("moof".utf8).write(to: root.appendingPathComponent(Self.segmentPath(index)))
+        }
+        guard case .data = await serveFirst.value else { Issue.record("the wait on 20 timed out"); return }
+        guard case .data = await serveSecond.value else { Issue.record("the wait on 21 timed out"); return }
+    }
+
     @Test("A seek elsewhere still wins over a joining rendition's pending wait")
     func seekWinsOverPendingJoinWait() async throws {
         let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreSeekWins", timeout: .seconds(2))
@@ -576,13 +605,20 @@ struct SuspendedRenditionTests {
         // The switch back, raced by the old track's requests still in
         // flight — the way AVPlayer overlaps connections at a switch.
         let started = ContinuousClock.now
-        // The resumed track's own read-ahead is pipelined too: both of its
-        // missing segments are asked for at once, the later one able to
-        // reach the coordinator before the producer takes the first.
+        // The resumed track's own read-ahead is pipelined too: the later of
+        // its two missing segments is asked for while the first still
+        // waits, able to reach the coordinator before the producer takes
+        // the first. Issued in that order — two bare `async let`s could
+        // reach the server N+1 first, which joins at N+1 (nothing is
+        // waiting below it yet) and, on a fixture this small, produces and
+        // serves N+1 off that join before N is even asked for.
         async let old1 = fetch(segment("audio1", back))
         async let old2 = fetch(segment("audio1", back + 1))
         async let resumed = fetch(segment("audio0", back))
-        async let ahead = fetch(segment("audio0", back + 1))
+        async let ahead = { () async throws -> Data in
+            try await Task.sleep(for: .milliseconds(20))
+            return try await fetch(segment("audio0", back + 1))
+        }()
         let (audio, next, _, _) = try await (resumed, ahead, old1, old2)
         #expect(ContinuousClock.now - started < .seconds(8), "a pending wait ran out its window")
 
