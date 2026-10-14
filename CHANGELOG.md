@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.6.0] — 2026-10-14
+
+Lossless bridged audio (FLAC up to 7.1, 24-bit) as an opt-in, and a per-track
+report of whether Dolby Atmos objects reach the player. The default bridge is
+unchanged.
+
 ### Added
 
 - **`bridgedAudio: .lossless`**, a new session option, also in `Options` and
@@ -3199,7 +3205,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.6.0...HEAD
+[3.6.0]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...3.6.0
 [3.5.5]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...3.5.5
 [3.5.4]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...3.5.4
 [3.5.3]: https://github.com/Wenzlik/PrismCore/compare/3.5.2...3.5.3
