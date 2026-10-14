@@ -53,11 +53,19 @@ struct LazyDialogueBoostTests {
         #expect(request?.forced == true)
         #expect(coordinator.takeAnchorRequestDetailed() == nil)
         // A later unforced request keeps an earlier force: the arming still
-        // needs the rebuild wherever the playhead moved to.
+        // needs the rebuild wherever the playhead moved to. Read-ahead right
+        // behind the forced index does not move it (the producer reaches it
+        // from there; moving would strand the forced segment's wait) — a
+        // seek past the window does.
         coordinator.requestProduction(of: 5, force: true)
         coordinator.requestProduction(of: 7)
+        let kept = coordinator.takeAnchorRequestDetailed()
+        #expect(kept?.index == 5)
+        #expect(kept?.forced == true)
+        coordinator.requestProduction(of: 5, force: true)
+        coordinator.requestProduction(of: 0)
         let combined = coordinator.takeAnchorRequestDetailed()
-        #expect(combined?.index == 7)
+        #expect(combined?.index == 0)
         #expect(combined?.forced == true)
         // The plain accessor still consumes both.
         coordinator.requestProduction(of: 0, force: true)

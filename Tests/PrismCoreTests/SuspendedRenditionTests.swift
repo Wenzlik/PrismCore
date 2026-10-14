@@ -363,11 +363,14 @@ struct SuspendedRenditionTests {
         // The switch back, raced by the old track's requests still in
         // flight — the way AVPlayer overlaps connections at a switch.
         let started = ContinuousClock.now
+        // The resumed track's own read-ahead is pipelined too: both of its
+        // missing segments are asked for at once, the later one able to
+        // reach the coordinator before the producer takes the first.
         async let old1 = fetch(segment("audio1", back))
         async let old2 = fetch(segment("audio1", back + 1))
         async let resumed = fetch(segment("audio0", back))
-        let (audio, _, _) = try await (resumed, old1, old2)
-        let next = try await fetch(segment("audio0", back + 1))
+        async let ahead = fetch(segment("audio0", back + 1))
+        let (audio, next, _, _) = try await (resumed, ahead, old1, old2)
         #expect(ContinuousClock.now - started < .seconds(8), "a pending wait ran out its window")
 
         let planned = durations.prefix(back).reduce(0, +)

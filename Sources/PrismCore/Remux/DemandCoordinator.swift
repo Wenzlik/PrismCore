@@ -303,6 +303,17 @@ final class DemandCoordinator: @unchecked Sendable {
             if !force, continuous, current >= 0, index >= current, index <= current + Self.forwardWaitWindow {
                 return
             }
+            // A forced join the producer has not taken yet keeps its index
+            // against the read-ahead right behind it: a rendition re-armed by
+            // its fetch of N (a switch back to a suspended track, whose init
+            // the player already holds) may see N+1 asked for before the
+            // producer wakes, and moving the anchor there would leave N's
+            // wait to time out — production from N reaches N+1 anyway. A
+            // request further on is a seek and still wins.
+            if !force, anchorIsForced, let pending = requestedAnchor,
+               index > pending, index - pending <= Self.forwardWaitWindow {
+                return
+            }
             // Last request wins: AVPlayer's newest fetch is where the
             // playhead actually is.
             requestedAnchor = index
