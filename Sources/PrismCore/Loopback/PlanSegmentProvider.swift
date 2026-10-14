@@ -45,6 +45,15 @@ struct PlanSegmentProvider: SegmentProvider {
     /// of an armed or eager rendition returns `false` and changes nothing.
     var audioDemand: (@Sendable (String) -> Bool)?
 
+    /// Asked again on every wake of a pending wait under `audioN/`: is the
+    /// rendition being waited for dormant — suspended again after this
+    /// fetch armed it (`HLSRemuxer.audioSuspendable`)? `true` re-armed it,
+    /// and production is re-anchored once more. Without this, a suspension
+    /// that lands between the arming fetch and the re-anchor leaves the wait
+    /// watching a rendition nobody produces until its window runs out.
+    /// Unlike `audioDemand`, it is not a fetch and counts as none.
+    var audioRearm: (@Sendable (String) -> Bool)?
+
     /// Consulted before every media-segment disk read: is this index's file
     /// stale output — muxed with an audio offset the producer has since
     /// abandoned?
@@ -223,6 +232,7 @@ struct PlanSegmentProvider: SegmentProvider {
         let events = self.events
         let stallReport = self.stallReport
         let stallThreshold = producerStallThreshold / .seconds(1)
+        let audioRearm = path.hasPrefix("audio") ? self.audioRearm : nil
         return PendingResult {
             defer {
                 if let servingIndex { coordinator.endServing(index: servingIndex) }
@@ -247,6 +257,10 @@ struct PlanSegmentProvider: SegmentProvider {
                 // without this re-check the loop would sleep out the whole
                 // window for a file production has said is not coming.
                 if coordinator.isUnproducible(path: path) { return onTimeout }
+                if audioRearm?(path) == true,
+                   let anchor = supersededIndex ?? coordinator.armAnchorIndex {
+                    coordinator.requestProduction(of: anchor, force: true)
+                }
                 // Checked on this wait's own wakeups (the backstop poll at
                 // worst), so the watchdog costs nothing while nobody waits and
                 // never touches the producer's or the coordinator's condition.

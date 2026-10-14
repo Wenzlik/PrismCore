@@ -617,6 +617,15 @@ final class HLSRemuxer: @unchecked Sendable {
         }
     }
 
+    /// A pending serve under `audioN/` checking that what it waits for is
+    /// still wanted: re-arms a rendition suspended after the fetch armed it
+    /// (`PlanSegmentProvider.audioRearm`). Not a fetch — the tracker is not
+    /// told. `true` when production must re-anchor for it.
+    func rearmAudio(path: String) -> Bool {
+        guard let directory = path.split(separator: "/").first.map(String.init) else { return false }
+        return renditionsLock.withLock { storedRenditionsByDirectory[directory]?.arm() ?? false }
+    }
+
     /// Suspensions and resumptions of each rendition that can be suspended,
     /// keyed like `AudioRenditionProduction` (stream, boost level), for the
     /// diagnostic report.
@@ -1852,8 +1861,9 @@ final class HLSRemuxer: @unchecked Sendable {
             // and a rendition that drifted into its own cadence would make
             // AVPlayer's switch between them a resync.
             var renditionBytes = 0
+            let superseded = residentSegments.isSuperseded(index: segmentIndex - 1)
             for rendition in renditions {
-                renditionBytes += try rendition.cut(durationSeconds: duration)
+                renditionBytes += try rendition.cut(durationSeconds: duration, superseded: superseded)
                 // The boundary is where a rendition the player left can stop
                 // whole: its last segment is on disk, nothing is half-muxed.
                 rendition.suspendIfUnwanted()
@@ -2428,8 +2438,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     )
                 }
             }
+            let tailSuperseded = tailIndex.map { residentSegments.isSuperseded(index: $0) } ?? false
             for rendition in renditions {
-                try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF)
+                try rendition.finish(durationSeconds: finalDuration, endList: reachedEOF, superseded: tailSuperseded)
             }
             // Only now is the tail's whole cut on disk — the renditions'
             // files are written by `finish` above, after the variant's

@@ -497,8 +497,11 @@ final class AudioRenditionWriter {
     /// Returns the media bytes written for this boundary (0 for an empty or
     /// dormant one) — what retention accounts, without a `stat` per rendition
     /// per cut.
+    ///
+    /// `superseded`: this index's earlier output was muxed with an audio
+    /// offset that is no longer in force (`ResidentSegmentStore`).
     @discardableResult
-    func cut(durationSeconds: Double) throws -> Int {
+    func cut(durationSeconds: Double, superseded: Bool = false) throws -> Int {
         guard isProducing else {
             // Dormant: the boundary still passes. The planned slot keeps its
             // index (the playlist maps it to this time) but is NOT declared
@@ -507,10 +510,10 @@ final class AudioRenditionWriter {
             // would race that fetch's pending wait. In the sequential shape
             // the time folds into the next entry, as for any silent boundary.
             if plannedMode {
-                segmentIndex += 1
-            } else {
-                pendingDuration += durationSeconds
+                defer { segmentIndex += 1 }
+                return dormantSlot(superseded: superseded)
             }
+            pendingDuration += durationSeconds
             return 0
         }
         let (initSegment, media) = try writer.cutSegment()
@@ -552,9 +555,28 @@ final class AudioRenditionWriter {
         return media.count
     }
 
+    /// A dormant rendition's planned slot at a boundary the producer is
+    /// cutting: what a SUSPENDED one produced there before it stopped is
+    /// still on disk. It stays servable and is reported for retention —
+    /// whose per-index record the producer replaces at this cut, so leaving
+    /// it out would drop it from the budget — unless the audio offset has
+    /// changed since: then it goes now, because the cut is about to clear
+    /// the index's superseded mark, and the unlink that would have removed
+    /// it skips an index that is resident again. A stale file served as
+    /// current is the failure a delay control must not have.
+    private func dormantSlot(superseded: Bool) -> Int {
+        let file = directory.appendingPathComponent(String(format: "seg%05d.m4s", segmentIndex))
+        if superseded {
+            try? FileManager.default.removeItem(at: file)
+            return 0
+        }
+        return (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
     /// Final cut: whatever is buffered plus the trailer's tail bytes.
-    func finish(durationSeconds: Double, endList: Bool) throws {
+    func finish(durationSeconds: Double, endList: Bool, superseded: Bool = false) throws {
         guard isProducing else {
+            if plannedMode { _ = dormantSlot(superseded: superseded) }
             // Dormant to the end: an EVENT playlist still gets its ENDLIST so
             // a late selection sees a finished (empty) rendition rather than
             // one that looks live forever; planned playlists were born ended.

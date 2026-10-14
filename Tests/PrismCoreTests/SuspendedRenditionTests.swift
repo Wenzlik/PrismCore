@@ -162,6 +162,19 @@ struct SuspendedRenditionTests {
         try writer.cut(durationSeconds: 2)
         #expect(files(in: directory).contains("seg00003.m4s"), "\(files(in: directory))")
 
+        // Suspended again with seg00003 on disk: a re-anchored pass over that
+        // index keeps the file (and reports it to retention) — unless the
+        // audio offset changed since, when the stale file must go.
+        #expect(writer.requestSuspend())
+        try writer.reanchor(input: context, segmentIndex: 3)
+        #expect(!writer.isProducing)
+        #expect(writer.suspensionCounts == (2, 1))
+        #expect(try writer.cut(durationSeconds: 2) > 0, "retained bytes still count")
+        #expect(files(in: directory).contains("seg00003.m4s"))
+        try writer.reanchor(input: context, segmentIndex: 3)
+        #expect(try writer.cut(durationSeconds: 2, superseded: true) == 0)
+        #expect(!files(in: directory).contains("seg00003.m4s"), "a superseded file of a dormant rendition was kept")
+
         // A stream copy is never suspended, whatever is asked.
         let copy = AudioRenditionWriter(
             route: .init(index: Int32(audioIndex), mode: .streamCopy),
@@ -170,6 +183,42 @@ struct SuspendedRenditionTests {
         #expect(copy.requestSuspend() == false)
         #expect(copy.suspendIfUnwanted() == false)
         writer.close()
+    }
+
+    @Test("A pending audio wait re-arms a rendition suspended after its fetch armed it")
+    func pendingWaitRearms() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreRearm-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("audio0"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<10).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        ))
+        coordinator.setProducing(index: 7)
+        var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+        // The fetch arms (forced re-anchor at 5); the producer takes it.
+        provider.audioDemand = { _ in true }
+        // Then three old-track fetches suspend it again before it opened:
+        // the first look from the wait finds it dormant and re-arms it.
+        let rearms = SuspendLockedBox(0)
+        provider.audioRearm = { _ in rearms.withValue { count in count += 1; return count == 1 } }
+        guard case .pending(let pending) = await provider.data(forPath: "audio0/seg00005.m4s") else {
+            Issue.record("miss must be pending"); return
+        }
+        #expect(coordinator.takeAnchorRequestDetailed()?.forced == true)
+        let serve = Task { await pending.resolve() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        var again: (index: Int, forced: Bool)?
+        while again == nil, ContinuousClock.now < deadline {
+            if let request = coordinator.takeAnchorRequestDetailed() { again = (request.index, request.forced) }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(again?.index == 5 && again?.forced == true, "the wait never re-anchored for its dormant rendition")
+        try Data("moof".utf8).write(to: root.appendingPathComponent("audio0/seg00005.m4s"))
+        guard case .data = await serve.value else { Issue.record("the wait must serve the landed file"); return }
+        #expect(rearms.value >= 1)
     }
 
     // MARK: - A session
@@ -331,4 +380,12 @@ struct SuspendedRenditionTests {
         #expect(seconds == Array((seconds.first ?? 0)...(seconds.last ?? 0)), "\(heard)")
         for click in heard { #expect(abs(click - click.rounded()) < 0.005, "click at \(click) s") }
     }
+}
+
+private final class SuspendLockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+    init(_ value: Value) { storage = value }
+    var value: Value { lock.withLock { storage } }
+    func withValue<R>(_ body: (inout Value) -> R) -> R { lock.withLock { body(&storage) } }
 }
