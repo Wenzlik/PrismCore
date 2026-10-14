@@ -199,8 +199,10 @@ public actor PrismCoreSession {
     /// would move the playhead it schedules production around and stall the
     /// picture the viewer is watching. So `nil` is common and cheap — any
     /// part of the interval not resident (never produced, evicted, a lazy
-    /// rendition nobody selected, or written with an audio offset a re-anchor
-    /// has since replaced), and before `start()` or after `stop()`.
+    /// rendition nobody selected, an encoded rendition — the DEFAULT included
+    /// — after the player switched away from it and it was suspended, or
+    /// written with an audio offset a re-anchor has since replaced), and
+    /// before `start()` or after `stop()`.
     ///
     /// - Parameters:
     ///   - seconds: where the clip starts, on `residentRanges`' source axis.

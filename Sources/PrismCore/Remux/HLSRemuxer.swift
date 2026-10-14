@@ -602,13 +602,19 @@ final class HLSRemuxer: @unchecked Sendable {
     /// directory re-arms it through `arm()`, exactly like a first selection.
     func noteAudioDemand(path: String) -> Bool {
         guard let directory = path.split(separator: "/").first.map(String.init) else { return false }
-        let (rendition, left) = renditionsLock.withLock { () -> (AudioRenditionWriter?, [AudioRenditionWriter]) in
-            guard let rendition = storedRenditionsByDirectory[directory] else { return (nil, []) }
+        // One lock for the verdict, the suspensions and the arm. Connections
+        // run concurrently, and a verdict acted on after the lock is stale:
+        // a switch-back fetch could arm the DEFAULT (or find it still wanted
+        // and skip the re-anchor) and then have an older fetch's suspension
+        // land on top — the demanded segment never produced, the serve
+        // aborted after its pending window. `armLock` nests inside; the
+        // producer never takes this lock while holding it.
+        return renditionsLock.withLock {
+            guard let rendition = storedRenditionsByDirectory[directory] else { return false }
             let left = storedAudioDemand.noteFetch(under: directory, isSegment: path.hasSuffix(".m4s"))
-            return (rendition, left.compactMap { storedRenditionsByDirectory[$0] })
+            for abandoned in left { storedRenditionsByDirectory[abandoned]?.requestSuspend() }
+            return rendition.arm()
         }
-        for abandoned in left { abandoned.requestSuspend() }
-        return rendition?.arm() ?? false
     }
 
     /// Suspensions and resumptions of each rendition that can be suspended,

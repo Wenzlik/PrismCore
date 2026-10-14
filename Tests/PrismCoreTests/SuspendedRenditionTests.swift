@@ -265,4 +265,70 @@ struct SuspendedRenditionTests {
         #expect(await counts() == (1, 1))
         #expect(try await fetch("audio0/init.mp4") == defaultInit, "the init the player holds is never replaced")
     }
+
+    @Test("A switch back mid-film, with the old track's fetch still in flight, is served promptly on the plan")
+    func midFilmSwitchBackUnderConcurrentFetches() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_opus_opus_60s.mkv"))
+        let master = try await session.start()
+        defer { Task { await session.stop() } }
+        let base = master.deletingLastPathComponent()
+        let work = await session.workDirectory
+        @Sendable func fetch(_ path: String) async throws -> Data {
+            let (data, response) = try await URLSession.uncached.data(from: base.appendingPathComponent(path))
+            try #require((response as? HTTPURLResponse)?.statusCode == 200, "\(path)")
+            return data
+        }
+        func segment(_ directory: String, _ index: Int) -> String {
+            (directory.isEmpty ? "" : directory + "/") + String(format: "seg%05d.m4s", index)
+        }
+        func suspended() async -> Int? {
+            await session.diagnosticReport().runtime?.audioRenditionProductions
+                .first { $0.streamIndex == 1 && $0.dialogueBoost == nil }?.suspensions
+        }
+        let variant = try String(contentsOf: work.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        let durations = variant.split(separator: "\n").filter { $0.hasPrefix("#EXTINF:") }
+            .compactMap { Double($0.dropFirst("#EXTINF:".count).split(separator: ",").first ?? "") }
+        try #require(durations.count >= 10)
+        let last = durations.count - 1
+
+        let defaultInit = try await fetch("audio0/init.mp4")
+        _ = try await fetch(segment("audio0", 0))
+        _ = try await fetch("audio1/init.mp4")
+        for index in 1...3 {
+            _ = try await fetch(segment("", index))
+            _ = try await fetch(segment("audio1", index))
+        }
+        let deadline = ContinuousClock.now + .seconds(20)
+        while await suspended() != 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(await suspended() == 1)
+
+        // The first DEFAULT segment the suspension left unmade, mid-film.
+        let audio0 = work.appendingPathComponent("audio0")
+        let back = try #require((4...last).first {
+            !FileManager.default.fileExists(atPath: audio0.appendingPathComponent(String(format: "seg%05d.m4s", $0)).path)
+        })
+        try #require(back < last - 1, "the suspension came too late to leave a mid-film hole")
+
+        // The switch back, raced by the old track's requests still in
+        // flight — the way AVPlayer overlaps connections at a switch.
+        let started = ContinuousClock.now
+        async let old1 = fetch(segment("audio1", back))
+        async let old2 = fetch(segment("audio1", back + 1))
+        async let resumed = fetch(segment("audio0", back))
+        let (audio, _, _) = try await (resumed, old1, old2)
+        let next = try await fetch(segment("audio0", back + 1))
+        #expect(ContinuousClock.now - started < .seconds(8), "a pending wait ran out its window")
+
+        let planned = durations.prefix(back).reduce(0, +)
+        let heard = try ReanchorTimelineTests.clickOnsets(initSegment: defaultInit, media: audio + next)
+        #expect(heard.count >= 6, "\(heard)")
+        if let first = heard.first {
+            #expect(first >= planned - 0.05 && first < planned + 1.05, "first click \(first) s, segment opens at \(planned) s")
+        }
+        let seconds = heard.map { Int($0.rounded()) }
+        #expect(seconds == Array((seconds.first ?? 0)...(seconds.last ?? 0)), "\(heard)")
+        for click in heard { #expect(abs(click - click.rounded()) < 0.005, "click at \(click) s") }
+    }
 }
