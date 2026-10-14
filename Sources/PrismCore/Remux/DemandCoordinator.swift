@@ -298,20 +298,22 @@ final class DemandCoordinator: @unchecked Sendable {
     /// serial production to reach it was up to two segments of silence.
     func requestProduction(of index: Int, force: Bool = false) {
         lock.withLock {
-            let current = producingIndex
+            // Judged against where production is HEADED, not where it is: a
+            // pending anchor, else a taken re-anchor whose first segment has
+            // not landed (`producingIndex` still names the old position
+            // until the demuxer seek is done), else the producer itself.
+            // Read-ahead right behind a seek's or a forced join's anchor N
+            // (N+1 pipelined before production reached N) used to move the
+            // anchor to N+1 — honoured once the debounce ran out — and N's
+            // wait timed out, though production from N reaches N+1 anyway.
+            let headed = requestedAnchor ?? reanchorInFlight ?? producingIndex
             let continuous = previousDemandedIndex < 0 || abs(index - previousDemandedIndex) <= 1
-            if !force, continuous, current >= 0, index >= current, index <= current + Self.forwardWaitWindow {
-                return
-            }
-            // A forced join the producer has not taken yet keeps its index
-            // against the read-ahead right behind it: a rendition re-armed by
-            // its fetch of N (a switch back to a suspended track, whose init
-            // the player already holds) may see N+1 asked for before the
-            // producer wakes, and moving the anchor there would leave N's
-            // wait to time out — production from N reaches N+1 anyway. A
-            // request further on is a seek and still wins.
-            if !force, anchorIsForced, let pending = requestedAnchor,
-               index > pending, index - pending <= Self.forwardWaitWindow {
+            // A forced join waiting to be taken is held even against a jump
+            // inside the window: the rendition re-armed by its fetch of N
+            // needs N whole, and production from N gets to the jump soon.
+            // A request outside the window is a seek elsewhere and wins.
+            if !force, continuous || anchorIsForced, headed >= 0,
+               index >= headed, index <= headed + Self.forwardWaitWindow {
                 return
             }
             // Last request wins: AVPlayer's newest fetch is where the

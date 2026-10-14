@@ -221,6 +221,56 @@ struct SuspendedRenditionTests {
         #expect(rearms.value >= 1)
     }
 
+    @Test("Read-ahead of N+1 pipelined across the takeover of anchor N leaves N's wait served", arguments: [false, true])
+    func pipelinedReadAheadKeepsTakenAnchor(resume: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCorePipelined-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("audio0"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<40).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        ))
+        // Playing at 2–3; then the player seeks to 20 (or, `resume`, comes
+        // back to a suspended rendition whose fetch of 20 re-arms it).
+        coordinator.noteFetch(of: 2)
+        coordinator.setProducing(index: 3)
+        var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+        provider.productionTimeout = .seconds(2)
+        let arms = SuspendLockedBox(0)
+        provider.audioDemand = { _ in resume && arms.withValue { count in count += 1; return count == 1 } }
+        func path(_ index: Int) -> String { String(format: "audio0/seg%05d.m4s", index) }
+        guard case .pending(let first) = await provider.data(forPath: path(20)) else {
+            Issue.record("miss of 20 must be pending"); return
+        }
+        // The producer takes 20; its demuxer seek is under way, so
+        // `producingIndex` still says 3 when the pipelined 21 arrives.
+        let taken = coordinator.takeAnchorRequestDetailed()
+        #expect(taken?.index == 20 && taken?.forced == resume)
+        guard case .pending(let second) = await provider.data(forPath: path(21)) else {
+            Issue.record("miss of 21 must be pending"); return
+        }
+        let serveFirst = Task { await first.resolve() }
+        let serveSecond = Task { await second.resolve() }
+        // Past the debounce: a moved anchor would be handed out now, and a
+        // producer following it would never write 20.
+        try await Task.sleep(for: DemandCoordinator.anchorDebounce * 2)
+        var position = 20
+        while let request = coordinator.takeAnchorRequestDetailed() { position = request.index }
+        #expect(position == 20, "read-ahead moved the anchor off the segment being waited for")
+        coordinator.setProducing(index: position)
+        try Data("moof".utf8).write(to: root.appendingPathComponent(path(position)))
+        coordinator.setProducing(index: position + 1)
+        try Data("moof".utf8).write(to: root.appendingPathComponent(path(position + 1)))
+        guard case .data = await serveFirst.value else { Issue.record("the wait on 20 timed out"); return }
+        guard case .data = await serveSecond.value else { Issue.record("the wait on 21 timed out"); return }
+        // A real seek elsewhere still wins over the pending position.
+        coordinator.noteFetch(of: 30)
+        coordinator.requestProduction(of: 30)
+        #expect(coordinator.takeAnchorRequestDetailed()?.index == 30)
+    }
+
     // MARK: - A session
 
     @Test("A bridged DEFAULT the player left stops encoding, and resumes on the timeline when the player comes back")
