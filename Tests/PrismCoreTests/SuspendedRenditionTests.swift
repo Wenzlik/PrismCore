@@ -313,7 +313,7 @@ struct SuspendedRenditionTests {
 
     private static func segmentPath(_ index: Int) -> String { String(format: "audio0/seg%05d.m4s", index) }
 
-    @Test("Fetches of N and N+1 of a re-armed rendition, re-suspended before the join and N+1 waking first, are both served")
+    @Test("Fetches of N and N+1 of a re-armed rendition are both served: a suspend before the join is refused, and N+1 waking first joins at N")
     func rearmJoinsAtLowestPendingWait() async throws {
         let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreRearmLowest", timeout: .seconds(2))
         defer { try? FileManager.default.removeItem(at: root) }
@@ -463,6 +463,56 @@ struct SuspendedRenditionTests {
         #expect(writer.lowestPendingWait == nil)
     }
 
+    @Test("A seek over a pending join is never pulled back by the join's waits, pending or taken", arguments: [false, true])
+    func seekOverJoinIsNeverLowered(taken: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreSeekOverJoin-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<40).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        ))
+        coordinator.noteFetch(of: 2)
+        coordinator.setProducing(index: 3)
+        var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+        provider.productionTimeout = .seconds(2)
+        // Two joining renditions, each with one wait — its own lowest: the
+        // resumed track on 20 (its fetch makes the forced join), another
+        // on 21. Both stay wanted.
+        let arms = SuspendLockedBox(0)
+        provider.audioDemand = { _ in arms.withValue { count in count += 1; return count == 1 } }
+        provider.audioRearm = { _ in false }
+        provider.audioLowestWait = { PlanSegmentProvider.segmentIndex(inPath: $0) }
+        guard case .pending(let first) = await provider.data(forPath: "audio0/seg00020.m4s"),
+              case .pending(let second) = await provider.data(forPath: "audio1/seg00021.m4s") else {
+            Issue.record("misses must be pending"); return
+        }
+        // The player seeks to 23 before production took the join. The seek
+        // keeps the force (the joining renditions still need the rebuild)…
+        coordinator.noteFetch(of: 23)
+        coordinator.requestProduction(of: 23)
+        if taken {
+            let seek = coordinator.takeAnchorRequestDetailed()
+            #expect(seek?.index == 23 && seek?.forced == true)
+        }
+        // …but is not a join: the stale waits on 21 and 20 look several
+        // times and must not lower it 23 → 21 → 20.
+        let serveFirst = Task { await first.resolve() }
+        let serveSecond = Task { await second.resolve() }
+        try await Task.sleep(for: .milliseconds(500))
+        var position: Int?
+        while let request = coordinator.takeAnchorRequestDetailed() { position = request.index }
+        #expect(position == (taken ? nil : 23), "a stale join's wait pulled the seek back")
+        // The player cancels what it left; nothing produced 20 or 21.
+        serveFirst.cancel()
+        serveSecond.cancel()
+        guard case .notFound = await serveFirst.value, case .notFound = await serveSecond.value else {
+            Issue.record("a left wait was served"); return
+        }
+    }
+
     // MARK: - A session
 
     @Test("A bridged DEFAULT the player left stops encoding, and resumes on the timeline when the player comes back")
@@ -608,18 +658,25 @@ struct SuspendedRenditionTests {
         // The resumed track's own read-ahead is pipelined too: the later of
         // its two missing segments is asked for while the first still
         // waits, able to reach the coordinator before the producer takes
-        // the first. Issued in that order — two bare `async let`s could
-        // reach the server N+1 first, which joins at N+1 (nothing is
-        // waiting below it yet) and, on a fixture this small, produces and
-        // serves N+1 off that join before N is even asked for.
+        // the first. N+1 is sent only once the server has registered N's
+        // wait — two bare `async let`s could reach the server N+1 first,
+        // which joins at N+1 (nothing is waiting below it yet) and, on a
+        // fixture this small, produces and serves N+1 off that join before
+        // N is even asked for.
         async let old1 = fetch(segment("audio1", back))
         async let old2 = fetch(segment("audio1", back + 1))
-        async let resumed = fetch(segment("audio0", back))
-        async let ahead = { () async throws -> Data in
-            try await Task.sleep(for: .milliseconds(20))
-            return try await fetch(segment("audio0", back + 1))
-        }()
-        let (audio, next, _, _) = try await (resumed, ahead, old1, old2)
+        let resumedDone = SuspendLockedBox(false)
+        let resumed = Task {
+            defer { resumedDone.withValue { $0 = true } }
+            return try await fetch(segment("audio0", back))
+        }
+        // Registered, or already served (then N+1 can no longer go first).
+        let remuxer = await session.remuxer
+        while remuxer.lowestAudioWait(path: segment("audio0", back)) != back, !resumedDone.value {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        async let ahead = fetch(segment("audio0", back + 1))
+        let (audio, next, _, _) = try await (resumed.value, ahead, old1, old2)
         #expect(ContinuousClock.now - started < .seconds(8), "a pending wait ran out its window")
 
         let planned = durations.prefix(back).reduce(0, +)
