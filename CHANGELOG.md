@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-10-14
+
+An encoded audio rendition the player switched away from stops being
+encoded: about 38 % less CPU after an audio track switch between bridged
+tracks. No API change.
+
 ### Changed
 
 - **An encoded audio rendition the player has switched away from stops
@@ -3234,7 +3240,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.6.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...HEAD
+[3.6.1]: https://github.com/Wenzlik/PrismCore/compare/3.6.0...3.6.1
 [3.6.0]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...3.6.0
 [3.5.5]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...3.5.5
 [3.5.4]: https://github.com/Wenzlik/PrismCore/compare/3.5.3...3.5.4
