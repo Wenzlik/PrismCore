@@ -26,8 +26,12 @@ source-compatible.)
   fixture, so TrueHD itself is covered at 5.1). Every served segment
   decodes. Apple's own FLAC decoder puts each of the 8 tones on the
   CoreAudio label the source gave it. macOS `AVPlayer` reads the rendition
-  as 8-channel FLAC, and in the tvOS 26.5 simulator it reaches
-  `readyToPlay` and plays. Not yet verified on an Apple TV feeding an AVR.
+  as 8-channel FLAC. It also plays the 5.1 TrueHD master as 6-channel FLAC
+  and switches to a dialogue-boost rendition in the same group. In the tvOS
+  26.5 simulator the 7.1 and 5.1 renditions reach `readyToPlay` and play. Not
+  yet verified on an Apple TV feeding an AVR. `BridgedAudioFormat.isAvailable`
+  says whether this build can deliver lossless (it needs the `flac` encoder;
+  without it the session bridges `.compressed` and the report says so).
 - **`AudioTrackDelivery.objectAudio`** (`ObjectAudioDelivery`: `.preserved`,
   `.notPreserved`, `.none`) says per track whether Dolby Atmos objects reach
   the player. A host can now label a bridged TrueHD Atmos track "Atmos not

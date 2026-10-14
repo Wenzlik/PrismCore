@@ -292,12 +292,16 @@ final class AudioBridge {
             )
         } else {
             // TrueHD/DTS can report an unresolved layout before the first frame
-            // is decoded. 5.1 is the useful guess for this codec class; the
-            // resampler reconfigures its *input* side per frame anyway, so a
-            // wrong guess costs a downmix, not a broken session. Its "2.1" for
-            // three channels never reaches an aac encoder: `aacLayout` keys
-            // on the channel count alone.
-            av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : 6)
+            // is decoded. The resampler reconfigures its *input* side per
+            // frame, but the encoder's layout is fixed here — and promised in
+            // the master's CHANNELS — so the guess is the encoder's width:
+            // 5.1 for a compressed target, which cannot carry more anyway;
+            // 7.1 for flac, where guessing 5.1 would fold the 7.1 the host
+            // asked to keep (a narrower source is upmixed with silent
+            // channels, which loses nothing). Its "2.1" for three channels
+            // never reaches aac or flac: both key on the channel count alone.
+            let guess: Int32 = targetCodec == AV_CODEC_ID_FLAC ? 8 : 6
+            av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : guess)
         }
 
         if let dialogueBoost {

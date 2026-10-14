@@ -1,4 +1,5 @@
 import Foundation
+import Libavcodec
 
 public enum AudioDelivery: String, Sendable, Equatable {
     case pending, streamCopy, bridged, decoded, noAudioInSource, unavailable
@@ -70,8 +71,16 @@ public enum BridgedAudioFormat: String, Sendable, Equatable {
     /// multichannel PCM, so it suits a route that takes 8 channels (an Apple
     /// TV on HDMI: `AVAudioSession.maximumOutputNumberOfChannels >= 8`);
     /// on a stereo route it is downmixed by the system instead. Falls back to
-    /// `.compressed` in a build without the `flac` encoder.
+    /// `.compressed` in a build without the `flac` encoder (`isAvailable`).
     case lossless
+
+    /// Whether this build can deliver it. `.lossless` needs FFmpeg's `flac`
+    /// encoder, which every MPVKit build ships; a session asked for it in a
+    /// build without one bridges `.compressed`, and its diagnostic report
+    /// says so.
+    public var isAvailable: Bool {
+        self == .compressed || AudioBridge.targetCodec(for: .lossless) == AV_CODEC_ID_FLAC
+    }
 }
 
 final class AudioDeliveryStore: @unchecked Sendable {

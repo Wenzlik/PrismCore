@@ -444,6 +444,8 @@ public actor PrismCoreSession {
 
     /// What the **bitstream** said about object audio on this session's
     /// stream-copied E-AC-3 tracks, one finding per track, in stream order.
+    /// E-AC-3 JOC only: whether a TrueHD track carries Atmos (and that the
+    /// bridge cannot keep it) is on `audioTrackDeliveries[…].objectAudio`.
     ///
     /// Empty until the first such track has been asked (a segment's worth of
     /// packets into production), and it stays empty for a source that has no
@@ -1080,7 +1082,11 @@ public actor PrismCoreSession {
                 panelIsCurrentlyHDR: display.panelIsCurrentlyHDR,
                 source: display.source
             )
-            // This tier keeps the master; only the claim goes.
+            // This tier keeps the master; only the claim goes. Lossless
+            // bridging stays too: a DV title with TrueHD is the very source
+            // it exists for, and this tier answers a panel that refused the
+            // DV claim. Should FLAC have been the cause, it costs one more
+            // refusal before the muxed tier, which does drop it.
             options.forceMuxedShape = false
         }
     }
@@ -1360,7 +1366,9 @@ public actor PrismCoreSession {
                 reachability: options.reachability == .loopbackOnly
                     ? "loopbackOnly" : "localNetworkUnencryptedForAirPlay",
                 externalSubtitleCount: externalSubtitles.count,
-                bridgedAudio: options.bridgedAudio.rawValue
+                // What was delivered, not only what was asked for.
+                bridgedAudio: options.bridgedAudio.isAvailable
+                    ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)"
             ),
             startup: .init(
                 checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },

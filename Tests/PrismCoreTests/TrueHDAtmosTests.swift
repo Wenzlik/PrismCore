@@ -345,9 +345,9 @@ struct TrueHDAtmosSessionTests {
         #expect(deliveries.allSatisfy { $0.objectAudio == .none }, "\(deliveries)")
         #expect(await session.diagnosticReport().options?.bridgedAudio == "lossless")
 
-        // Every segment of every rendition — the tail included, where flac's
-        // flush hands the muxer an empty packet carrying STREAMINFO — demuxes
-        // and decodes as served.
+        // Every segment of every rendition — the tail included, after flac's
+        // flush (whose empty STREAMINFO packet the bridge drops) — demuxes and
+        // decodes as served.
         let report = try await SegmentVerifier.verify(playlist: playlist, stallTimeout: .seconds(20))
         #expect(!report.hasErrors && report.isComplete, "\(report.findings)")
         #expect(report.playlists.count == 3, "\(report.playlists)")
@@ -557,6 +557,72 @@ struct TrueHDAtmosSessionTests {
             let expected = try #require(tone[label], "unexpected label \(label) at \(channel)")
             #expect(abs(hertz - expected) < 15, "channel \(channel) (label \(label)): \(hertz) Hz, expected \(expected)")
         }
+    }
+
+    @Test("AVPlayer plays the 5.1 TrueHD lossless master, and switches to a compressed boost rendition in the same group")
+    @MainActor func avPlayerPlaysLosslessTrueHDWithBoost() async throws {
+        guard AudioBridge.targetCodec(for: .lossless) == AV_CODEC_ID_FLAC, PrismCoreSession.isDialogueBoostAvailable else { return }
+        // 5.1(side) is the layout class that once broke AAC on Apple players
+        // (a PCE), and a group mixing fLaC with a boost rendition's ec-3 / aac
+        // is a shape no other test serves. macOS AVFoundation, not a device.
+        let session = try PrismCoreSession(
+            url: try fixture("h264_truehd_14s.mkv"), dialogueBoost: [.medium], preferredAudioLanguage: "eng",
+            bridgedAudio: .lossless
+        )
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+        let (masterData, _) = try await URLSession.uncached.data(from: playlist)
+        let master = String(decoding: masterData, as: UTF8.self)
+        #expect(audioMediaLines(master).count == 3, "\(master)")
+
+        let item = AVPlayerItem(url: playlist)
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = true
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while item.status != .readyToPlay {
+            if item.status == .failed || ContinuousClock.now >= deadline {
+                Issue.record("item never became ready (error: \(String(describing: item.error)))")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        // The machine's language picks the rendition, not the master's
+        // DEFAULT; the 5.1 English one is the subject here.
+        let group = try #require(try await item.asset.loadMediaSelectionGroup(for: .audible))
+        let english = try #require(group.options.first {
+            $0.locale?.language.languageCode?.identifier == "en" && !$0.hasMediaCharacteristic(.enhancesSpeechIntelligibility)
+        }, "\(group.options)")
+        item.select(english, in: group)
+        player.play()
+
+        func playingAudio() async -> (format: FourCharCode, channels: UInt32)? {
+            for track in item.tracks where track.isEnabled && track.assetTrack?.mediaType == .audio {
+                let descriptions = (try? await track.assetTrack?.load(.formatDescriptions)) ?? []
+                if let description = descriptions.first,
+                   let basic = CMAudioFormatDescriptionGetStreamBasicDescription(description) {
+                    return (CMFormatDescriptionGetMediaSubType(description), basic.pointee.mChannelsPerFrame)
+                }
+            }
+            return nil
+        }
+        var audio = await playingAudio()
+        while !(audio?.format == kAudioFormatFLAC && audio?.channels == 6), item.status != .failed,
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+            audio = await playingAudio()
+        }
+        #expect(audio?.format == kAudioFormatFLAC && audio?.channels == 6, "\(String(describing: audio))")
+
+        let boost = try #require(group.options.first { $0.hasMediaCharacteristic(.enhancesSpeechIntelligibility) })
+        item.select(boost, in: group)
+        let switchDeadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while audio?.format == kAudioFormatFLAC, item.status != .failed, ContinuousClock.now < switchDeadline {
+            try await Task.sleep(for: .milliseconds(100))
+            audio = await playingAudio()
+        }
+        #expect(item.status != .failed, "\(String(describing: item.error))")
+        #expect(audio.map { $0.format != kAudioFormatFLAC } == true, "never switched off FLAC: \(String(describing: audio))")
+        player.pause()
     }
 
     @Test("The muxed fallback goes back to compressed")
