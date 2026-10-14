@@ -212,7 +212,7 @@ struct ReanchorTimelineTests {
     /// Decodes init + one fragment as one file — libavformat applies the init's
     /// edit list to the fragment's tfdt as a player does — and returns when
     /// each click starts.
-    private static func clickOnsets(initSegment: Data, media: Data) throws -> [Double] {
+    static func clickOnsets(initSegment: Data, media: Data) throws -> [Double] {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("PrismCoreReanchor-\(UUID().uuidString).mp4")
         try (initSegment + media).write(to: file)

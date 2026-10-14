@@ -97,11 +97,32 @@ final class AudioRenditionWriter {
     /// called from the server's thread, hence the lock; the producer applies
     /// it at the next safe point.
     let isLazy: Bool
+    /// Whether the producer may stop this rendition again once AVPlayer has
+    /// left it (`requestSuspend`): every rendition that encodes, in the
+    /// planned shape (`HLSRemuxer.audioSuspendable`). A bridged DEFAULT the
+    /// viewer switched away from used to be encoded for the rest of the film
+    /// next to the track they switched to — exactly twice the encoder, measured
+    /// at 9.9 s of CPU instead of 5.1 s per 150 s of 4K. Suspended, it is a
+    /// dormant lazy rendition again, and the next fetch under its directory
+    /// re-arms it through `arm()` like any first selection.
+    let isSuspendable: Bool
     private let armLock = NSLock()
-    private var armRequested = false
+    /// Whether someone wants this rendition produced: set from the start for
+    /// an eager one, by `arm()` for a lazy one, cleared by `requestSuspend`.
+    /// The producer reads it at its safe points (`open`, a cut, a re-anchor).
+    private var wanted: Bool
+    /// The lock's copy of "not producing", committed by the producer under
+    /// the same lock that `arm()` reads it in. That is what lets `arm()` tell
+    /// a suspension the producer already applied (re-anchor needed) from one
+    /// it has not reached yet (nothing to do: production never stopped).
+    private var dormant: Bool
+    /// Suspensions applied and resumptions after one, for the diagnostic
+    /// report — a field log has to show it happened.
+    private var suspensions = 0
+    private var resumptions = 0
     /// Whether the muxer (and bridge) currently exist. Always true for an
-    /// eager rendition after `open`; a lazy one turns it on when the
-    /// producer honours the arm request.
+    /// eager rendition after `open` until a suspension; a lazy one turns it
+    /// on when the producer honours the arm request.
     private(set) var isProducing = false
     /// The encoder's negotiated channel count, learned at `open` from a
     /// bridge that is built and torn down again — `CHANNELS` in the master
@@ -116,6 +137,7 @@ final class AudioRenditionWriter {
     init(
         route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL,
         lazy: Bool = false,
+        suspendable: Bool = false,
         bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec
     ) {
         self.route = route
@@ -123,30 +145,81 @@ final class AudioRenditionWriter {
         self.track = track
         self.ordinal = ordinal
         self.isLazy = lazy
+        self.isSuspendable = suspendable
+        self.wanted = !lazy
+        self.dormant = lazy
         self.directoryName = "audio\(ordinal)"
         self.directory = parent.appendingPathComponent(directoryName, isDirectory: true)
         self.playlist = MediaPlaylistWriter(directory: directory, initFileName: Self.initFileName)
     }
 
     /// A fetch under this rendition's directory: the demand that turns a
-    /// lazy rendition on. Returns `true` when this call is the one that armed
-    /// it (the caller then re-anchors production so the first produced
-    /// segment is a complete one); `false` for an already-armed or eager
-    /// rendition. Server-thread safe.
+    /// lazy (or suspended) rendition on. Returns `true` when this call needs
+    /// production re-anchored so the rendition joins with a whole first
+    /// segment; `false` for an eager rendition, one already wanted, and one
+    /// whose suspension the producer has not applied yet — it never stopped,
+    /// so there is nothing to rejoin. Server-thread safe.
     func arm() -> Bool {
-        guard isLazy else { return false }
+        guard isLazy || isSuspendable else { return false }
         return armLock.withLock {
-            if armRequested { return false }
-            armRequested = true
+            if wanted { return false }
+            wanted = true
+            return dormant
+        }
+    }
+
+    /// AVPlayer has left this rendition (`AudioDemandTracker`): stop
+    /// producing it at the producer's next safe point. Returns `true` when
+    /// this call is the one that withdrew it. Idempotent; a no-op for a
+    /// rendition that cannot be suspended. Server-thread safe.
+    @discardableResult
+    func requestSuspend() -> Bool {
+        guard isSuspendable else { return false }
+        return armLock.withLock {
+            guard wanted else { return false }
+            wanted = false
             return true
         }
     }
 
-    /// Whether a lazy rendition has been asked for (armed) — not the same as
-    /// producing: the producer opens the bridge at the next safe point.
+    /// Whether the rendition is wanted (armed) — not the same as producing:
+    /// the producer opens or suspends it at the next safe point.
     var isArmed: Bool {
-        guard isLazy else { return true }
-        return armLock.withLock { armRequested }
+        armLock.withLock { wanted }
+    }
+
+    /// `(suspensions, resumptions)` so far — what the diagnostic report shows.
+    var suspensionCounts: (suspended: Int, resumed: Int) {
+        armLock.withLock { (suspensions, resumptions) }
+    }
+
+    /// Producer thread, at a boundary (after a cut, or before a re-anchor):
+    /// apply a suspension `requestSuspend` asked for. Returns `true` when the
+    /// rendition stopped here. The bridge goes (it is the cost), and the
+    /// muxer with it; the init and every segment already on disk stay
+    /// servable. What is not on disk any more is what a dormant lazy
+    /// rendition lacks too, and the fetch that wants it re-arms production.
+    @discardableResult
+    func suspendIfUnwanted() -> Bool {
+        guard isSuspendable, isProducing else { return false }
+        let stop = armLock.withLock { () -> Bool in
+            if wanted { return false }
+            dormant = true
+            suspensions += 1
+            return true
+        }
+        guard stop else { return false }
+        // Kept for the master's `CODECS` / `CHANNELS`, which read the bridge
+        // when there is one and these when there is not.
+        if let bridge {
+            negotiatedChannelCount = bridge.outputChannelCount
+            negotiatedCodecName = bridge.outputCodecName
+        }
+        close()
+        writer = FMP4SegmentWriter()
+        isProducing = false
+        PrismCoreLog.notice("audio rendition \(directoryName) (#\(track.streamIndex)) suspended: the player left it")
+        return true
     }
 
     /// Create the rendition's directory, its muxer and — for a bridged track —
@@ -162,13 +235,25 @@ final class AudioRenditionWriter {
         }
 
         let index = Int32(track.streamIndex)
-        if isLazy, !isArmed {
+        // Decided and committed under one lock with `arm()`'s read of
+        // `dormant`: a suspension landing between a separate check and the
+        // commit would leave a wanted rendition dormant with nothing left to
+        // re-anchor it.
+        let produce = armLock.withLock { () -> Bool in
+            if !wanted, !dormant {
+                dormant = true
+                if isProducing { suspensions += 1 }
+            }
+            return wanted
+        }
+        if !produce {
             // Declared, not produced. The bridge is built once so that the
             // eligibility checks (a stereo track has no centre to favour, a
             // build without the encoder) fail HERE — where the caller skips
             // the rendition — rather than after the master has promised it,
             // and so `CHANNELS` can be read off the negotiated layout; then
-            // it is released again. Nothing else exists until `arm()`.
+            // it is released again. Nothing else exists until `arm()`. A
+            // suspended rendition lands here too, its negotiation kept.
             if negotiatedChannelCount == nil, route.mode != .streamCopy {
                 let inStream = input.pointee.streams[Int(index)]!
                 let probeBridge = try AudioBridge(
@@ -224,6 +309,15 @@ final class AudioRenditionWriter {
         _ = try writer.open(input: input, plan: [plan], restart: restart)
         outputIndex = writer.streamMap[track.streamIndex] ?? 0
         isProducing = true
+        let resumed = armLock.withLock { () -> Bool in
+            defer { dormant = false }
+            guard dormant, suspensions > 0 else { return false }
+            resumptions += 1
+            return true
+        }
+        if resumed {
+            PrismCoreLog.notice("audio rendition \(directoryName) (#\(track.streamIndex)) resumed")
+        }
     }
 
     func close() {
@@ -246,6 +340,10 @@ final class AudioRenditionWriter {
     /// segment gets reproduced if anything ever asks for it.
     func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
         writer = FMP4SegmentWriter()
+        // A re-anchor is a boundary too: a suspension asked for while the
+        // producer was parked takes effect here instead of rebuilding a
+        // bridge for a rendition nobody is fetching.
+        suspendIfUnwanted()
         if isProducing {
             if let bridge, bridge.isDrained {
                 // Flushed at EOF: the encoder is in its terminal state and
@@ -262,10 +360,10 @@ final class AudioRenditionWriter {
                 try openMuxer(input: input, restart: true)
             }
         } else {
-            // A lazy rendition that nobody armed stays dormant through the
-            // re-anchor (`open` returns before the muxer); an armed one opens
-            // here, at a plan boundary, which is what makes its first segment
-            // a complete one.
+            // A lazy (or suspended) rendition that nobody armed stays dormant
+            // through the re-anchor (`open` returns before the muxer); an
+            // armed one opens here, at a plan boundary, which is what makes
+            // its first segment a complete one.
             try open(input: input, restart: true)
         }
         self.segmentIndex = segmentIndex
@@ -602,5 +700,47 @@ final class AudioRenditionWriter {
         case .bridge, .boost:
             return false
         }
+    }
+}
+
+/// Which encoded renditions AVPlayer has left, judged from the loopback's
+/// fetches alone — the only signal the engine has of a track switch.
+///
+/// A rendition is left once `abandonAfter` audio SEGMENT fetches went to
+/// other renditions since its own last fetch. Counted in fetches, not
+/// seconds: a paused player fetches nothing and must not lose its track, and
+/// a seek moves every index, so neither time nor segment numbers say "the
+/// viewer switched" — another rendition being fetched while this one is not
+/// does. Only segments advance the count: AVPlayer may read an alternate's
+/// init without playing it. An init fetch still resets the fetched
+/// rendition's own gap, so one just selected is not judged left before its
+/// first segment arrives. Three is about 18 s of 6 s segments — AVPlayer's
+/// switch burst plus its read-ahead — while a rendition that is playing is
+/// fetched every segment and never gets near it.
+///
+/// Pure on purpose (the rule is what must not drift); the remuxer holds one
+/// under its lock and acts on the answer.
+struct AudioDemandTracker {
+    static let abandonAfter = 3
+
+    private var fetches = 0
+    /// Fetch count at each directory's last fetch. A watched rendition that
+    /// was never fetched counts from 0 — the session's start.
+    private var lastFetch: [String: Int] = [:]
+    private let watched: [String]
+
+    /// `watched`: the directories that may be suspended (`isSuspendable`).
+    init(watched: [String]) {
+        self.watched = watched
+    }
+
+    /// Note a fetch under an audio rendition's `directory` and return the
+    /// watched directories that have now gone `abandonAfter` segment fetches
+    /// without one of their own. Never the one just fetched.
+    mutating func noteFetch(under directory: String, isSegment: Bool) -> [String] {
+        if isSegment { fetches += 1 }
+        lastFetch[directory] = fetches
+        guard isSegment else { return [] }
+        return watched.filter { fetches - (lastFetch[$0] ?? 0) >= Self.abandonAfter }
     }
 }

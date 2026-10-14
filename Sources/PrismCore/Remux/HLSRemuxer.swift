@@ -569,6 +569,10 @@ final class HLSRemuxer: @unchecked Sendable {
     private var storedRenditionsByDirectory: [String: AudioRenditionWriter] = [:]
     private var storedLazyRenditionPlaylistURIs: Set<String> = []
     private var storedAudioRenditionDirectories: [(name: String, directory: String)] = []
+    /// Which suspendable rendition AVPlayer has left (`AudioDemandTracker`).
+    /// Fed by `noteAudioDemand` from every connection, so it lives under the
+    /// same lock as the directory map it is built from.
+    private var storedAudioDemand = AudioDemandTracker(watched: [])
 
     /// Every declared audio rendition's master `NAME` and directory, in
     /// master order — the first is the DEFAULT. Empty before the master and
@@ -591,10 +595,30 @@ final class HLSRemuxer: @unchecked Sendable {
     /// — the provider then forces a re-anchor so the rendition joins at a
     /// boundary. `false` for eager renditions, already-armed ones, and paths
     /// that name no rendition.
+    ///
+    /// The same fetches are what tell a switch away: a suspendable rendition
+    /// (`audioSuspendable`) that AVPlayer has left is asked to stop here, and
+    /// the producer applies it at its next boundary. A later fetch under its
+    /// directory re-arms it through `arm()`, exactly like a first selection.
     func noteAudioDemand(path: String) -> Bool {
-        guard let directory = path.split(separator: "/").first else { return false }
-        let rendition = renditionsLock.withLock { storedRenditionsByDirectory[String(directory)] }
+        guard let directory = path.split(separator: "/").first.map(String.init) else { return false }
+        let (rendition, left) = renditionsLock.withLock { () -> (AudioRenditionWriter?, [AudioRenditionWriter]) in
+            guard let rendition = storedRenditionsByDirectory[directory] else { return (nil, []) }
+            let left = storedAudioDemand.noteFetch(under: directory, isSegment: path.hasSuffix(".m4s"))
+            return (rendition, left.compactMap { storedRenditionsByDirectory[$0] })
+        }
+        for abandoned in left { abandoned.requestSuspend() }
         return rendition?.arm() ?? false
+    }
+
+    /// Suspensions and resumptions of each rendition that can be suspended,
+    /// keyed like `AudioRenditionProduction` (stream, boost level), for the
+    /// diagnostic report.
+    var audioRenditionSuspensions: [(streamIndex: Int, dialogueBoost: DialogueBoostLevel?, suspended: Int, resumed: Int)] {
+        renditionsLock.withLock { storedRenditionsByDirectory.values.filter(\.isSuspendable) }.map {
+            let counts = $0.suspensionCounts
+            return (Int($0.route.index), $0.route.mode.dialogueBoostLevel, counts.suspended, counts.resumed)
+        }
     }
 
     private func recordConversionStats(_ converter: DolbyVisionRPUConverter) {
@@ -1281,6 +1305,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     ordinal: ordinal,
                     parent: outputDirectory,
                     lazy: production == .lazy,
+                    suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil),
                     bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio)
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
@@ -1363,7 +1388,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     // name to a boost that already has a sibling there.
                     ordinal: routes.count + offset,
                     parent: outputDirectory,
-                    lazy: production == .lazy
+                    lazy: production == .lazy,
+                    suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil)
                 )
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).
@@ -1412,6 +1438,9 @@ final class HLSRemuxer: @unchecked Sendable {
                         renditions.filter(\.isLazy).map(\.playlistURI)
                     )
                     storedAudioRenditionDirectories = renditions.map { (name: $0.renditionName, directory: $0.directoryName) }
+                    storedAudioDemand = AudioDemandTracker(
+                        watched: renditions.filter(\.isSuspendable).map(\.directoryName)
+                    )
                 }
                 variant.audioRenditions = renditions.enumerated().map { ordinal, rendition in
                     // DEFAULT on the first rendition only, which is the track
@@ -1819,6 +1848,9 @@ final class HLSRemuxer: @unchecked Sendable {
             var renditionBytes = 0
             for rendition in renditions {
                 renditionBytes += try rendition.cut(durationSeconds: duration)
+                // The boundary is where a rendition the player left can stop
+                // whole: its last segment is on disk, nothing is half-muxed.
+                rendition.suspendIfUnwanted()
             }
             // The whole cut for this index is on disk now — variant and every
             // rendition — so a superseded index becomes servable again HERE,
@@ -2324,6 +2356,10 @@ final class HLSRemuxer: @unchecked Sendable {
                 try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
             }
 
+            // The tail is a boundary too: a rendition the player has left
+            // stops here rather than encoding a last segment for nobody (a
+            // later fetch re-anchors onto it like any other).
+            for rendition in renditions { rendition.suspendIfUnwanted() }
             // A cancelled session is being torn down, so flushing the encoders would
             // only add work; on EOF the tail is real audio the file has.
             if reachedEOF {
@@ -2557,11 +2593,39 @@ final class HLSRemuxer: @unchecked Sendable {
     ///   HTTP of a file whose Cues sit at the tail is the common sequential
     ///   case; the keyframe cache harvests that play, so the next one is
     ///   planned and carries every track again.
+    ///
+    /// Eager or lazy is where a rendition STARTS. Whether it may stop again
+    /// once the player leaves it is `audioSuspendable`.
     static func audioProduction(
         mode: AudioRouteMode, isDefault: Bool, planned: Bool
     ) -> AudioRenditionProduction.Production {
         if isDefault || mode == .streamCopy { return .eager }
         return planned ? .lazy : .omitted
+    }
+
+    /// Whether a rendition stops being produced once AVPlayer has switched
+    /// away from it (`AudioDemandTracker`), and starts again on the next
+    /// fetch under its directory — the lazy machinery run in reverse.
+    ///
+    /// - Anything that encodes, in the planned shape: the bridged DEFAULT
+    ///   (eager only so that start-up does not wait on a re-anchor) and every
+    ///   lazy bridged or boost rendition once armed. A viewer who switched
+    ///   from a bridged DEFAULT to another bridged track used to pay for both
+    ///   encoders for the rest of the film — measured on 150 s of 4K, 9.9 s
+    ///   of CPU instead of 5.1 s. Nothing the DEFAULT is eager for is lost:
+    ///   start-up has passed, its init and segments stay on disk, and an
+    ///   encoded rendition has no Atmos finding to settle (the E-AC-3 sniff
+    ///   is stream-copy only; TrueHD's is read off the demuxed packets for
+    ///   every track, not the rendition's). A boost carries its own decoder,
+    ///   so a viewer on a boost level needs nothing from its base.
+    /// - Never a stream copy: it costs a muxer, not a codec, and staying
+    ///   eager keeps a switch between copied tracks free of a re-anchor.
+    /// - Never in the sequential shape: restarting needs a plan to re-anchor
+    ///   on, or the rendition would rejoin mid-film with segments that do not
+    ///   line up with the video's — the reason lazy renditions are omitted
+    ///   there. The bridged DEFAULT stays eager for the whole film.
+    static func audioSuspendable(mode: AudioRouteMode, planned: Bool) -> Bool {
+        mode != .streamCopy && planned
     }
 
     /// Which extra dialogue-boost renditions to derive, given what the
