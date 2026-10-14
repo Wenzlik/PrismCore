@@ -324,6 +324,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Declare the scouted caption services as in-band `CLOSED-CAPTIONS` too,
     /// instead of `NONE`. See `PrismCoreSession.Options.inBandClosedCaptions`.
     private let inBandClosedCaptions: Bool
+    /// What a base bridged track is encoded into. See
+    /// `PrismCoreSession.Options.bridgedAudio`.
+    private let bridgedAudio: BridgedAudioFormat
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
@@ -495,8 +498,18 @@ final class HLSRemuxer: @unchecked Sendable {
         }
     }
 
+    /// TrueHD streams whose major sync has not answered yet, with the packets
+    /// the read may still spend on each (`TrueHDMajorSync`). Read in the copy
+    /// loop, ahead of any rendition, because the answer is wanted for every
+    /// track at `start()` — a lazy or omitted rendition never sees a packet,
+    /// and a bridge is rebuilt after EOF. A restart unit comes at least every
+    /// 128 access units, so the budget is a backstop for a stream the read
+    /// cannot follow, not a wait. Producer thread only.
+    private var trueHDAtmosSniff: [Int: Int] = [:]
+
     func recordObjectAudio(_ finding: ObjectAudioFinding) {
         objectAudioLock.withLock { storedObjectAudio[finding.streamIndex] = finding }
+        audioDeliveryStore.noteSourceObjectAudio(index: finding.streamIndex, present: finding.isObjectAudio)
     }
 
     /// The display criteria this session wants programmed before AVPlayer
@@ -610,6 +623,7 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
         inBandClosedCaptions: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -643,6 +657,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.preferredAudioLanguage = preferredAudioLanguage
         self.preferredSubtitleLanguage = preferredSubtitleLanguage
         self.inBandClosedCaptions = inBandClosedCaptions
+        self.bridgedAudio = bridgedAudio
     }
 
     func cancel() {
@@ -869,7 +884,13 @@ final class HLSRemuxer: @unchecked Sendable {
         // decoded frames and must not be paid twice); otherwise derive it here
         // from our own context.
         let info = adoptedInfo ?? SourceProbe.describe(input: input)
-        audioDeliveryStore.prepare(indexes: info.audioTracks.map(\.streamIndex))
+        audioDeliveryStore.prepare(
+            indexes: info.audioTracks.map(\.streamIndex),
+            objectAudioClaims: Set(info.audioTracks.filter(\.isObjectAudio).map(\.streamIndex))
+        )
+        trueHDAtmosSniff = Dictionary(
+            uniqueKeysWithValues: info.audioTracks.filter { $0.codecName == "truehd" }.map { ($0.streamIndex, 256) }
+        )
         // Chapters can't ride the served HLS (the format has no way to carry
         // them), so the session surfaces them as API instead — publish before
         // any packet work so they are readable the moment `start()` returns.
@@ -1259,7 +1280,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     track: track,
                     ordinal: ordinal,
                     parent: outputDirectory,
-                    lazy: production == .lazy
+                    lazy: production == .lazy,
+                    bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio)
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
@@ -1446,7 +1468,8 @@ final class HLSRemuxer: @unchecked Sendable {
                         timeBase: inStream.pointee.time_base,
                         // mp4/mov is a global-header muxer by definition; the
                         // encoder's extradata must land in codecpar, not in-band.
-                        globalHeader: true
+                        globalHeader: true,
+                        targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
                     )
                     muxedBridge = bridge
                     bridge.onProgress = { [audioDeliveryStore, index = Int(audio.index)] progress in
@@ -1869,7 +1892,8 @@ final class HLSRemuxer: @unchecked Sendable {
                         let fresh = try AudioBridge(
                             codecpar: inStream.pointee.codecpar,
                             timeBase: inStream.pointee.time_base,
-                            globalHeader: true
+                            globalHeader: true,
+                            targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
                         )
                         muxedBridge = fresh
                         fresh.onProgress = { [audioDeliveryStore, index = Int(index)] progress in
@@ -2122,6 +2146,18 @@ final class HLSRemuxer: @unchecked Sendable {
                 let streamIndex = Int(packet.pointee.stream_index)
                 let inStream = input.pointee.streams[streamIndex]!
                 let sourceTimeBase = inStream.pointee.time_base
+
+                if let budget = trueHDAtmosSniff[streamIndex], let data = packet.pointee.data,
+                   packet.pointee.size > 0 {
+                    if let atmos = TrueHDMajorSync.carriesObjectAudio(
+                        in: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                    ) {
+                        trueHDAtmosSniff[streamIndex] = nil
+                        audioDeliveryStore.noteSourceObjectAudio(index: streamIndex, present: atmos)
+                    } else {
+                        trueHDAtmosSniff[streamIndex] = budget > 1 ? budget - 1 : nil
+                    }
+                }
 
                 if Int32(streamIndex) == videoIndex {
                     // Cut BEFORE writing a boundary keyframe, so the keyframe opens

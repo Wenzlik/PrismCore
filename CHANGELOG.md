@@ -8,6 +8,58 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **`bridgedAudio: .lossless`**, a new session option, also in `Options` and
+  carried by clones. TrueHD, DTS-HD MA, PCM and the other bridged codecs are
+  encoded as **FLAC with the source's own channels up to 7.1, at 24 bits**,
+  instead of EAC3 5.1. A TrueHD track arrives as its whole 7.1 presentation
+  without loss whenever its layout is one FLAC carries (stereo, 5.1, 7.1;
+  FLAC's 8-channel order is FFmpeg's 7.1, so nothing is remixed). That is the most of a TrueHD Atmos track anything public can
+  deliver, because the objects are mixed into that presentation. The default
+  stays `.compressed` (EAC3 5.1, AAC where the build has no `eac3` encoder).
+  The option suits a route that takes 8 channels. Dialogue-boost renditions
+  stay EAC3, and `makeMuxedFallbackSession()` goes back to `.compressed`.
+  `prismcore-cli` takes it as `--bridged-audio compressed|lossless`, and the
+  diagnostic report names it. Verified: a 24-bit PCM 7.1 round trip through
+  the bridge is bit-exact (FFmpeg's TrueHD encoder cannot make a 7.1
+  fixture, so TrueHD itself is covered at 5.1). Every served segment
+  decodes. Apple's own FLAC decoder puts each of the 8 tones on the
+  CoreAudio label the source gave it. macOS `AVPlayer` reads the rendition
+  as 8-channel FLAC. It also plays the 5.1 TrueHD master as 6-channel FLAC
+  and switches to a dialogue-boost rendition in the same group. In the tvOS
+  26.5 simulator the 7.1 and 5.1 renditions reach `readyToPlay` and play. Not
+  yet verified on an Apple TV feeding an AVR. `BridgedAudioFormat.isAvailable`
+  says whether this build can deliver lossless (it needs the `flac` encoder;
+  without it the session bridges `.compressed` and the report says so).
+- **`AudioTrackDelivery.objectAudio`** (`ObjectAudioDelivery`: `.preserved`,
+  `.notPreserved`, `.none`) says per track whether Dolby Atmos objects reach
+  the player. A host can now label a bridged TrueHD Atmos track "Atmos not
+  preserved" instead of inferring it from the codec. TrueHD Atmos is read off
+  the stream's major sync for every TrueHD track, selected or not
+  (`TrueHDMajorSync`, with a new `truehd-major-sync` fuzz target). It no longer
+  depends on `AV_PROFILE_TRUEHD_ATMOS`, which is set only when the probe
+  happened to decode a frame. DTS:X still relies on that kind of claim. The
+  diagnostic report lists each track's delivery and `objectAudio`
+  (`runtime.audioTracks`).
+
+### Changed
+
+- **A bridge to an integer-only encoder keeps 24 bits.** The bridge used to
+  take the encoder's first listed sample format, which for `flac` is 16-bit.
+  It now prefers 32-bit storage with 24 significant bits. This matters only
+  for `.lossless`: EAC3 and AAC are float.
+
+### Not done (and why)
+
+- **Atmos objects from TrueHD are still not preserved, and cannot be with
+  public API.** FFmpeg decodes TrueHD only up to its 7.1 presentation. No
+  encoder this engine can ship writes E-AC-3 JOC. No Apple API takes object
+  audio from an app in any other form. The open-source object decoder
+  (`truehdd`) is experimental, reverse-engineered Rust with no renderer. See
+  the README's *Dolby Atmos from TrueHD*.
+- The software path still downmixes sources wider than 5.1 to 5.1.
+
 ## [3.5.5] — 2026-10-12
 
 Fix Xcode 27 compile error (labeled tuple in PlaybackEvents). No behaviour

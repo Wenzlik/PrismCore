@@ -24,7 +24,22 @@ package enum FuzzSeeds {
         "a53-captions": [captionedAccessUnit, xdsAccessUnit],
         "container-layout": [matroskaHead, faststartMP4Head],
         "hdr10plus-sei": [hdr10PlusAccessUnit(annexB: false), hdr10PlusAccessUnit(annexB: true)],
+        "truehd-major-sync": [trueHDAtmosUnits],
     ]
+
+    /// A non-restart TrueHD access unit, then a restart unit whose major sync
+    /// declares the 16-channel presentation (four substreams, the top bit of
+    /// `substream_info`) — the walk has to step over the first to answer.
+    package static let trueHDAtmosUnits: [UInt8] = {
+        let plain: [UInt8] = [0x10, 0x08] + Array(repeating: 0x11, count: 14)
+        var restart: [UInt8] = [
+            0xD0, 0x20, 0xFF, 0xD8,
+            0xF8, 0x72, 0x6F, 0xBA, 0x00, 0x07, 0x80, 0x0F, 0xB7, 0x52, 0x00, 0x00,
+            0x00, 0x00, 0x8C, 0x7F, 0x40, 0xBC,
+        ]
+        restart += Array(repeating: 0, count: 0x20 * 2 - restart.count)
+        return plain + restart
+    }()
 
     /// A complete ST 2094-40 `user_data_registered_itu_t_t35` payload: one
     /// window, nine percentiles, a tone-mapping curve — the bytes

@@ -42,6 +42,7 @@ package enum FuzzTargets {
         "a53-captions": { @Sendable in a53Captions($0) },
         "container-layout": { @Sendable in containerLayout($0) },
         "hdr10plus-sei": { @Sendable in hdr10PlusSEI($0) },
+        "truehd-major-sync": { @Sendable in trueHDMajorSync($0) },
     ]
 
     // MARK: - Targets
@@ -140,6 +141,23 @@ package enum FuzzTargets {
         guard let index = EAC3Syncframe.atmosComplexityIndex(in: bytes) else { return }
         guard (0...255).contains(index) else {
             fatalError("complexity_index_type_a out of byte range: \(index)")
+        }
+    }
+
+    /// The TrueHD access-unit walk. A verdict must be attributable: an Atmos
+    /// answer needs a TrueHD major sync in the bytes, and any answer must
+    /// survive bytes appended after the packet — the walk stops at the first
+    /// restart unit, so a verdict that moves with a tail was read off it.
+    package static func trueHDMajorSync(_ bytes: [UInt8]) {
+        guard let verdict = TrueHDMajorSync.carriesObjectAudio(in: bytes) else { return }
+        if verdict, !bytes.indices.dropLast(3).contains(where: {
+            bytes[$0] == 0xF8 && bytes[$0 + 1] == 0x72 && bytes[$0 + 2] == 0x6F && bytes[$0 + 3] == 0xBA
+        }) {
+            fatalError("Atmos read from bytes with no TrueHD major sync")
+        }
+        let tail: [UInt8] = [0x10, 0x08, 0xF8, 0x72, 0x6F, 0xBA] + Array(repeating: 0xFF, count: 16)
+        guard TrueHDMajorSync.carriesObjectAudio(in: bytes + tail) == verdict else {
+            fatalError("a verdict changed with bytes after the packet")
         }
     }
 

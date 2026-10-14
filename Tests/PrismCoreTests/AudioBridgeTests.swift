@@ -775,10 +775,13 @@ struct AudioBridgePipelineTests {
         #expect(energy[AV_CHAN_SIDE_LEFT] == nil, "the output layout still has side channels")
     }
 
-    @Test("A non-aac encoder keeps the source layout it supports — only aac is standardized")
+    @Test("A non-aac encoder keeps the source layout it supports — only aac and flac are standardized")
     func nonAACKeepsTheSourceLayout() throws {
-        // eac3 where the build has it; FLAC (in every MPVKit build) stands in
-        // for the same list-or-anything negotiation otherwise.
+        // eac3 where the build has it, and FLAC (in every MPVKit build). FLAC
+        // keeps every layout here that IS one of its own (FLAC in MP4 reads
+        // back five and six channels as the side variants); "2.1" is not — FLAC's three
+        // channels mean FL FR FC — so it lands on 3.0 rather than being
+        // copied through and decoded with its LFE in the centre.
         let targets = [AV_CODEC_ID_EAC3, AV_CODEC_ID_FLAC].filter { avcodec_find_encoder($0) != nil }
         try #require(!targets.isEmpty)
         for target in targets {
@@ -803,8 +806,13 @@ struct AudioBridgePipelineTests {
                 defer { avformat_free_context(format) }
                 let stream = try #require(avformat_new_stream(format, nil))
                 try bridge.configure(outputStream: stream)
+                var expected = AVChannelLayout()
+                defer { av_channel_layout_uninit(&expected) }
+                try FFmpegError.check(
+                    av_channel_layout_from_string(&expected, target == AV_CODEC_ID_FLAC && name == "2.1" ? "3.0" : name), name
+                )
                 #expect(
-                    av_channel_layout_compare(&stream.pointee.codecpar.pointee.ch_layout, &par.pointee.ch_layout) == 0,
+                    av_channel_layout_compare(&stream.pointee.codecpar.pointee.ch_layout, &expected) == 0,
                     "\(bridge.routeDescription)"
                 )
             }

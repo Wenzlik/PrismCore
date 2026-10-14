@@ -26,6 +26,12 @@ import Libswresample
 /// accepted downgrade for tracks that otherwise wouldn't play at all — a real
 /// EAC3+JOC source never enters this class, it stream-copies.
 ///
+/// A host whose route does take 8 channels can opt into the lossless
+/// alternative anyway (`BridgedAudioFormat.lossless`): FLAC at the source's
+/// channel count and 24 bits, which for TrueHD is its whole 7.1 presentation
+/// without loss (FLAC's 8-channel order is FFmpeg's 7.1, so nothing is
+/// remixed) — the most of a TrueHD Atmos track anything public can deliver.
+///
 /// Shape of the pipeline, and why each stage exists:
 ///
 /// ```
@@ -149,6 +155,14 @@ final class AudioBridge {
     /// `CODECS` attribute is derived from before a bridge exists.
     static var defaultTargetCodecName: String {
         avcodec_get_name(defaultTargetCodec).map { String(cString: $0) } ?? "aac"
+    }
+
+    /// The encoder a base (non-boost) bridged rendition asks for. A build
+    /// without `flac` keeps the compressed target rather than failing the
+    /// track: lossless is a preference, not a requirement.
+    static func targetCodec(for format: BridgedAudioFormat) -> AVCodecID {
+        if format == .lossless, findEncoder(AV_CODEC_ID_FLAC) != nil { return AV_CODEC_ID_FLAC }
+        return defaultTargetCodec
     }
 
     private static func findEncoder(_ codecID: AVCodecID) -> UnsafePointer<AVCodec>? {
@@ -278,12 +292,16 @@ final class AudioBridge {
             )
         } else {
             // TrueHD/DTS can report an unresolved layout before the first frame
-            // is decoded. 5.1 is the useful guess for this codec class; the
-            // resampler reconfigures its *input* side per frame anyway, so a
-            // wrong guess costs a downmix, not a broken session. Its "2.1" for
-            // three channels never reaches an aac encoder: `aacLayout` keys
-            // on the channel count alone.
-            av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : 6)
+            // is decoded. The resampler reconfigures its *input* side per
+            // frame, but the encoder's layout is fixed here — and promised in
+            // the master's CHANNELS — so the guess is the encoder's width:
+            // 5.1 for a compressed target, which cannot carry more anyway;
+            // 7.1 for flac, where guessing 5.1 would fold the 7.1 the host
+            // asked to keep (a narrower source is upmixed with silent
+            // channels, which loses nothing). Its "2.1" for three channels
+            // never reaches aac or flac: both key on the channel count alone.
+            let guess: Int32 = targetCodec == AV_CODEC_ID_FLAC ? 8 : 6
+            av_channel_layout_default(&sourceLayout, sourceChannels > 0 ? sourceChannels : guess)
         }
 
         if let dialogueBoost {
@@ -316,11 +334,22 @@ final class AudioBridge {
             source: codecpar.pointee.sample_rate
         )
         encCtx.pointee.sample_fmt = Self.negotiateSampleFormat(for: encoder)
+        // An integer-only encoder (flac, alac) is handed 32-bit samples so
+        // TrueHD's and DTS-HD MA's 24 bits survive a 16-bit first choice, and
+        // told they are 24: what those decoders produce, and the deepest FLAC
+        // FFmpeg writes without `-strict experimental`.
+        if [AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P].contains(encCtx.pointee.sample_fmt) {
+            encCtx.pointee.bits_per_raw_sample = 24
+        }
         // 128 kbps per channel: 256 stereo, 768 for 5.1 — the rates broadcast
         // EAC3 uses for the same layouts, comfortably transparent for a bed mix
         // and well inside what every HDMI sink accepts. A lossless target
         // ignores it.
-        encCtx.pointee.bit_rate = Int64(channels) * 128_000
+        // A lossless encoder ignores it, and a number there would only make
+        // `routeDescription` claim a rate the stream does not have.
+        if avcodec_descriptor_get(targetCodec).map({ $0.pointee.props & AV_CODEC_PROP_LOSSLESS == 0 }) ?? true {
+            encCtx.pointee.bit_rate = Int64(channels) * 128_000
+        }
         // Encoder time base is samples: the only tick that can't drift against
         // the sample count the FIFO hands out.
         encCtx.pointee.time_base = AVRational(num: 1, den: encCtx.pointee.sample_rate)
@@ -460,6 +489,7 @@ final class AudioBridge {
             )
             fresh.pointee.sample_rate = old.pointee.sample_rate
             fresh.pointee.sample_fmt = old.pointee.sample_fmt
+            fresh.pointee.bits_per_raw_sample = old.pointee.bits_per_raw_sample
             fresh.pointee.bit_rate = old.pointee.bit_rate
             fresh.pointee.time_base = old.pointee.time_base
             // The only flag `init` sets; the others on `old` may have been
@@ -508,7 +538,8 @@ final class AudioBridge {
         let boost = boostFilter.map { " + dialogue boost (\($0.level.rawValue))" } ?? ""
         return "\(from) \(Self.describe(decoderCtx.pointee.ch_layout))"
             + " → \(to) \(Self.describe(encoderCtx.pointee.ch_layout))"
-            + " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" + boost
+            + (encoderCtx.pointee.bit_rate > 0 ? " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" : " lossless")
+            + boost
     }
 
     /// Fill an output stream's `codecpar` from the encoder — the parameters the
@@ -788,6 +819,11 @@ final class AudioBridge {
             if result == swift_AVERROR(EAGAIN) || result == swift_AVERROR_EOF() { return }
             try FFmpegError.check(result, "avcodec_receive_packet(encoder)")
             defer { av_packet_unref(packet) }
+            // flac's flush hands back an empty packet whose only content is
+            // the final STREAMINFO as side data. The init segment already has
+            // the header; an empty sample would only be bumped onto the
+            // timeline by the sanitizer and land in the last fragment.
+            guard packet.pointee.size > 0 else { continue }
             // EAC3 has no reordering, so dts follows pts; being explicit keeps
             // the muxer from inventing one.
             if packet.pointee.dts == swift_AV_NOPTS_VALUE() {
@@ -814,6 +850,15 @@ final class AudioBridge {
     ) throws -> AVChannelLayout {
         var source = source
         var result = AVChannelLayout()
+
+        // FLAC fixes the meaning of each channel count (RFC 9639 §9.1.3) and,
+        // like aac, publishes no list — so the any-layout branch below would
+        // copy a "2.1" (FL FR LFE) straight through, and the decoder would
+        // read it as FL FR FC: the LFE in the centre speaker. Its own layout
+        // for the count instead, and the resampler moves the channels.
+        if encoder.pointee.id == AV_CODEC_ID_FLAC, source.nb_channels > 0 {
+            return try flacLayout(channels: source.nb_channels)
+        }
 
         var raw: UnsafeRawPointer?
         var count: Int32 = 0
@@ -912,6 +957,29 @@ final class AudioBridge {
         return layout
     }
 
+    /// FLAC's channel assignment for a count, as libavcodec's flac decoder
+    /// reads it back out of an MP4 (no channel-mask tag there: five and six
+    /// channels come back as the SIDE variants); wider than 8 is folded to
+    /// 7.1, the most FLAC carries.
+    private static func flacLayout(channels: Int32) throws -> AVChannelLayout {
+        let name = switch channels {
+        case ...1: "mono"
+        case 2: "stereo"
+        case 3: "3.0"
+        case 4: "quad"
+        case 5: "5.0(side)"
+        case 6: "5.1(side)"
+        case 7: "6.1"
+        default: "7.1"
+        }
+        var layout = AVChannelLayout()
+        try FFmpegError.check(
+            av_channel_layout_from_string(&layout, name),
+            "av_channel_layout_from_string(\(name))"
+        )
+        return layout
+    }
+
     /// 48 kHz unless the source already sits on another rate the encoder
     /// supports — resampling rate is avoidable work and a small quality loss.
     private static func negotiateSampleRate(for encoder: UnsafePointer<AVCodec>, source: Int32) -> Int32 {
@@ -931,7 +999,9 @@ final class AudioBridge {
         return supported.max() ?? 48_000
     }
 
-    /// EAC3 is FLTP-only; ask anyway so the code survives a codec swap.
+    /// EAC3 and AAC are FLTP-only. A lossless encoder lists integer formats,
+    /// 16-bit first — taking the first would truncate a 24-bit source to 16,
+    /// so the widest one wins there.
     private static func negotiateSampleFormat(for encoder: UnsafePointer<AVCodec>) -> AVSampleFormat {
         var raw: UnsafeRawPointer?
         var count: Int32 = 0
@@ -939,11 +1009,12 @@ final class AudioBridge {
             nil, encoder, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &raw, &count
         )
         guard query >= 0, let raw, count > 0 else { return AV_SAMPLE_FMT_FLTP }
-        let formats = raw.assumingMemoryBound(to: AVSampleFormat.self)
-        for index in 0..<Int(count) where formats[index] == AV_SAMPLE_FMT_FLTP {
-            return AV_SAMPLE_FMT_FLTP
+        let buffer = UnsafeBufferPointer(start: raw.assumingMemoryBound(to: AVSampleFormat.self), count: Int(count))
+        let formats = buffer.prefix { $0 != AV_SAMPLE_FMT_NONE }
+        for preferred in [AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P] where formats.contains(preferred) {
+            return preferred
         }
-        return formats[0]
+        return formats.first ?? AV_SAMPLE_FMT_FLTP
     }
 
     private static func makeEncoderFrame(

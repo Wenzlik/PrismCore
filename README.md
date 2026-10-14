@@ -67,7 +67,8 @@ table: the app's name, a link, and its platforms.
 | HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC, AC3, EAC3, FLAC, ALAC — bit-for-bit |
-| Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel. Needs an FFmpeg build with the **`eac3` encoder**; without it those sources take the software path instead, which decodes them itself |
+| Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1) |
+| TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
 | Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. `preferredAudioLanguage:` decides which one is `DEFAULT`, so playback starts in the right language instead of switching visibly after it. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
 | Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
 | Subtitles (text) | SubRip / ASS / SSA / WebVTT / mov_text converted during the remux read into segmented WebVTT renditions, cut on the video's own boundaries — so text survives PiP and AirPlay instead of living in a host overlay. ASS inline italics / bold / underline become WebVTT tags; `\an` / `\pos` placement and a WebVTT track's own cue settings ride the timing line, so a caption authored at the top of the frame stays there. External `.srt` / `.vtt` register as first-class renditions |
@@ -701,6 +702,33 @@ bit and the whole mixing-substream block exist on independent substreams only. E
 omission shifted the walk by a bit or two — and a shifted walk does not fail, it
 returns a confident wrong number.
 
+**Dolby Atmos from TrueHD.** Only one Atmos form survives an app on Apple
+platforms: E-AC-3 + JOC, which this engine stream-copies. A TrueHD Atmos track
+cannot be turned into it with anything public. FFmpeg's TrueHD decoder stops at
+the third substream (the 7.1 presentation; `mlpdec.c` caps
+`max_decoded_substream` at 2), so the 16-channel object presentation and its
+metadata are never decoded. No encoder an LGPL engine can ship writes JOC
+(FFmpeg's `eac3` encoder writes neither JOC nor more than 5.1; Dolby's encoders
+are licensed). And no AudioToolbox format takes TrueHD or MAT from an app:
+tvOS builds the MAT stream for HDMI itself. Its LPCM output stops at 7.1, and
+tvOS 26's `…ContentSource_Passthrough` is a loudness/DRC hint, not bitstream
+passthrough. An open-source object decoder does exist (`truehdd`, Apache-2.0),
+but it is reverse-engineered, experimental and Rust, and it has no renderer.
+The one public path that could carry heights, APAC 7.1.4 in HLS, would need
+that decoder plus a renderer plus a device run proving an Apple TV sends APAC
+heights to an AVR. So the engine keeps what is
+keepable. The 7.1 presentation already has the objects mixed in: what is lost
+is their height and placement, not their sound. With `bridgedAudio: .lossless`
+it is served as FLAC 7.1 without loss (FLAC's 8-channel order is FFmpeg's
+7.1, RFC 9639 §9.1.3, so nothing is remixed), which `AVPlayer` takes in fMP4 HLS
+(verified on macOS and in the tvOS 26.5 simulator, not yet on an Apple TV with
+an AVR). The engine says per track that the objects did not make it
+(`ObjectAudioDelivery.notPreserved`), so a host can label the track honestly.
+`TrueHDMajorSync` reads Atmos off the stream (four substreams, the top bit of
+`substream_info`) because `AV_PROFILE_TRUEHD_ATMOS` has the same weakness as the
+E-AC-3 profile: `avformat_find_stream_info` only sets it if it happened to
+decode a frame.
+
 **`hvc1` is a promise the record has to keep.** A stream-copied HEVC track is given
 an `hvc1` sample entry explicitly, because FFmpeg's mp4 muxer defaults HEVC to
 `hev1` and Apple's HLS rules want `hvc1`. But `hvc1` also asserts that every
@@ -1025,6 +1053,12 @@ its `bridge` counters show whether output has actually been produced. Zero
 output during priming is normal. A terminal, completely drained silent bridge
 raises `AudioBridgeFailure.producedNoAudio` through the session error path.
 The software pipeline exposes `.decoded` only after its decoder opens.
+Each entry's `objectAudio` says what became of Dolby Atmos on that track.
+`.preserved` means the served bits carry the objects (stream-copied E-AC-3 +
+JOC). `.notPreserved` means the source has them (TrueHD Atmos, DTS:X) and the
+rendition carries only the channel bed. `.none` means nothing found object
+audio. The answer comes from the bitstream once a track has been read, and from
+the container's metadata until then.
 
 Only the DEFAULT audio rendition and stream-copied ones are produced from the
 first packet. A bridged track that is not the DEFAULT, and every dialogue-boost

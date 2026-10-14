@@ -35,6 +35,8 @@ struct PrismCoreCLI {
           --coordinated-http           read http(s) sources through PrismCore's range reader
           --budget SECONDS             probe budget (default 10; bench defaults to 20)
           --display sdr|hdr|dv         display the master is built for (default dv)
+          --bridged-audio compressed|lossless  what TrueHD/DTS/PCM become: EAC3 5.1
+                                       (default) or FLAC up to 7.1
           -v, --verbose                libav* warnings and engine notices on stderr
 
         probe:      --structure none|layout|full   (default layout)

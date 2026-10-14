@@ -1,4 +1,5 @@
 import Foundation
+import Libavcodec
 
 public enum AudioDelivery: String, Sendable, Equatable {
     case pending, streamCopy, bridged, decoded, noAudioInSource, unavailable
@@ -25,15 +26,84 @@ public struct AudioTrackDelivery: Sendable, Equatable {
     public let streamIndex: Int
     public internal(set) var delivery: AudioDelivery
     public internal(set) var bridge: AudioBridgeProgress?
+    /// What became of Dolby Atmos on this track — the answer behind an
+    /// "Atmos" or "Atmos not preserved" label.
+    public internal(set) var objectAudio: ObjectAudioDelivery = .none
+}
+
+/// Whether a track's Dolby Atmos objects reach the player.
+///
+/// Only one form of Atmos survives this engine: E-AC-3 + JOC, stream-copied
+/// with its `dec3` extension. TrueHD Atmos and DTS:X are bridged, and the
+/// bridge can keep at most the channel bed: FFmpeg decodes TrueHD only up to
+/// its 7.1 presentation (the objects are mixed into it, not lost as sound, but
+/// their height and placement are), and no encoder the engine can ship writes
+/// JOC. Hosts read this per track instead of inferring it from the codec.
+public enum ObjectAudioDelivery: String, Sendable, Equatable {
+    /// Nothing found the source track to carry object audio.
+    case none
+    /// The served rendition carries the objects (`CHANNELS="16/JOC"`).
+    case preserved
+    /// The source carries objects; the served rendition is their channel bed.
+    case notPreserved
+
+    /// Evidence first — the bitstream (`ObjectAudioFinding`, the TrueHD major
+    /// sync) — and only then the container's claim, which is silent more
+    /// often than it is wrong. DTS:X has no bitstream reader yet, so for it
+    /// the claim is all there is.
+    init(sourceCarriesObjects: Bool, delivery: AudioDelivery) {
+        guard sourceCarriesObjects else { self = .none; return }
+        self = delivery == .streamCopy ? .preserved : .notPreserved
+    }
+}
+
+/// What the audio bridge encodes TrueHD, DTS, PCM and the other codecs HLS
+/// cannot carry into.
+public enum BridgedAudioFormat: String, Sendable, Equatable {
+    /// EAC3 at 128 kbps per channel, at most 5.1 (AAC 5.1 in a build without
+    /// the `eac3` encoder). Bitstream-friendly: a sink that takes only stereo
+    /// PCM still gets 5.1 as Dolby Digital Plus.
+    case compressed
+    /// FLAC with the source's own channels, up to 7.1, at up to 24 bits — a
+    /// TrueHD or DTS-HD MA track arrives without loss when its layout is one
+    /// FLAC carries (stereo, 5.1, 7.1; another is remixed onto the nearest),
+    /// its full 7.1 bed instead of a lossy 5.1 fold-down. AVPlayer hands it to the system as
+    /// multichannel PCM, so it suits a route that takes 8 channels (an Apple
+    /// TV on HDMI: `AVAudioSession.maximumOutputNumberOfChannels >= 8`);
+    /// on a stereo route it is downmixed by the system instead. Falls back to
+    /// `.compressed` in a build without the `flac` encoder (`isAvailable`).
+    case lossless
+
+    /// Whether this build can deliver it. `.lossless` needs FFmpeg's `flac`
+    /// encoder, which every MPVKit build ships; a session asked for it in a
+    /// build without one bridges `.compressed`, and its diagnostic report
+    /// says so.
+    public var isAvailable: Bool {
+        self == .compressed || AudioBridge.targetCodec(for: .lossless) == AV_CODEC_ID_FLAC
+    }
 }
 
 final class AudioDeliveryStore: @unchecked Sendable {
     private let lock = NSLock()
     private var tracks: [Int: AudioTrackDelivery] = [:]
     private var prepared = false
+    /// Tracks the probe's metadata called object audio.
+    private var objectAudioClaims: Set<Int> = []
+    /// What a track's own bitstream said, which overrides the claim.
+    private var objectAudioEvidence: [Int: Bool] = [:]
 
     var snapshot: [AudioTrackDelivery] {
-        lock.withLock { tracks.values.sorted { $0.streamIndex < $1.streamIndex } }
+        lock.withLock {
+            tracks.values.sorted { $0.streamIndex < $1.streamIndex }.map { track in
+                var track = track
+                track.objectAudio = ObjectAudioDelivery(
+                    sourceCarriesObjects: objectAudioEvidence[track.streamIndex]
+                        ?? objectAudioClaims.contains(track.streamIndex),
+                    delivery: track.delivery
+                )
+                return track
+            }
+        }
     }
 
     var summary: AudioDelivery {
@@ -46,9 +116,10 @@ final class AudioDeliveryStore: @unchecked Sendable {
         }
     }
 
-    func prepare(indexes: [Int]) {
+    func prepare(indexes: [Int], objectAudioClaims: Set<Int> = []) {
         lock.withLock {
             prepared = true
+            self.objectAudioClaims = objectAudioClaims
             tracks = Dictionary(uniqueKeysWithValues: indexes.map {
                 ($0, AudioTrackDelivery(streamIndex: $0, delivery: .unavailable))
             })
@@ -59,6 +130,15 @@ final class AudioDeliveryStore: @unchecked Sendable {
         lock.withLock {
             tracks[index] = AudioTrackDelivery(streamIndex: index, delivery: delivery, bridge: bridge)
         }
+    }
+
+    func noteSourceObjectAudio(index: Int, present: Bool) {
+        lock.withLock { objectAudioEvidence[index] = present }
+    }
+
+    /// What a track's bitstream said, `nil` while it has not answered.
+    func objectAudioEvidence(index: Int) -> Bool? {
+        lock.withLock { objectAudioEvidence[index] }
     }
 }
 

@@ -47,8 +47,9 @@ public enum StartupPhase: Sendable, Equatable {
     ///
     /// The container's own claims. The bitstream answers that outrank them —
     /// whether an E-AC-3 track really carries JOC most of all — come later,
-    /// from `PrismCoreSession.objectAudio`, because they need produced
-    /// packets to read (see AGENTS.md on `AVCodecParameters.profile`).
+    /// from `PrismCoreSession.objectAudio` (and, for every track including
+    /// TrueHD, `audioTrackDeliveries[…].objectAudio`), because they need read
+    /// packets (see AGENTS.md on `AVCodecParameters.profile`).
     case streamInfoResolved(SourceInfo)
 
     /// The segmentation is decided. `origin` is worth surfacing rather than

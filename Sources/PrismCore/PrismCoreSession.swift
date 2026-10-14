@@ -321,6 +321,10 @@ public actor PrismCoreSession {
         /// in-band `CLOSED-CAPTIONS` renditions. `false` (the default) writes
         /// `CLOSED-CAPTIONS=NONE` instead — see the initializer's doc.
         public var inBandClosedCaptions: Bool = false
+        /// What TrueHD, DTS, PCM and the other bridged codecs are encoded
+        /// into — `.compressed` (EAC3 5.1, the default) or `.lossless` (FLAC
+        /// up to 7.1). See the initializer's doc.
+        public var bridgedAudio: BridgedAudioFormat = .compressed
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -382,7 +386,9 @@ public actor PrismCoreSession {
     /// startup-cost benchmark can watch artifacts appear as they land.
     let workDirectory: URL
     private let server: LoopbackHTTPServer
-    private let remuxer: HLSRemuxer
+    /// Internal for the tests that need the bitstream's answer apart from
+    /// the container's claim (`AudioDeliveryStore.objectAudioEvidence`).
+    let remuxer: HLSRemuxer
     /// Internal for the tests that prove a cache read never touches it.
     nonisolated let demand: DemandCoordinator
     /// The producer's per-write broadcast: what `start()` sleeps on until
@@ -438,6 +444,8 @@ public actor PrismCoreSession {
 
     /// What the **bitstream** said about object audio on this session's
     /// stream-copied E-AC-3 tracks, one finding per track, in stream order.
+    /// E-AC-3 JOC only: whether a TrueHD track carries Atmos (and that the
+    /// bridge cannot keep it) is on `audioTrackDeliveries[…].objectAudio`.
     ///
     /// Empty until the first such track has been asked (a segment's worth of
     /// packets into production), and it stays empty for a source that has no
@@ -596,7 +604,8 @@ public actor PrismCoreSession {
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
-        inBandClosedCaptions: Bool = false
+        inBandClosedCaptions: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed
     ) throws {
         try self.init(
             url: url,
@@ -618,7 +627,8 @@ public actor PrismCoreSession {
             input: input,
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory,
-            inBandClosedCaptions: inBandClosedCaptions
+            inBandClosedCaptions: inBandClosedCaptions,
+            bridgedAudio: bridgedAudio
         )
     }
 
@@ -684,6 +694,19 @@ public actor PrismCoreSession {
     ///   cue for the session's lifetime; `.bounded` keeps the newest only —
     ///   see `SubtitleCueHistory` for what a host opting in gives up, and
     ///   `subtitleCueHistoryStats` for what was let go.
+    /// - Parameter bridgedAudio: what tracks HLS cannot carry as they are
+    ///   (TrueHD, DTS, PCM, …) are encoded into. `.compressed` (the default)
+    ///   is EAC3 at 128 kbps per channel, at most 5.1 — what every HDMI sink
+    ///   takes as a bitstream. `.lossless` is FLAC with the source's own
+    ///   channels up to 7.1, at up to 24 bits: a TrueHD track arrives as its
+    ///   whole 7.1 presentation, without loss, instead of a lossy 5.1
+    ///   fold-down.
+    ///   Neither keeps Atmos objects — nothing public can (see
+    ///   `ObjectAudioDelivery`); `.lossless` keeps everything else. Choose it
+    ///   for a route that takes 8 channels
+    ///   (`AVAudioSession.maximumOutputNumberOfChannels >= 8`).
+    ///   Dialogue-boost renditions stay EAC3 either way, and
+    ///   `makeMuxedFallbackSession()` goes back to `.compressed`.
     /// - Parameter inBandClosedCaptions: what the master says about the
     ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
     ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
@@ -714,7 +737,8 @@ public actor PrismCoreSession {
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
-        inBandClosedCaptions: Bool = false
+        inBandClosedCaptions: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -732,7 +756,8 @@ public actor PrismCoreSession {
             coordinatedHTTP: coordinatedHTTP || probed?.interruptGuard.usesCoordinatedHTTP == true,
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory.normalized,
-            inBandClosedCaptions: inBandClosedCaptions
+            inBandClosedCaptions: inBandClosedCaptions,
+            bridgedAudio: bridgedAudio
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -773,6 +798,7 @@ public actor PrismCoreSession {
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
             inBandClosedCaptions: inBandClosedCaptions,
+            bridgedAudio: bridgedAudio,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -844,7 +870,8 @@ public actor PrismCoreSession {
         input: PrismCoreInputFactory? = nil,
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
-        inBandClosedCaptions: Bool = false
+        inBandClosedCaptions: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -863,7 +890,8 @@ public actor PrismCoreSession {
             input: input,
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory,
-            inBandClosedCaptions: inBandClosedCaptions
+            inBandClosedCaptions: inBandClosedCaptions,
+            bridgedAudio: bridgedAudio
         )
     }
 
@@ -971,7 +999,8 @@ public actor PrismCoreSession {
             // Carried so a fallback cannot quietly go back to `.complete`
             // and grow the memory the host bounded on purpose.
             subtitleCueHistory: options.subtitleCueHistory,
-            inBandClosedCaptions: options.inBandClosedCaptions
+            inBandClosedCaptions: options.inBandClosedCaptions,
+            bridgedAudio: options.bridgedAudio
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
@@ -1012,6 +1041,12 @@ public actor PrismCoreSession {
             // serve it: boost renditions live in a master, and this shape has
             // none. Dropping it here would instead make the next clone off the
             // fallback session silently forget the host ever asked.
+            //
+            // Lossless bridging is NOT carried: this is the last tier, and
+            // multichannel FLAC over HLS is the one audio form here that no
+            // device run has vouched for — a master refused because of it
+            // must not be retried with it.
+            options.bridgedAudio = .compressed
         }
     }
 
@@ -1047,7 +1082,11 @@ public actor PrismCoreSession {
                 panelIsCurrentlyHDR: display.panelIsCurrentlyHDR,
                 source: display.source
             )
-            // This tier keeps the master; only the claim goes.
+            // This tier keeps the master; only the claim goes. Lossless
+            // bridging stays too: a DV title with TrueHD is the very source
+            // it exists for, and this tier answers a panel that refused the
+            // DV claim. Should FLAC have been the cause, it costs one more
+            // refusal before the muxed tier, which does drop it.
             options.forceMuxedShape = false
         }
     }
@@ -1326,7 +1365,10 @@ public actor PrismCoreSession {
                 coordinatedHTTP: options.coordinatedHTTP,
                 reachability: options.reachability == .loopbackOnly
                     ? "loopbackOnly" : "localNetworkUnencryptedForAirPlay",
-                externalSubtitleCount: externalSubtitles.count
+                externalSubtitleCount: externalSubtitles.count,
+                // What was delivered, not only what was asked for.
+                bridgedAudio: options.bridgedAudio.isAvailable
+                    ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)"
             ),
             startup: .init(
                 checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },
@@ -1368,6 +1410,10 @@ public actor PrismCoreSession {
                     .init(streamIndex: $0.streamIndex, complexityIndex: $0.complexityIndex,
                           claimedByMetadata: $0.claimedByMetadata, isObjectAudio: $0.isObjectAudio,
                           wasMissedByMetadata: $0.wasMissedByMetadata)
+                },
+                audioTracks: audioTrackDeliveries.map {
+                    .init(streamIndex: $0.streamIndex, delivery: $0.delivery.rawValue,
+                          objectAudio: $0.objectAudio.rawValue)
                 },
                 dolbyVisionConversion: dolbyVisionConversion.map {
                     .init(convertedRPUs: $0.convertedRPUs, failedRPUs: $0.failedRPUs,
