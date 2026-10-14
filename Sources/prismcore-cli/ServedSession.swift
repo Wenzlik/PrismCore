@@ -55,7 +55,8 @@ func withServedSession<T>(
         probed: probed,
         keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
         keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
-        coordinatedHTTP: options.coordinatedHTTP
+        coordinatedHTTP: options.coordinatedHTTP,
+        bridgedAudio: options.bridgedAudio
     )
     await beforeStart(session)
     func finish() async {

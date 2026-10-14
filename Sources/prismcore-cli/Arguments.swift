@@ -39,6 +39,7 @@ struct SourceOptions: Sendable {
     var coordinatedHTTP = false
     var budget: Duration?
     var display = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true)
+    var bridgedAudio = BridgedAudioFormat.compressed
     /// Everything after a bare `--`, verbatim (validate passes it on).
     var passthrough: [String] = []
 }
@@ -82,6 +83,12 @@ struct ArgumentReader {
                 case "dv": options.display = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true)
                 case let other: throw usage("--display takes sdr, hdr or dv, not \"\(other)\"")
                 }
+            case "--bridged-audio":
+                let raw = try value(for: argument)
+                guard let format = BridgedAudioFormat(rawValue: raw) else {
+                    throw usage("--bridged-audio takes compressed or lossless, not \"\(raw)\"")
+                }
+                options.bridgedAudio = format
             default:
                 if try extra(argument, &self) { continue }
                 if argument.hasPrefix("-"), argument.count > 1 {
