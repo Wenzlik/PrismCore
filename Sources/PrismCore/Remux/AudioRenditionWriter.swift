@@ -45,6 +45,13 @@ final class AudioRenditionWriter {
     let playlist: MediaPlaylistWriter
     private var bridge: AudioBridge?
     var onBridgeProgress: ((AudioBridgeProgress) -> Void)?
+    /// Relayed from the bridge (`AudioBridge.onSourceObjectAudio`). Set by
+    /// the remuxer.
+    var onSourceObjectAudio: ((Bool) -> Void)?
+    /// The encoder a `.bridge` route asks for. A boost rendition keeps the
+    /// compressed default: it is a derived extra whose point is
+    /// intelligibility, not fidelity.
+    private let bridgeTarget: AVCodecID
     private var outputIndex: Int32 = 0
     private var segmentIndex = 0
     /// Boundary time that had no audio bytes to carry (see `cut`). Rolled into
@@ -111,9 +118,11 @@ final class AudioRenditionWriter {
 
     init(
         route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL,
-        lazy: Bool = false
+        lazy: Bool = false,
+        bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec
     ) {
         self.route = route
+        self.bridgeTarget = route.mode == .bridge ? bridgeTarget : AudioBridge.defaultTargetCodec
         self.track = track
         self.ordinal = ordinal
         self.isLazy = lazy
@@ -169,7 +178,8 @@ final class AudioRenditionWriter {
                     codecpar: inStream.pointee.codecpar,
                     timeBase: inStream.pointee.time_base,
                     globalHeader: true,
-                    dialogueBoost: route.mode.dialogueBoostLevel
+                    dialogueBoost: route.mode.dialogueBoostLevel,
+                    targetCodec: bridgeTarget
                 )
                 negotiatedChannelCount = probeBridge.outputChannelCount
                 negotiatedCodecName = probeBridge.outputCodecName
@@ -189,9 +199,11 @@ final class AudioRenditionWriter {
                 globalHeader: true,
                 // Nil for a plain bridge; a boost rendition's bridge carries
                 // the centre-favouring filter between decode and re-encode.
-                dialogueBoost: route.mode.dialogueBoostLevel
+                dialogueBoost: route.mode.dialogueBoostLevel,
+                targetCodec: bridgeTarget
             )
             bridge?.onProgress = onBridgeProgress
+            bridge?.onSourceObjectAudio = onSourceObjectAudio
         }
         try openMuxer(input: input, restart: restart)
     }
@@ -558,8 +570,9 @@ final class AudioRenditionWriter {
                 profileName: track.profileName
             )
         case .bridge, .boost:
-            // Whichever encoder the bridge negotiated — EAC3 where the build
-            // has it, AAC otherwise — never assumed.
+            // Whichever encoder the bridge negotiated — FLAC when the host
+            // asked for lossless, else EAC3 where the build has it, AAC
+            // otherwise — never assumed.
             return MasterPlaylistBuilder.audioCodecString(
                 forCodecName: bridge?.outputCodecName ?? negotiatedCodecName
                     ?? AudioBridge.defaultTargetCodecName

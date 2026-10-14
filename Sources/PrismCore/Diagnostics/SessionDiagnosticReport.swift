@@ -215,6 +215,8 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         /// `loopbackOnly` or `localNetworkUnencryptedForAirPlay`.
         public var reachability: String
         public var externalSubtitleCount: Int
+        /// `compressed` or `lossless` — what a bridged track was encoded into.
+        public var bridgedAudio: String? = nil
 
         public struct Display: Sendable, Equatable, Codable {
             public var isHDRReady: Bool

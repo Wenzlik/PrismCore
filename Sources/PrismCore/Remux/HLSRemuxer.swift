@@ -324,6 +324,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Declare the scouted caption services as in-band `CLOSED-CAPTIONS` too,
     /// instead of `NONE`. See `PrismCoreSession.Options.inBandClosedCaptions`.
     private let inBandClosedCaptions: Bool
+    /// What a base bridged track is encoded into. See
+    /// `PrismCoreSession.Options.bridgedAudio`.
+    private let bridgedAudio: BridgedAudioFormat
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
@@ -497,6 +500,7 @@ final class HLSRemuxer: @unchecked Sendable {
 
     func recordObjectAudio(_ finding: ObjectAudioFinding) {
         objectAudioLock.withLock { storedObjectAudio[finding.streamIndex] = finding }
+        audioDeliveryStore.noteSourceObjectAudio(index: finding.streamIndex, present: finding.isObjectAudio)
     }
 
     /// The display criteria this session wants programmed before AVPlayer
@@ -610,6 +614,7 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
         inBandClosedCaptions: Bool = false,
+        bridgedAudio: BridgedAudioFormat = .compressed,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -643,6 +648,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.preferredAudioLanguage = preferredAudioLanguage
         self.preferredSubtitleLanguage = preferredSubtitleLanguage
         self.inBandClosedCaptions = inBandClosedCaptions
+        self.bridgedAudio = bridgedAudio
     }
 
     func cancel() {
@@ -869,7 +875,10 @@ final class HLSRemuxer: @unchecked Sendable {
         // decoded frames and must not be paid twice); otherwise derive it here
         // from our own context.
         let info = adoptedInfo ?? SourceProbe.describe(input: input)
-        audioDeliveryStore.prepare(indexes: info.audioTracks.map(\.streamIndex))
+        audioDeliveryStore.prepare(
+            indexes: info.audioTracks.map(\.streamIndex),
+            objectAudioClaims: Set(info.audioTracks.filter(\.isObjectAudio).map(\.streamIndex))
+        )
         // Chapters can't ride the served HLS (the format has no way to carry
         // them), so the session surfaces them as API instead — publish before
         // any packet work so they are readable the moment `start()` returns.
@@ -1259,10 +1268,14 @@ final class HLSRemuxer: @unchecked Sendable {
                     track: track,
                     ordinal: ordinal,
                     parent: outputDirectory,
-                    lazy: production == .lazy
+                    lazy: production == .lazy,
+                    bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio)
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
+                }
+                rendition.onSourceObjectAudio = { [audioDeliveryStore, index = Int(route.index)] present in
+                    audioDeliveryStore.noteSourceObjectAudio(index: index, present: present)
                 }
                 rendition.onBridgeProgress = { [audioDeliveryStore, index = Int(route.index)] progress in
                     audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
@@ -1446,11 +1459,15 @@ final class HLSRemuxer: @unchecked Sendable {
                         timeBase: inStream.pointee.time_base,
                         // mp4/mov is a global-header muxer by definition; the
                         // encoder's extradata must land in codecpar, not in-band.
-                        globalHeader: true
+                        globalHeader: true,
+                        targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
                     )
                     muxedBridge = bridge
                     bridge.onProgress = { [audioDeliveryStore, index = Int(audio.index)] progress in
                         audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
+                    }
+                    bridge.onSourceObjectAudio = { [audioDeliveryStore, index = Int(audio.index)] present in
+                        audioDeliveryStore.noteSourceObjectAudio(index: index, present: present)
                     }
                     audioDeliveryStore.update(index: Int(audio.index), delivery: .bridged)
                     plan.append(.init(inputIndex: audio.index) { outStream in
@@ -1869,7 +1886,8 @@ final class HLSRemuxer: @unchecked Sendable {
                         let fresh = try AudioBridge(
                             codecpar: inStream.pointee.codecpar,
                             timeBase: inStream.pointee.time_base,
-                            globalHeader: true
+                            globalHeader: true,
+                            targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
                         )
                         muxedBridge = fresh
                         fresh.onProgress = { [audioDeliveryStore, index = Int(index)] progress in
