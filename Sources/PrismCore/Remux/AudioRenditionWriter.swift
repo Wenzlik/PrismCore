@@ -120,6 +120,12 @@ final class AudioRenditionWriter {
     /// report — a field log has to show it happened.
     private var suspensions = 0
     private var resumptions = 0
+    /// Segment fetches under this directory still waiting for their file,
+    /// index → count (`beginWait`/`endWait`). Under `armLock` with `wanted`:
+    /// a rendition somebody waits on is wanted by definition, and a re-arm
+    /// anchors at the lowest of them — a join anchored at whichever wait woke
+    /// first skipped the one below it, which then timed out.
+    private var pendingWaits: [Int: Int] = [:]
     /// Whether the muxer (and bridge) currently exist. Always true for an
     /// eager rendition after `open` until a suspension; a lazy one turns it
     /// on when the producer honours the arm request.
@@ -176,10 +182,32 @@ final class AudioRenditionWriter {
     func requestSuspend() -> Bool {
         guard isSuspendable else { return false }
         return armLock.withLock {
-            guard wanted else { return false }
+            // Not while a fetch waits for one of its segments: stopping it
+            // then is what left a re-armed join without the segment below.
+            guard wanted, pendingWaits.isEmpty else { return false }
             wanted = false
             return true
         }
+    }
+
+    /// A segment fetch under this directory starts waiting for `index`
+    /// (registered before it can arm the rendition). Balanced by `endWait`
+    /// on every exit — served, timed out, cancelled. Server-thread safe.
+    func beginWait(index: Int) {
+        armLock.withLock { pendingWaits[index, default: 0] += 1 }
+    }
+
+    func endWait(index: Int) {
+        armLock.withLock {
+            guard let count = pendingWaits[index] else { return }
+            pendingWaits[index] = count > 1 ? count - 1 : nil
+        }
+    }
+
+    /// The lowest segment a fetch is still waiting for — where a (re-)arm
+    /// must join so every pending wait is produced. `nil` when none waits.
+    var lowestPendingWait: Int? {
+        armLock.withLock { pendingWaits.keys.min() }
     }
 
     /// Whether the rendition is wanted (armed) — not the same as producing:

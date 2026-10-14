@@ -21,9 +21,12 @@ source-compatible.)
   that encodes (bridge or dialogue boost) is now suspended once three audio
   segment fetches in a row went to other renditions — counted in fetches,
   not time, so a paused player loses nothing — at the producer's next
-  segment boundary, its bridge closed and everything on disk kept. The next
-  fetch under its directory re-arms it through the lazy rendition's own path
-  (a forced re-anchor at the demanded segment), so a switch back is served
+  segment boundary, its bridge closed and everything on disk kept — never
+  while a fetch under it is still waiting for a segment. The next fetch
+  under its directory re-arms it through the lazy rendition's own path (a
+  forced re-anchor at the lowest segment a fetch under it is waiting for,
+  so pipelined read-ahead of N and N+1 cannot leave N unproduced whichever
+  wait wakes first), so a switch back is served
   on the plan's timeline through the init the player already holds. The same
   goes for a lazy alternate the viewer leaves again. Stream copies are never
   suspended. A sequential session keeps its bridged DEFAULT eager: with no

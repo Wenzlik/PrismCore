@@ -626,6 +626,27 @@ final class HLSRemuxer: @unchecked Sendable {
         return renditionsLock.withLock { storedRenditionsByDirectory[directory]?.arm() ?? false }
     }
 
+    /// A segment fetch under `audioN/` starts (`begin`) or stops waiting for
+    /// its file: the rendition's pending-wait registry, which keeps it from
+    /// being suspended and tells a (re-)arm where to join
+    /// (`lowestAudioWait`). No-op for a path that names no rendition.
+    func noteAudioWait(path: String, begin: Bool) {
+        guard let directory = path.split(separator: "/").first.map(String.init),
+              let index = PlanSegmentProvider.segmentIndex(inPath: path) else { return }
+        renditionsLock.withLock {
+            guard let rendition = storedRenditionsByDirectory[directory] else { return }
+            if begin { rendition.beginWait(index: index) } else { rendition.endWait(index: index) }
+        }
+    }
+
+    /// The lowest segment a fetch under the rendition of `path` still waits
+    /// for — where arming it must anchor production, rather than at the
+    /// fetch that happened to arm it.
+    func lowestAudioWait(path: String) -> Int? {
+        guard let directory = path.split(separator: "/").first.map(String.init) else { return nil }
+        return renditionsLock.withLock { storedRenditionsByDirectory[directory]?.lowestPendingWait }
+    }
+
     /// Suspensions and resumptions of each rendition that can be suspended,
     /// keyed like `AudioRenditionProduction` (stream, boost level), for the
     /// diagnostic report.

@@ -831,6 +831,12 @@ public actor PrismCoreSession {
         provider.audioRearm = { [remuxer] path in
             remuxer.rearmAudio(path: path)
         }
+        provider.audioWait = { [remuxer] path, begin in
+            remuxer.noteAudioWait(path: path, begin: begin)
+        }
+        provider.audioLowestWait = { [remuxer] path in
+            remuxer.lowestAudioWait(path: path)
+        }
         // And the seam that makes a runtime audio-delay change atomic from the
         // outside: the producer marks the old offset's segments unservable
         // before `pendingAudioDelaySeconds` clears, so a host that refreshes

@@ -33,6 +33,8 @@ final class DemandCoordinator: @unchecked Sendable {
     /// down several times to produce nothing. The newest still wins — it is
     /// what the burst settles on.
     private var reanchorInFlight: Int?
+    /// Whether `reanchorInFlight` was a forced join (`lowerForcedJoin`).
+    private var inFlightIsForced = false
     static let anchorDebounce: Duration = .milliseconds(150)
     /// The producer's current position: the segment it is producing now.
     /// `-1` until production starts.
@@ -97,7 +99,7 @@ final class DemandCoordinator: @unchecked Sendable {
         lock.withLock {
             // Moving past the re-anchored index means its first segment
             // landed: the debounce no longer holds requests back.
-            if let inFlight = reanchorInFlight, index != inFlight { reanchorInFlight = nil }
+            if let inFlight = reanchorInFlight, index != inFlight { reanchorInFlight = nil; inFlightIsForced = false }
             producingIndex = index
         }
     }
@@ -127,6 +129,7 @@ final class DemandCoordinator: @unchecked Sendable {
             guard let anchor = requestedAnchor, anchorIsDue(now: .now) else { return nil }
             defer { requestedAnchor = nil; anchorIsForced = false; requestedAt = nil }
             reanchorInFlight = anchor
+            inFlightIsForced = anchorIsForced
             return (index: anchor, forced: anchorIsForced)
         }
     }
@@ -324,6 +327,27 @@ final class DemandCoordinator: @unchecked Sendable {
             // Signalled under the lock, so a producer that is between its
             // `requestedAnchor == nil` check and its `wait` cannot miss this.
             lock.broadcast()
+        }
+    }
+
+    /// A pending wait of a joining rendition found production headed for a
+    /// forced join ABOVE its segment `index` (pending or taken, first
+    /// segment not landed): production from there never writes `index`, so
+    /// the join moves down to it. Only a forced join within the forward-wait
+    /// window is moved — one further up rides on a seek elsewhere (a request
+    /// after a forced one keeps the flag), and a seek is where the player is.
+    /// Returns `true` when moved.
+    @discardableResult
+    func lowerForcedJoin(to index: Int) -> Bool {
+        lock.withLock {
+            let join = requestedAnchor.map { anchorIsForced ? $0 : nil }
+                ?? (inFlightIsForced ? reanchorInFlight : nil)
+            guard let join, join > index, join - index <= Self.forwardWaitWindow else { return false }
+            requestedAnchor = index
+            requestedAt = .now
+            anchorIsForced = true
+            lock.broadcast()
+            return true
         }
     }
 

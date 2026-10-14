@@ -271,6 +271,169 @@ struct SuspendedRenditionTests {
         #expect(coordinator.takeAnchorRequestDetailed()?.index == 30)
     }
 
+    /// A dormant, suspendable rendition (never opened: a lazy one, or one
+    /// whose suspension the producer applied) wired into a provider the way
+    /// the session wires the remuxer, over a 40-segment plan with the player
+    /// on another track at 2–3.
+    private func joiningRendition(_ name: String, timeout: Duration) throws
+        -> (root: URL, writer: AudioRenditionWriter, coordinator: DemandCoordinator, provider: PlanSegmentProvider) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("audio0"), withIntermediateDirectories: true)
+        let track = AudioTrackInfo(
+            streamIndex: 1, codecName: "opus", profileName: nil,
+            channelCount: 1, channelLayoutDescription: "mono",
+            sampleRate: 48_000, language: "eng", title: nil,
+            isObjectAudio: false, copyability: .requiresAudioBridge
+        )
+        let writer = AudioRenditionWriter(
+            route: .init(index: 1, mode: .bridge), track: track, ordinal: 0,
+            parent: root, lazy: true, suspendable: true
+        )
+        let coordinator = DemandCoordinator()
+        coordinator.publish(plan: SegmentPlan(
+            entries: (0..<40).map { .init(startPTS: Int64($0) * 6000, duration: 6.0) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        ))
+        coordinator.noteFetch(of: 2)
+        coordinator.setProducing(index: 3)
+        var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
+        provider.productionTimeout = timeout
+        // The writer's seams are lock-guarded; the type just is not marked.
+        nonisolated(unsafe) let rendition = writer
+        provider.audioDemand = { _ in rendition.arm() }
+        provider.audioRearm = { _ in rendition.arm() }
+        provider.audioWait = { path, begin in
+            guard let index = PlanSegmentProvider.segmentIndex(inPath: path) else { return }
+            if begin { rendition.beginWait(index: index) } else { rendition.endWait(index: index) }
+        }
+        provider.audioLowestWait = { _ in rendition.lowestPendingWait }
+        return (root, writer, coordinator, provider)
+    }
+
+    private static func segmentPath(_ index: Int) -> String { String(format: "audio0/seg%05d.m4s", index) }
+
+    @Test("Fetches of N and N+1 of a re-armed rendition, re-suspended before the join and N+1 waking first, are both served")
+    func rearmJoinsAtLowestPendingWait() async throws {
+        let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreRearmLowest", timeout: .seconds(2))
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The player comes back: N = 20 arms the rendition (forced join at
+        // 20); the pipelined 21 finds it wanted.
+        guard case .pending(let first) = await provider.data(forPath: Self.segmentPath(20)),
+              case .pending(let second) = await provider.data(forPath: Self.segmentPath(21)) else {
+            Issue.record("misses must be pending"); return
+        }
+        // Three overlapping fetches of the old track judge it left before
+        // the producer joined it: a rendition with fetches waiting on it is
+        // wanted, and stays so.
+        #expect(writer.requestSuspend() == false, "suspended a rendition two fetches are waiting on")
+        // N+1's wait wakes first.
+        let serveSecond = Task { await second.resolve() }
+        try await Task.sleep(for: .milliseconds(100))
+        let serveFirst = Task { await first.resolve() }
+        try await Task.sleep(for: DemandCoordinator.anchorDebounce * 2)
+        var position = 3
+        while let request = coordinator.takeAnchorRequestDetailed() { position = request.index }
+        #expect(position == 20, "the join moved above the pending segment 20")
+        for index in position...21 {
+            coordinator.setProducing(index: index)
+            try Data("moof".utf8).write(to: root.appendingPathComponent(Self.segmentPath(index)))
+        }
+        guard case .data = await serveFirst.value else { Issue.record("the wait on 20 timed out"); return }
+        guard case .data = await serveSecond.value else { Issue.record("the wait on 21 timed out"); return }
+        #expect(writer.lowestPendingWait == nil)
+    }
+
+    @Test("An arm or re-arm joins at the rendition's lowest pending wait, not at the fetch that armed it")
+    func armJoinsAtLowestPendingWait() async throws {
+        let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreArmLowest", timeout: .seconds(2))
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A wait on 20 already registered when 21's fetch is the one that
+        // arms the rendition: the join is at 20.
+        writer.beginWait(index: 20)
+        guard case .pending(let second) = await provider.data(forPath: Self.segmentPath(21)) else {
+            Issue.record("miss of 21 must be pending"); return
+        }
+        let taken = coordinator.takeAnchorRequestDetailed()
+        #expect(taken?.index == 20 && taken?.forced == true)
+        // A join production took above a pending wait (another rendition's,
+        // say, at 21) is pulled down by that wait's next look.
+        writer.endWait(index: 20)
+        coordinator.requestProduction(of: 22, force: true)
+        _ = coordinator.takeAnchorRequestDetailed()
+        let serve = Task { await second.resolve() }
+        let deadline = ContinuousClock.now + .seconds(1)
+        var lowered: Int?
+        while lowered == nil, ContinuousClock.now < deadline {
+            lowered = coordinator.takeAnchorRequestDetailed()?.index
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(lowered == 21, "a forced join above the pending wait stayed there")
+        try Data("moof".utf8).write(to: root.appendingPathComponent(Self.segmentPath(21)))
+        guard case .data = await serve.value else { Issue.record("the wait on 21 timed out"); return }
+    }
+
+    @Test("A pending wait leaves the registry on timeout, cancellation and a hit, and pins no later join")
+    func pendingWaitsEndOnEveryExit() async throws {
+        let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreWaitExit", timeout: .milliseconds(300))
+        defer { try? FileManager.default.removeItem(at: root) }
+        // Timeout.
+        guard case .pending(let timesOut) = await provider.data(forPath: Self.segmentPath(20)) else {
+            Issue.record("miss of 20 must be pending"); return
+        }
+        #expect(writer.lowestPendingWait == 20)
+        guard case .notFound = await timesOut.resolve() else { Issue.record("expected a timeout"); return }
+        #expect(writer.lowestPendingWait == nil, "a timed-out wait stayed registered")
+        // Cancellation.
+        guard case .pending(let cancelled) = await provider.data(forPath: Self.segmentPath(21)) else {
+            Issue.record("miss of 21 must be pending"); return
+        }
+        let serve = Task { await cancelled.resolve() }
+        serve.cancel()
+        _ = await serve.value
+        #expect(writer.lowestPendingWait == nil, "a cancelled wait stayed registered")
+        // A hit.
+        try Data("moof".utf8).write(to: root.appendingPathComponent(Self.segmentPath(5)))
+        guard case .data = await provider.data(forPath: Self.segmentPath(5)) else { Issue.record("hit"); return }
+        #expect(writer.lowestPendingWait == nil, "a served hit stayed registered")
+        // Nothing waits: the rendition can be left again, and the next
+        // return joins where it is fetched, not at a stale 20.
+        #expect(writer.requestSuspend())
+        while coordinator.takeAnchorRequestDetailed() != nil {}
+        guard case .pending(let later) = await provider.data(forPath: Self.segmentPath(30)) else {
+            Issue.record("miss of 30 must be pending"); return
+        }
+        let join = coordinator.takeAnchorRequestDetailed()
+        #expect(join?.index == 30 && join?.forced == true)
+        let cancel = Task { await later.resolve() }
+        cancel.cancel()
+        _ = await cancel.value
+    }
+
+    @Test("A seek elsewhere still wins over a joining rendition's pending wait")
+    func seekWinsOverPendingJoinWait() async throws {
+        let (root, writer, coordinator, provider) = try joiningRendition("PrismCoreSeekWins", timeout: .seconds(2))
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard case .pending(let stale) = await provider.data(forPath: Self.segmentPath(20)) else {
+            Issue.record("miss of 20 must be pending"); return
+        }
+        #expect(coordinator.takeAnchorRequestDetailed()?.index == 20)
+        coordinator.setProducing(index: 20)
+        coordinator.setProducing(index: 21)
+        // The player seeks to 30: the variant's fetch re-anchors there, while
+        // the wait on 20 has not been cancelled yet.
+        coordinator.noteFetch(of: 30)
+        coordinator.requestProduction(of: 30)
+        let serve = Task { await stale.resolve() }
+        try await Task.sleep(for: .milliseconds(500))
+        var position: Int?
+        while let request = coordinator.takeAnchorRequestDetailed() { position = request.index }
+        #expect(position == 30, "a pending wait pulled the seek back")
+        serve.cancel()
+        _ = await serve.value
+        #expect(writer.lowestPendingWait == nil)
+    }
+
     // MARK: - A session
 
     @Test("A bridged DEFAULT the player left stops encoding, and resumes on the timeline when the player comes back")
