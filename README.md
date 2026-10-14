@@ -1068,6 +1068,15 @@ A sequential session — no keyframe plan, so no demand seam — leaves those
 renditions out of the master instead of encoding them for the whole film.
 `audioRenditionProductions` lists which was which, and
 `AudioRenditionProduction.summary(_:)` is its one-line form for a startup log.
+In a planned session an encoded rendition — the bridged DEFAULT included — is
+also stopped once the player has switched away from it (three audio segment
+fetches in a row under other renditions), and started again by the next fetch
+under its directory, which re-anchors production exactly like a first
+selection. Stream copies keep running, and a sequential session keeps its
+bridged DEFAULT for the whole film (nothing to re-anchor on). The diagnostic
+report counts each rendition's `suspensions` and `resumptions`;
+`cachedAudio` has nothing to return for a stopped rendition's time after it
+stopped.
 
 Audio delay is fixed at construction and carried by every clone. Changing it
 mid-title means a replacement session and a host-managed handover at the current

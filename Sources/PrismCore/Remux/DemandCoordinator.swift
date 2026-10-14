@@ -24,6 +24,14 @@ final class DemandCoordinator: @unchecked Sendable {
     /// and the muxers have to be rebuilt at a boundary for it to join with a
     /// whole first segment. Consumed together with the anchor.
     private var anchorIsForced = false
+    /// Whether `requestedAnchor` is a join itself — set by a forced request,
+    /// cleared by any unforced one that replaces it. Separate from
+    /// `anchorIsForced`, which stays sticky (a seek over a pending join still
+    /// needs the rebuild): only a join may be held against read-ahead or
+    /// lowered by `lowerForcedJoin`. A seek that inherited the force used to
+    /// count as a join, and the stale join's waits pulled it back down to
+    /// segments the player had left.
+    private var anchorIsJoin = false
     /// When the current `requestedAnchor` was made, for the scrub debounce.
     private var requestedAt: ContinuousClock.Instant?
     /// A re-anchor the producer took whose first segment has not landed yet
@@ -33,6 +41,8 @@ final class DemandCoordinator: @unchecked Sendable {
     /// down several times to produce nothing. The newest still wins — it is
     /// what the burst settles on.
     private var reanchorInFlight: Int?
+    /// Whether `reanchorInFlight` is a join (`anchorIsJoin` when taken).
+    private var inFlightIsJoin = false
     static let anchorDebounce: Duration = .milliseconds(150)
     /// The producer's current position: the segment it is producing now.
     /// `-1` until production starts.
@@ -97,7 +107,7 @@ final class DemandCoordinator: @unchecked Sendable {
         lock.withLock {
             // Moving past the re-anchored index means its first segment
             // landed: the debounce no longer holds requests back.
-            if let inFlight = reanchorInFlight, index != inFlight { reanchorInFlight = nil }
+            if let inFlight = reanchorInFlight, index != inFlight { reanchorInFlight = nil; inFlightIsJoin = false }
             producingIndex = index
         }
     }
@@ -125,8 +135,9 @@ final class DemandCoordinator: @unchecked Sendable {
     func takeAnchorRequestDetailed() -> (index: Int, forced: Bool)? {
         lock.withLock {
             guard let anchor = requestedAnchor, anchorIsDue(now: .now) else { return nil }
-            defer { requestedAnchor = nil; anchorIsForced = false; requestedAt = nil }
+            defer { requestedAnchor = nil; anchorIsForced = false; anchorIsJoin = false; requestedAt = nil }
             reanchorInFlight = anchor
+            inFlightIsJoin = anchorIsJoin
             return (index: anchor, forced: anchorIsForced)
         }
     }
@@ -298,9 +309,26 @@ final class DemandCoordinator: @unchecked Sendable {
     /// serial production to reach it was up to two segments of silence.
     func requestProduction(of index: Int, force: Bool = false) {
         lock.withLock {
-            let current = producingIndex
+            // Judged against where production is HEADED, not where it is: a
+            // pending anchor, else a taken re-anchor whose first segment has
+            // not landed (`producingIndex` still names the old position
+            // until the demuxer seek is done), else the producer itself.
+            // Read-ahead right behind a seek's or a forced join's anchor N
+            // (N+1 pipelined before production reached N) used to move the
+            // anchor to N+1 — honoured once the debounce ran out — and N's
+            // wait timed out, though production from N reaches N+1 anyway.
+            let headed = requestedAnchor ?? reanchorInFlight ?? producingIndex
             let continuous = previousDemandedIndex < 0 || abs(index - previousDemandedIndex) <= 1
-            if !force, continuous, current >= 0, index >= current, index <= current + Self.forwardWaitWindow {
+            // A forced join is held even against a jump inside the window,
+            // waiting to be taken or taken with its first segment not landed:
+            // the rendition re-armed by its fetch of N needs N whole, and
+            // production from N gets to the jump soon. (Taken, it used to lose
+            // that hold — a cached old-track fetch of N-1 between N and N+1
+            // made N+1 look like a seek, and N's wait timed out.) A request
+            // outside the window is a seek elsewhere and wins.
+            let headedIsJoin = requestedAnchor != nil ? anchorIsJoin : inFlightIsJoin
+            if !force, continuous || headedIsJoin, headed >= 0,
+               index >= headed, index <= headed + Self.forwardWaitWindow {
                 return
             }
             // Last request wins: AVPlayer's newest fetch is where the
@@ -308,9 +336,32 @@ final class DemandCoordinator: @unchecked Sendable {
             requestedAnchor = index
             requestedAt = .now
             anchorIsForced = force || anchorIsForced
+            anchorIsJoin = force
             // Signalled under the lock, so a producer that is between its
             // `requestedAnchor == nil` check and its `wait` cannot miss this.
             lock.broadcast()
+        }
+    }
+
+    /// A pending wait of a joining rendition found production headed for a
+    /// forced join ABOVE its segment `index` (pending or taken, first
+    /// segment not landed): production from there never writes `index`, so
+    /// the join moves down to it. Only a forced join within the forward-wait
+    /// window is moved, and never a seek that replaced a join (it keeps the
+    /// force, not the join): a seek is where the player is.
+    /// Returns `true` when moved.
+    @discardableResult
+    func lowerForcedJoin(to index: Int) -> Bool {
+        lock.withLock {
+            let join = requestedAnchor.map { anchorIsJoin ? $0 : nil }
+                ?? (inFlightIsJoin ? reanchorInFlight : nil)
+            guard let join, join > index, join - index <= Self.forwardWaitWindow else { return false }
+            requestedAnchor = index
+            requestedAt = .now
+            anchorIsForced = true
+            anchorIsJoin = true
+            lock.broadcast()
+            return true
         }
     }
 

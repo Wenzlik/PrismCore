@@ -348,6 +348,12 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var encodes: Bool
             /// `eager`, `lazy` or `omitted`.
             public var production: String
+            /// How often the producer stopped this rendition because the
+            /// player switched away from it, and started it again on a
+            /// later fetch. `nil` for a rendition that is never suspended
+            /// (a stream copy, or any rendition of a sequential session).
+            public var suspensions: Int? = nil
+            public var resumptions: Int? = nil
         }
 
         public struct AudioTrack: Sendable, Equatable, Codable {

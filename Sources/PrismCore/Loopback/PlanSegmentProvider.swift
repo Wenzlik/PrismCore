@@ -45,6 +45,27 @@ struct PlanSegmentProvider: SegmentProvider {
     /// of an armed or eager rendition returns `false` and changes nothing.
     var audioDemand: (@Sendable (String) -> Bool)?
 
+    /// Asked again on every wake of a pending wait under `audioN/`: is the
+    /// rendition being waited for dormant — suspended again after this
+    /// fetch armed it (`HLSRemuxer.audioSuspendable`)? `true` re-armed it,
+    /// and production is re-anchored once more. Without this, a suspension
+    /// that lands between the arming fetch and the re-anchor leaves the wait
+    /// watching a rendition nobody produces until its window runs out.
+    /// Unlike `audioDemand`, it is not a fetch and counts as none.
+    var audioRearm: (@Sendable (String) -> Bool)?
+
+    /// A segment fetch under `audioN/` starts (`true`) or stops (`false`)
+    /// waiting for its file — `HLSRemuxer.noteAudioWait`. Begun before the
+    /// fetch can arm the rendition and ended on every exit, so the
+    /// rendition's registry holds exactly the fetches still owed a file.
+    var audioWait: (@Sendable (String, Bool) -> Void)?
+    /// The lowest segment a fetch under the same `audioN/` still waits for
+    /// (`HLSRemuxer.lowestAudioWait`): where an arm or re-arm joins. A join
+    /// at whichever fetch armed or woke first skipped the pending segment
+    /// below it — N+1's wait re-armed at N+1, N's found the rendition wanted
+    /// and nobody ever asked for N again.
+    var audioLowestWait: (@Sendable (String) -> Int?)?
+
     /// Consulted before every media-segment disk read: is this index's file
     /// stale output — muxed with an audio offset the producer has since
     /// abandoned?
@@ -88,6 +109,22 @@ struct PlanSegmentProvider: SegmentProvider {
     static let backstopPoll: Duration = .milliseconds(200)
 
     func data(forPath path: String) async -> ProviderResult {
+        guard path.hasPrefix("audio"), Self.segmentIndex(inPath: path) != nil, let audioWait else {
+            return await serve(path: path)
+        }
+        audioWait(path, true)
+        let result = await serve(path: path)
+        guard case .pending(let pending) = result else {
+            audioWait(path, false)
+            return result
+        }
+        return .pending(PendingResult {
+            defer { audioWait(path, false) }
+            return await pending.resolve()
+        })
+    }
+
+    private func serve(path: String) async -> ProviderResult {
         if path.hasSuffix(".vtt"), subtitleDemand?(path) == .regenerate {
             // The stale file is already deleted (the demand call does it), so
             // the wait below resolves on the re-produced segment. The
@@ -119,7 +156,7 @@ struct PlanSegmentProvider: SegmentProvider {
         // re-anchor against.
         if path.hasPrefix("audio"), path.hasSuffix(".m4s") || path.hasSuffix("init.mp4"),
            audioDemand?(path) == true,
-           let anchor = Self.segmentIndex(inPath: path) ?? coordinator.armAnchorIndex {
+           let anchor = audioLowestWait?(path) ?? Self.segmentIndex(inPath: path) ?? coordinator.armAnchorIndex {
             coordinator.requestProduction(of: anchor, force: true)
         }
         if let index = Self.segmentIndex(inPath: path), isSuperseded?(index) == true {
@@ -223,6 +260,8 @@ struct PlanSegmentProvider: SegmentProvider {
         let events = self.events
         let stallReport = self.stallReport
         let stallThreshold = producerStallThreshold / .seconds(1)
+        let audioRearm = path.hasPrefix("audio") ? self.audioRearm : nil
+        let audioLowestWait = self.audioLowestWait
         return PendingResult {
             defer {
                 if let servingIndex { coordinator.endServing(index: servingIndex) }
@@ -247,6 +286,17 @@ struct PlanSegmentProvider: SegmentProvider {
                 // without this re-check the loop would sleep out the whole
                 // window for a file production has said is not coming.
                 if coordinator.isUnproducible(path: path) { return onTimeout }
+                if audioRearm?(path) == true,
+                   let anchor = audioLowestWait?(path) ?? supersededIndex ?? coordinator.armAnchorIndex {
+                    coordinator.requestProduction(of: anchor, force: true)
+                } else if audioRearm != nil, let own = supersededIndex,
+                          (audioLowestWait?(path) ?? own) == own {
+                    // Already wanted — but a join may still have been made
+                    // above this segment (another rendition's, or one taken
+                    // before this fetch registered). Production from there
+                    // never writes it; the lowest wait pulls the join down.
+                    coordinator.lowerForcedJoin(to: own)
+                }
                 // Checked on this wait's own wakeups (the backstop poll at
                 // worst), so the watchdog costs nothing while nobody waits and
                 // never touches the producer's or the coordinator's condition.

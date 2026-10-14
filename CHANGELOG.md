@@ -8,6 +8,35 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- **An encoded audio rendition the player has switched away from stops
+  being encoded.** The bridged DEFAULT was produced for the whole film, so a
+  viewer who switched to another bridged track (TrueHD → DTS, say) paid for
+  both encoders: 9.4 s of CPU instead of 5.9 s on 150 s of synthetic 4K
+  HEVC with a TrueHD 5.1 DEFAULT and a DTS 5.1 second track, played from the
+  DEFAULT for two segments and then on the DTS track (`prismcore-cli serve`
+  over HTTP, 4 runs each, 9.30–9.47 s before, 5.82–6.07 s after; staying on
+  the DEFAULT is unchanged at 4.97 s). In a planned session every rendition
+  that encodes (bridge or dialogue boost) is now suspended once three audio
+  segment fetches in a row went to other renditions — counted in fetches,
+  not time, so a paused player loses nothing — at the producer's next
+  segment boundary, its bridge closed and everything on disk kept — never
+  while a fetch under it is still waiting for a segment. The next fetch
+  under its directory re-arms it through the lazy rendition's own path (a
+  forced re-anchor at the lowest segment a fetch under it is waiting for,
+  so pipelined read-ahead of N and N+1 cannot leave N unproduced whichever
+  wait wakes first), so a switch back is served
+  on the plan's timeline through the init the player already holds. The same
+  goes for a lazy alternate the viewer leaves again. Stream copies are never
+  suspended. A sequential session keeps its bridged DEFAULT eager: with no
+  plan to re-anchor on, a restarted rendition could not line up with the
+  video. No new API and no knob; the diagnostic report's
+  `runtime.audioRenditionProductions` entries gain `suspensions` and
+  `resumptions` (`nil` for a rendition that is never suspended), and the
+  engine logs each one. `cachedAudio` has nothing for a stopped rendition's
+  time after it stopped, as for any rendition that was not produced.
+
 ## [3.6.0] — 2026-10-14
 
 Lossless bridged audio (FLAC up to 7.1, 24-bit) as an opt-in, and a per-track

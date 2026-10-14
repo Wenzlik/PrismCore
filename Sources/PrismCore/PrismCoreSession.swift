@@ -199,8 +199,10 @@ public actor PrismCoreSession {
     /// would move the playhead it schedules production around and stall the
     /// picture the viewer is watching. So `nil` is common and cheap — any
     /// part of the interval not resident (never produced, evicted, a lazy
-    /// rendition nobody selected, or written with an audio offset a re-anchor
-    /// has since replaced), and before `start()` or after `stop()`.
+    /// rendition nobody selected, an encoded rendition — the DEFAULT included
+    /// — after the player switched away from it and it was suspended, or
+    /// written with an audio offset a re-anchor has since replaced), and
+    /// before `start()` or after `stop()`.
     ///
     /// - Parameters:
     ///   - seconds: where the clip starts, on `residentRanges`' source axis.
@@ -486,7 +488,10 @@ public actor PrismCoreSession {
 
     /// When each audio rendition is produced — eager, lazy (declared, started
     /// by AVPlayer's first fetch under it), or omitted (the sequential shape's
-    /// bridged and boost renditions) — in master order. Populated with the
+    /// bridged and boost renditions) — in master order. Where a rendition
+    /// STARTS: in the planned shape every encoded one is also suspended once
+    /// the player switches away from it, and resumed by a later fetch (the
+    /// diagnostic report counts both). Populated with the
     /// master, so any time after `start()` returns; empty in the muxed shape.
     /// `AudioRenditionProduction.summary(_:)` is the one-line form for a
     /// startup log.
@@ -822,6 +827,15 @@ public actor PrismCoreSession {
         // cost nothing until someone picks one.
         provider.audioDemand = { [remuxer] path in
             remuxer.noteAudioDemand(path: path)
+        }
+        provider.audioRearm = { [remuxer] path in
+            remuxer.rearmAudio(path: path)
+        }
+        provider.audioWait = { [remuxer] path, begin in
+            remuxer.noteAudioWait(path: path, begin: begin)
+        }
+        provider.audioLowestWait = { [remuxer] path in
+            remuxer.lowestAudioWait(path: path)
         }
         // And the seam that makes a runtime audio-delay change atomic from the
         // outside: the producer marks the old offset's segments unservable
@@ -1336,6 +1350,7 @@ public actor PrismCoreSession {
         let options = self.options
         let retained = events.retained
         let productions = audioRenditionProductions
+        let suspensions = remuxer.audioRenditionSuspensions
         let audioDelay = audioDelayReport
         let seconds = { (duration: Duration) in duration / .seconds(1) }
 
@@ -1401,9 +1416,13 @@ public actor PrismCoreSession {
                     .init(missingDTSFilled: $0.missingDTSFilled, nonMonotonicDTSBumped: $0.nonMonotonicDTSBumped,
                           ptsRaisedToDTS: $0.ptsRaisedToDTS, total: $0.total)
                 },
-                audioRenditionProductions: productions.map {
-                    .init(streamIndex: $0.streamIndex, dialogueBoost: $0.dialogueBoost?.rawValue,
-                          encodes: $0.encodes, production: $0.production.rawValue)
+                audioRenditionProductions: productions.map { production in
+                    let counts = suspensions.first {
+                        $0.streamIndex == production.streamIndex && $0.dialogueBoost == production.dialogueBoost
+                    }
+                    return .init(streamIndex: production.streamIndex, dialogueBoost: production.dialogueBoost?.rawValue,
+                                 encodes: production.encodes, production: production.production.rawValue,
+                                 suspensions: counts?.suspended, resumptions: counts?.resumed)
                 },
                 audioRenditionSummary: productions.isEmpty ? nil : AudioRenditionProduction.summary(productions),
                 objectAudio: objectAudio.map {
