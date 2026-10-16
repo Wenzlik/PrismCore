@@ -1,5 +1,19 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
+
+// TrueHD Atmos heights (`ObjectAudioRendering.heights`) need the Rust renderer
+// in `Rust/TrueHDObjects`, built from its pinned sources by
+// `Rust/TrueHDObjects/build-xcframework.sh` — the one binary this package
+// carries beyond MPVKit's, so it is linked only when it has been built.
+// Without it PrismCore builds and behaves exactly as before: TrueHD keeps its
+// 7.1 bridge and `ObjectAudioRendering.isAvailable` is false. A release that
+// ships it publishes the script's zip and switches this to
+// `.binaryTarget(name:url:checksum:)`, as MPVKit does for FFmpeg.
+let trueHDObjectsPath = "Rust/TrueHDObjects/build/TrueHDObjects.xcframework"
+let linksTrueHDObjects = FileManager.default.fileExists(
+    atPath: Context.packageDirectory + "/" + trueHDObjectsPath
+)
 
 let package = Package(
     name: "PrismCore",
@@ -24,12 +38,12 @@ let package = Package(
         // Vendor/MPVKitLocal fork (same package identity) at integration time.
         .package(url: "https://github.com/mpvkit/MPVKit.git", .upToNextMinor(from: "1.0.0")),
     ],
-    targets: [
+    targets: (linksTrueHDObjects ? [.binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)] : []) + [
         .target(
             name: "PrismCore",
             dependencies: [
                 .product(name: "MPVKit", package: "MPVKit"),
-            ],
+            ] + (linksTrueHDObjects ? ["TrueHDObjects"] : []),
             swiftSettings: [
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.

@@ -327,6 +327,11 @@ final class HLSRemuxer: @unchecked Sendable {
     /// What a base bridged track is encoded into. See
     /// `PrismCoreSession.Options.bridgedAudio`.
     private let bridgedAudio: BridgedAudioFormat
+    /// Whether TrueHD Atmos renders its heights. See
+    /// `PrismCoreSession.Options.objectAudioRendering`; engaged only with
+    /// `allowsAtmosOutput` too.
+    private let objectAudioRendering: ObjectAudioRendering
+    private let allowsAtmosOutput: Bool
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
     /// index couldn't be trusted. `nil` = no persistence, exactly as before.
@@ -684,6 +689,8 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredSubtitleLanguage: String? = nil,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
+        objectAudioRendering: ObjectAudioRendering = .off,
+        allowsAtmosOutput: Bool = false,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -718,6 +725,8 @@ final class HLSRemuxer: @unchecked Sendable {
         self.preferredSubtitleLanguage = preferredSubtitleLanguage
         self.inBandClosedCaptions = inBandClosedCaptions
         self.bridgedAudio = bridgedAudio
+        self.objectAudioRendering = objectAudioRendering
+        self.allowsAtmosOutput = allowsAtmosOutput
     }
 
     func cancel() {
@@ -1342,10 +1351,17 @@ final class HLSRemuxer: @unchecked Sendable {
                     parent: outputDirectory,
                     lazy: production == .lazy,
                     suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil),
-                    bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio)
+                    bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio),
+                    rendersHeights: Self.rendersHeights(
+                        track: track, mode: route.mode, rendering: objectAudioRendering,
+                        allowsAtmosOutput: allowsAtmosOutput, available: ObjectAudioRendering.isAvailable
+                    )
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
+                }
+                rendition.onObjectAudio = { [audioDeliveryStore, index = Int(route.index)] delivery, _ in
+                    audioDeliveryStore.noteRenderedObjectAudio(index: index, delivery)
                 }
                 rendition.onBridgeProgress = { [audioDeliveryStore, index = Int(route.index)] progress in
                     audioDeliveryStore.update(index: index, delivery: .bridged, bridge: progress)
@@ -2662,6 +2678,23 @@ final class HLSRemuxer: @unchecked Sendable {
     ///   on, or the rendition would rejoin mid-film with segments that do not
     ///   line up with the video's — the reason lazy renditions are omitted
     ///   there. The bridged DEFAULT stays eager for the whole film.
+    /// Whether a base rendition renders TrueHD Atmos heights instead of bridging the bed.
+    ///
+    /// Gated on the probe's Atmos claim (`AV_PROFILE_TRUEHD_ATMOS`, which libavcodec sets when
+    /// `find_stream_info` decodes a major sync — and it has to decode TrueHD to learn its sample
+    /// format), because the rendition's codec goes into the master before the first packet: a
+    /// track whose claim is missing stays on the bed bridge, as before. A claim the stream then
+    /// does not honour plays the bed through the renderer instead (`HeightsBridge`).
+    /// Pure on purpose, like `routeAll`.
+    static func rendersHeights(
+        track: AudioTrackInfo, mode: AudioRouteMode, rendering: ObjectAudioRendering,
+        allowsAtmosOutput: Bool, available: Bool
+    ) -> Bool {
+        rendering == .heights && allowsAtmosOutput && available && mode == .bridge
+            && track.codecName == "truehd" && track.isObjectAudio
+            && [0, Int(HeightsBridgeConstants.sampleRate)].contains(track.sampleRate)
+    }
+
     static func audioSuspendable(mode: AudioRouteMode, planned: Bool) -> Bool {
         mode != .streamCopy && planned
     }

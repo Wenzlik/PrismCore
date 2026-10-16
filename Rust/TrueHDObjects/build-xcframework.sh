@@ -113,3 +113,5 @@ if command -v swift >/dev/null; then
     (cd "$CRATE/../.." && swift package compute-checksum "$OUT/TrueHDObjects.xcframework.zip") > "$OUT/TrueHDObjects.xcframework.zip.checksum"
 fi
 echo "built $OUT/TrueHDObjects.xcframework (${TARGETS[*]})"
+# SwiftPM caches the evaluated manifest, including Package.swift's check for this framework.
+echo "first PrismCore build after this one: swift build --manifest-cache none"

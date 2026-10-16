@@ -33,12 +33,15 @@ public struct AudioTrackDelivery: Sendable, Equatable {
 
 /// Whether a track's Dolby Atmos objects reach the player.
 ///
-/// Only one form of Atmos survives this engine: E-AC-3 + JOC, stream-copied
-/// with its `dec3` extension. TrueHD Atmos and DTS:X are bridged, and the
-/// bridge can keep at most the channel bed: FFmpeg decodes TrueHD only up to
-/// its 7.1 presentation (the objects are mixed into it, not lost as sound, but
-/// their height and placement are), and no encoder the engine can ship writes
-/// JOC. Hosts read this per track instead of inferring it from the codec.
+/// Two forms of Atmos survive this engine. E-AC-3 + JOC is stream-copied with
+/// its `dec3` extension (`.preserved`). TrueHD Atmos is rendered — only when the
+/// host opts in (`ObjectAudioRendering.heights`) — to 7.1.4 speaker feeds served
+/// as Apple Positional Audio (`.renderedHeights`): the heights play, the objects
+/// as objects do not. Otherwise TrueHD Atmos and DTS:X are bridged, and the
+/// bridge keeps at most the channel bed: FFmpeg decodes TrueHD only up to its
+/// 7.1 presentation (the objects are mixed into it, not lost as sound, but their
+/// height and placement are). Hosts read this per track instead of inferring it
+/// from the codec.
 public enum ObjectAudioDelivery: String, Sendable, Equatable {
     /// Nothing found the source track to carry object audio.
     case none
@@ -46,6 +49,10 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
     case preserved
     /// The source carries objects; the served rendition is their channel bed.
     case notPreserved
+    /// TrueHD Atmos rendered to 7.1.4 and served as APAC: heights included,
+    /// the object metadata consumed by the renderer. Lossy where the bed
+    /// bridge can be lossless — the trade the host opted into.
+    case renderedHeights
 
     /// Evidence first — the bitstream (`ObjectAudioFinding`, the TrueHD major
     /// sync) — and only then the container's claim, which is silent more
@@ -54,6 +61,33 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
     init(sourceCarriesObjects: Bool, delivery: AudioDelivery) {
         guard sourceCarriesObjects else { self = .none; return }
         self = delivery == .streamCopy ? .preserved : .notPreserved
+    }
+}
+
+/// Whether a TrueHD Atmos track's objects are rendered into height channels.
+///
+/// Off by default, and engaged only when the host also says the output plays
+/// Atmos (`PrismCoreSession.Options.allowsAtmosOutput`, which Aether maps to the
+/// system's Dolby Atmos setting): a route that cannot play it would get a lossy
+/// 7.1.4 folded back down, where `.lossless` delivers the 7.1 bed intact.
+///
+/// `.heights` decodes the Atmos presentation with truehdd's decoder, renders it
+/// to 7.1.4 with an ETSI TS 103 448 panner and encodes Apple Positional Audio
+/// (OS 26). TrueHD only — DTS:X is not rendered. Whatever stops it before the
+/// master is written (an older OS, a build without the `TrueHDObjects` library,
+/// a track the probe did not see as Atmos, a rate other than 48 kHz) leaves the
+/// track on the regular bridge; whatever stops it after keeps playing, as the
+/// stream's channel bed, and says so (`ObjectAudioDelivery.notPreserved`).
+public enum ObjectAudioRendering: String, Sendable, Equatable {
+    case off
+    case heights
+
+    /// Whether this build and OS can render heights at all: the
+    /// `TrueHDObjects` library is linked and the APAC encoder exists.
+    public static var isAvailable: Bool {
+        guard rendererIsLinked else { return false }
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return false }
+        return HeightsBridge.encoderExists
     }
 }
 
@@ -91,12 +125,15 @@ final class AudioDeliveryStore: @unchecked Sendable {
     private var objectAudioClaims: Set<Int> = []
     /// What a track's own bitstream said, which overrides the claim.
     private var objectAudioEvidence: [Int: Bool] = [:]
+    /// What the heights renderer reported for a track it renders, which
+    /// overrides both: it is the one that knows what is playing.
+    private var renderedObjectAudio: [Int: ObjectAudioDelivery] = [:]
 
     var snapshot: [AudioTrackDelivery] {
         lock.withLock {
             tracks.values.sorted { $0.streamIndex < $1.streamIndex }.map { track in
                 var track = track
-                track.objectAudio = ObjectAudioDelivery(
+                track.objectAudio = renderedObjectAudio[track.streamIndex] ?? ObjectAudioDelivery(
                     sourceCarriesObjects: objectAudioEvidence[track.streamIndex]
                         ?? objectAudioClaims.contains(track.streamIndex),
                     delivery: track.delivery
@@ -130,6 +167,10 @@ final class AudioDeliveryStore: @unchecked Sendable {
         lock.withLock {
             tracks[index] = AudioTrackDelivery(streamIndex: index, delivery: delivery, bridge: bridge)
         }
+    }
+
+    func noteRenderedObjectAudio(index: Int, _ delivery: ObjectAudioDelivery) {
+        lock.withLock { renderedObjectAudio[index] = delivery }
     }
 
     func noteSourceObjectAudio(index: Int, present: Bool) {
