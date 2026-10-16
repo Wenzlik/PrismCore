@@ -72,7 +72,8 @@ extension AudioBridge: RenditionEncoder {}
 /// that may change it. A stream the renderer cannot place (no objects, ISF, several beds, …)
 /// plays its own channel presentation, routed into 7.1.4 with silent heights, and reports
 /// `ObjectAudioDelivery.notPreserved`. A stream the decoder cannot decode at all plays as
-/// silence of the packets' length and says so in the log. Only an encoder failure throws.
+/// silence up to each packet's end on the source clock and says so in the log. An encoder
+/// failure restarts the encoder at the next major sync. Nothing here throws but the muxer.
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
 final class HeightsBridge: RenditionEncoder {
 
@@ -149,14 +150,12 @@ final class HeightsBridge: RenditionEncoder {
         case notLinked
         case sourceUnsupported(String)
         case encoderUnavailable
-        case encode(String)
 
         var description: String {
             switch self {
             case .notLinked: return "this build has no TrueHDObjects library"
             case .sourceUnsupported(let why): return "heights need 48 kHz TrueHD: \(why)"
             case .encoderUnavailable: return "this OS has no 7.1.4 APAC encoder"
-            case .encode(let why): return "APAC encoding failed: \(why)"
             }
         }
     }
@@ -257,11 +256,25 @@ final class HeightsBridge: RenditionEncoder {
         if decoderFailure == nil {
             decode(bytes, end: false)
         }
-        if decoderFailure != nil, let duration {
-            // The decoder has given up; its share of the timeline still plays, as silence.
-            pending.append(contentsOf: repeatElement(0, count: Int(duration) * Self.channelCount))
+        if decoderFailure != nil {
+            // The decoder has given up; the rest of the timeline plays as silence — up to where
+            // this packet ENDS on the source's own clock, not by its duration on top of whatever
+            // the failing call already rendered (or lost: the limiter's last 2 ms, audio held
+            // for metadata), so everything after stays on the source grid.
+            padToSourceGrid(packetEnd: pts.map { $0 + (duration ?? 0) })
         }
         try encodePending(final: false, emit: emit)
+    }
+
+    /// Where the next rendered sample sits on the source clock: what the encoder has taken,
+    /// plus what waits for a whole packet. Internal for the tests that pin the grid.
+    var renderedPosition: Int64? {
+        anchor.map { $0 + samplesIn + Int64(pending.count / Self.channelCount) }
+    }
+
+    private func padToSourceGrid(packetEnd: Int64?) {
+        guard let packetEnd, let position = renderedPosition, packetEnd > position else { return }
+        pending.append(contentsOf: repeatElement(0, count: Int(packetEnd - position) * Self.channelCount))
     }
 
     func flush(emit: AudioBridge.Emit) throws {
@@ -272,9 +285,10 @@ final class HeightsBridge: RenditionEncoder {
         }
         try encodePending(final: true, emit: emit)
         drained = true
-        if progress.inputPackets > 0 && progress.outputPackets == 0 {
-            throw AudioBridgeFailure.producedNoAudio(progress)
-        }
+        // No `producedNoAudio` here, unlike `AudioBridge`: this bridge skips packets on purpose
+        // until a major sync, so a re-anchor into the last ~107 ms of a stream (no restart left)
+        // ends with input and no output. That is an empty last segment, not a failure — thrown,
+        // it ended the producer, and the video with it.
     }
 
     /// A demand-driven seek: everything buffered belongs to the old position.
@@ -383,15 +397,24 @@ final class HeightsBridge: RenditionEncoder {
             offset += packetSamples
             samplesIn += Int64(Self.framesPerPacket)
             progress.resampledSamples += Self.framesPerPacket
-            try convert(staging, endOfStream: false, emit: emit)
+            guard try convert(staging, endOfStream: false, emit: emit) else { return restartAfterEncoderFailure() }
         }
         pending.removeFirst(offset)
         if final, anchor != nil {
-            try convert(nil, endOfStream: true, emit: emit)
+            guard try convert(nil, endOfStream: true, emit: emit) else { return restartAfterEncoderFailure() }
         }
     }
 
-    private func convert(_ input: AVAudioPCMBuffer?, endOfStream: Bool, emit: AudioBridge.Emit) throws {
+    /// The encoder refused a buffer. Its state is unknown, so it starts over like after a seek
+    /// (the next major sync re-anchors); the gap plays as nothing. Never thrown: the rendition
+    /// shares a producer with the video.
+    private func restartAfterEncoderFailure() {
+        PrismCoreLog.notice("APAC encoder failed; restarting at the next major sync")
+        restartEpoch()
+    }
+
+    /// `false` when the encoder failed. Only `emit` (the muxer) throws.
+    private func convert(_ input: AVAudioPCMBuffer?, endOfStream: Bool, emit: AudioBridge.Emit) throws -> Bool {
         var supplied = input == nil
         while true {
             compressed.packetCount = 0
@@ -407,11 +430,13 @@ final class HeightsBridge: RenditionEncoder {
                 return nil
             }
             if status == .error {
-                throw Failure.encode(error.map { "\($0)" } ?? "status error")
+                PrismCoreLog.notice("APAC encode: \(error.map { "\($0)" } ?? "status error")")
+                return false
             }
             try emitPackets(emit)
             if status != .haveData || compressed.packetCount == 0 { break }
         }
+        return true
     }
 
     private func emitPackets(_ emit: AudioBridge.Emit) throws {
