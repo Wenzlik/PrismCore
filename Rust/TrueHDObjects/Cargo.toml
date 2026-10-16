@@ -1,0 +1,23 @@
+[package]
+name = "truehd-objects"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "PrismCore's TrueHD Atmos object decoder and 7.1.4 renderer behind a C API"
+publish = false
+rust-version = "1.89"
+
+[lib]
+name = "truehd_objects"
+# staticlib for the XCFramework, rlib for `cargo test`.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# The decoder SpatialAudioBridge and LibTrueHD pin: truehdd's `truehd` crate (Apache-2.0) from
+# the harletty fork, at an exact commit. TrueHD only: no DTS crate is a dependency.
+truehd = { git = "https://github.com/harletty/truehdd", rev = "5c8b880405946e7ff1aee884cf9988415fe2c3a9" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "unwind"
