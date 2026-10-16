@@ -27,10 +27,14 @@ source-compatible.)
   Measured on an M2: 12.8× real time per core for the whole chain (release),
   the first APAC packet 23 ms of audio after the first access unit.
 - **Failure never interrupts playback.** Anything before the master (OS
-  before 26, no library, no Atmos claim, not 48 kHz) keeps the bed bridge; a
+  before 26, no library, no Atmos in the bitstream, not 48 kHz) keeps the bed bridge; a
   stream the renderer cannot place plays its own 7.1 through the same
   rendition with silent heights (`.notPreserved`); a stream that cannot be
-  decoded plays silence of its length. The muxed fallback drops heights.
+  decoded plays silence up to each packet's end on the source clock; an
+  epoch with no major sync left (a seek into the last ~107 ms) ends empty.
+  The muxed fallback drops heights. Which TrueHD tracks are Atmos is read
+  off their bitstream before the master (`TrueHDAtmosScout`), not off
+  `AVCodecParameters.profile`.
 - `prismcore-cli serve --heights`, and the diagnostic report's
   `options.objectAudioRendering`.
 

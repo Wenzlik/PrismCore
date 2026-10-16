@@ -732,7 +732,7 @@ public actor PrismCoreSession {
     ///   format with an independent decoder (truehdd) — see the README's
     ///   *TrueHD Atmos with heights* for the licensing note. TrueHD only, OS 26
     ///   and a build that links `TrueHDObjects` (`ObjectAudioRendering
-    ///   .isAvailable`); a track the probe did not see as Atmos, or anything
+    ///   .isAvailable`); a track whose bitstream is not Atmos, or anything
     ///   that fails before the master, keeps `bridgedAudio`; anything after
     ///   plays the stream's own bed through the same rendition.
     /// - Parameter allowsAtmosOutput: the host's statement that the route

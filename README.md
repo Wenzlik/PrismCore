@@ -309,11 +309,12 @@ let session = try PrismCoreSession(
 // after start(): audioTrackDeliveries[…].objectAudio == .renderedHeights
 ```
 
-A TrueHD track the probe identifies as Atmos is decoded to its 16-channel
+A TrueHD track whose bitstream says Atmos (its major sync, read before the
+master is written — the probe's profile claim only where that cannot be asked) is decoded to its 16-channel
 object presentation, rendered to 7.1.4 speaker feeds and served as **Apple
 Positional Audio** — a 12-channel `apac` rendition (`CODECS="apac.31.03"`,
 `CHANNELS="12"`), which tvOS sends to the receiver and iOS plays as Spatial
-Audio. Everything else (other codecs, a TrueHD track without the Atmos claim,
+Audio. Everything else (other codecs, TrueHD without Atmos,
 DTS:X) is untouched.
 
 - **What decodes and renders it.** `Rust/TrueHDObjects`, a small static
@@ -343,15 +344,22 @@ DTS:X) is untouched.
   packet 23 ms of audio after the first access unit, worst single feed 4 ms.
 - **When it does not happen.** `.off` (the default), `allowsAtmosOutput`
   false, an OS before 26, a build without the library
-  (`ObjectAudioRendering.isAvailable == false`), a track the probe did not
-  see as Atmos, a rate other than 48 kHz: the track is bridged as before
+  (`ObjectAudioRendering.isAvailable == false`), a track whose
+  bitstream is not Atmos, a rate other than 48 kHz: the track is bridged as before
   (`bridgedAudio`). After the master is written nothing can change the
   rendition's codec, so a stream the renderer cannot place (no objects, ISF,
   several beds, bed downmix metadata, objects outside the room) plays its
   own channel presentation — the 7.1 FFmpeg would have decoded — in the same
   rendition with silent heights, and reports `.notPreserved`; a stream that
   will not decode at all plays silence of its length rather than stopping
-  playback. The muxed fallback shape always goes back to the bed.
+  playback; a re-anchor so close to the end that no major sync is left
+  simply ends the rendition empty. The muxed fallback shape always goes back
+  to the bed.
+- **Which tracks are Atmos.** `TrueHDAtmosScout` reads each TrueHD track's
+  major sync before the master is written, because the probe's
+  `AV_PROFILE_TRUEHD_ATMOS` is only set when `find_stream_info` got to decode
+  a TrueHD frame inside its read cap. It runs only when heights can engage,
+  and only reads (the head rewind before the copy loop happens anyway).
 - **Atmos on the receiver.** APAC alone may not switch a receiver to Atmos:
   SpatialAudioBridge measured an Apple TV 4K that only did so while a
   silent Dolby Digital Plus Atmos stream played on a second player, and

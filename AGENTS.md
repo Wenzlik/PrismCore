@@ -184,6 +184,13 @@ API surface.
 - **ffmpeg treats a `.mlp` file as MLP** ("only supports up to 2
   substreams") even when it is TrueHD; pass `-f truehd` for truehd's test
   streams.
+- **`producedNoAudio` is not an error for the heights bridge.** It skips
+  packets until a major sync on purpose, so a re-anchor into the last
+  ~107 ms of a stream has input and no output; thrown from `flush`, that
+  ended the producer — video included (review r1).
+- **The TrueHD profile is not evidence for heights either.** Gate on the
+  bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
+  note above says for E-AC-3.
 - **Do not rebuild the decoder after a seek from the middle of a stream.**
   It can only start at a major sync, and the renderer's output is anchored
   on the first access unit fed; packets before the first restart unit are

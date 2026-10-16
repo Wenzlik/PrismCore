@@ -75,7 +75,8 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 /// to 7.1.4 with an ETSI TS 103 448 panner and encodes Apple Positional Audio
 /// (OS 26). TrueHD only — DTS:X is not rendered. Whatever stops it before the
 /// master is written (an older OS, a build without the `TrueHDObjects` library,
-/// a track the probe did not see as Atmos, a rate other than 48 kHz) leaves the
+/// a track whose bitstream — read before the master — is not Atmos, a rate
+/// other than 48 kHz) leaves the
 /// track on the regular bridge; whatever stops it after keeps playing, as the
 /// stream's channel bed, and says so (`ObjectAudioDelivery.notPreserved`).
 public enum ObjectAudioRendering: String, Sendable, Equatable {
