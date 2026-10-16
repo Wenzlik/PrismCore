@@ -11,7 +11,7 @@ import Libavutil
 /// channel. The fixture is FFmpeg's own 5.1 TrueHD (no objects), which exercises the whole chain
 /// — renderer, encoder, muxer patch, AVFoundation's demux and decode — through the bed fallback.
 /// Real Atmos streams are behind `PRISMCORE_TRUEHD_VECTORS` (see `realAtmosVector`).
-@Suite("TrueHD heights")
+@Suite("TrueHD heights", .serialized)
 struct TrueHDHeightsTests {
 
     private func fixture(_ name: String) throws -> URL {
