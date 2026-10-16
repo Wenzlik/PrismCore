@@ -47,10 +47,13 @@ struct TrueHDHeightsTests {
     func routing() {
         let atmos = Self.atmosTrack
         func renders(
-            _ track: AudioTrackInfo = atmos, mode: HLSRemuxer.AudioRouteMode = .bridge,
+            _ track: AudioTrackInfo = atmos, carries: Bool? = nil, mode: HLSRemuxer.AudioRouteMode = .bridge,
             rendering: ObjectAudioRendering = .heights, allows: Bool = true, available: Bool = true
         ) -> Bool {
-            HLSRemuxer.rendersHeights(track: track, mode: mode, rendering: rendering, allowsAtmosOutput: allows, available: available)
+            HLSRemuxer.rendersHeights(
+                track: track, carriesObjects: carries ?? track.isObjectAudio, mode: mode, rendering: rendering,
+                allowsAtmosOutput: allows, available: available
+            )
         }
         #expect(renders())
         #expect(!renders(rendering: .off))
@@ -62,7 +65,11 @@ struct TrueHDHeightsTests {
             streamIndex: 1, codecName: "truehd", profileName: nil, channelCount: 8, channelLayoutDescription: "7.1",
             sampleRate: 48_000, language: nil, title: nil, isObjectAudio: false, copyability: .requiresAudioBridge
         )
-        #expect(!renders(plain), "no Atmos claim, no apac promise in the master")
+        #expect(!renders(plain), "no Atmos claim and no bitstream answer: no apac promise in the master")
+        // The bitstream outranks the claim both ways (Grok r1 P2: the claim is silent whenever
+        // find_stream_info did not decode a TrueHD frame).
+        #expect(renders(plain, carries: true))
+        #expect(!renders(atmos, carries: false))
         let dtsx = AudioTrackInfo(
             streamIndex: 1, codecName: "dts", profileName: "DTS-HD MA + DTS:X", channelCount: 8, channelLayoutDescription: "7.1",
             sampleRate: 48_000, language: nil, title: nil, isObjectAudio: true, copyability: .requiresAudioBridge
@@ -73,6 +80,90 @@ struct TrueHDHeightsTests {
             sampleRate: 96_000, language: nil, title: nil, isObjectAudio: true, copyability: .requiresAudioBridge
         )
         #expect(!renders(hiRate))
+    }
+
+    @Test("The scout reads Atmos off the bitstream before the master")
+    func scoutReadsTheBitstream() throws {
+        let (context, close) = try open("h264_truehd51_tones_3s.mkv")
+        defer { close() }
+        // FFmpeg's TrueHD has two substreams: a major sync that says "no Atmos".
+        #expect(TrueHDAtmosScout.scan(input: context, streams: [1]) == [1: false])
+        #expect(TrueHDAtmosScout.scan(input: context, streams: []) == [:])
+    }
+
+    @Test("The muxed fallback session drops heights")
+    func muxedFallbackDropsHeights() async throws {
+        let session = try PrismCoreSession(
+            url: try fixture("h264_truehd51_tones_3s.mkv"), display: .init(isHDRReady: false, isDolbyVisionCapable: false),
+            objectAudioRendering: .heights, allowsAtmosOutput: true
+        )
+        let fallback = try await session.makeMuxedFallbackSession()
+        #expect(await fallback.options.objectAudioRendering == .off)
+        #expect(await session.options.objectAudioRendering == .heights)
+        await fallback.stop()
+        await session.stop()
+    }
+
+    @Test("A re-anchor with no major sync left ends empty, never failing the producer")
+    func emptyEpochFlushesQuietly() throws {
+        guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
+        let (context, close) = try open("h264_truehd51_tones_3s.mkv")
+        defer { close() }
+        let stream = context.pointee.streams[1]!
+        let bridge = try HeightsBridge(codecpar: stream.pointee.codecpar, timeBase: stream.pointee.time_base)
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        var out = 0
+        var fed = 0
+        // Only access units that are not restart units: what a seek into the last ~107 ms of a
+        // stream hands the bridge.
+        while av_read_frame(context, pkt) >= 0 {
+            defer { av_packet_unref(pkt) }
+            guard pkt.pointee.stream_index == 1, let data = pkt.pointee.data,
+                  !TrueHDMajorSync.startsWithMajorSync(UnsafeBufferPointer(start: data, count: Int(pkt.pointee.size)))
+            else { continue }
+            try bridge.feed(pkt) { _ in out += 1 }
+            fed += 1
+        }
+        #expect(fed > 0)
+        try bridge.flush { _ in out += 1 }
+        #expect(out == 0)
+    }
+
+    @Test("After the decoder fails, silence keeps the rendition on the source clock")
+    func decoderFailureStaysOnTheSourceGrid() throws {
+        guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
+        let (context, close) = try open("h264_truehd51_tones_3s.mkv")
+        defer { close() }
+        let stream = context.pointee.streams[1]!
+        let timeBase = stream.pointee.time_base
+        let bridge = try HeightsBridge(codecpar: stream.pointee.codecpar, timeBase: timeBase)
+        var deliveries: [ObjectAudioDelivery] = []
+        bridge.onObjectAudio = { delivery, _ in deliveries.append(delivery) }
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        var count = 0
+        var checked = 0
+        while av_read_frame(context, pkt) >= 0 {
+            defer { av_packet_unref(pkt) }
+            guard pkt.pointee.stream_index == 1, pkt.pointee.size > 8 else { continue }
+            count += 1
+            if count == 600 {
+                // Bytes missing from the front of a unit: the decoder's framing breaks, for good.
+                pkt.pointee.data += 6
+                pkt.pointee.size -= 6
+            }
+            try bridge.feed(pkt) { _ in }
+            if count >= 600 {
+                let end = av_rescale_q(pkt.pointee.pts + pkt.pointee.duration, timeBase, AVRational(num: 1, den: 48_000))
+                #expect(bridge.renderedPosition == end, "packet \(count)")
+                checked += 1
+            }
+        }
+        #expect(checked > 100)
+        #expect(deliveries.last == .notPreserved)
     }
 
     @Test("CODECS follows Apple's APAC profile/level table")
@@ -230,6 +321,12 @@ struct TrueHDHeightsTests {
         ffmpeg.waitUntilExit()
         #expect(ffmpeg.terminationStatus == 0)
         #expect(try SourceProbe.probe(url: source).audioTracks.first?.isObjectAudio == true)
+        do {
+            var input: UnsafeMutablePointer<AVFormatContext>?
+            try FFmpegError.check(avformat_open_input(&input, source.path, nil, nil), "open")
+            defer { avformat_close_input(&input) }
+            #expect(TrueHDAtmosScout.scan(input: try #require(input), streams: [1]) == [1: true])
+        }
         let session = try PrismCoreSession(
             url: source, display: .init(isHDRReady: false, isDolbyVisionCapable: false),
             objectAudioRendering: .heights, allowsAtmosOutput: true
