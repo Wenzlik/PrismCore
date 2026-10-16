@@ -1029,6 +1029,23 @@ final class HLSRemuxer: @unchecked Sendable {
         )
         let tapsClosedCaptions = subtitles.hasClosedCaptions
 
+        // Heights put `apac` into the master, so whether a TrueHD track is Atmos has to be
+        // known now — from its bitstream, not the probe's profile claim, which is silent
+        // whenever `find_stream_info` did not get to decode a TrueHD frame
+        // (`TrueHDAtmosScout`). Only when heights can engage at all; reads only, the head
+        // rewind below happens either way.
+        var trueHDAtmosEvidence: [Int: Bool] = [:]
+        if objectAudioRendering == .heights, allowsAtmosOutput, ObjectAudioRendering.isAvailable,
+           let pb = input.pointee.pb, pb.pointee.seekable != 0 {
+            let trueHD = Set(info.audioTracks.filter { $0.codecName == "truehd" }.map(\.streamIndex))
+            trueHDAtmosEvidence = TrueHDAtmosScout.scan(input: input, streams: trueHD)
+            needsRewindToHead = true
+            for (index, atmos) in trueHDAtmosEvidence {
+                audioDeliveryStore.noteSourceObjectAudio(index: index, present: atmos)
+                trueHDAtmosSniff[index] = nil
+            }
+        }
+
         let candidates = audioCandidates(input)
         let bestAudio = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
         let routes = Self.routeAll(
@@ -1353,7 +1370,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil),
                     bridgeTarget: AudioBridge.targetCodec(for: bridgedAudio),
                     rendersHeights: Self.rendersHeights(
-                        track: track, mode: route.mode, rendering: objectAudioRendering,
+                        track: track, carriesObjects: trueHDAtmosEvidence[track.streamIndex] ?? track.isObjectAudio,
+                        mode: route.mode, rendering: objectAudioRendering,
                         allowsAtmosOutput: allowsAtmosOutput, available: ObjectAudioRendering.isAvailable
                     )
                 )
@@ -2678,25 +2696,25 @@ final class HLSRemuxer: @unchecked Sendable {
     ///   on, or the rendition would rejoin mid-film with segments that do not
     ///   line up with the video's — the reason lazy renditions are omitted
     ///   there. The bridged DEFAULT stays eager for the whole film.
+    static func audioSuspendable(mode: AudioRouteMode, planned: Bool) -> Bool {
+        mode != .streamCopy && planned
+    }
+
     /// Whether a base rendition renders TrueHD Atmos heights instead of bridging the bed.
     ///
-    /// Gated on the probe's Atmos claim (`AV_PROFILE_TRUEHD_ATMOS`, which libavcodec sets when
-    /// `find_stream_info` decodes a major sync — and it has to decode TrueHD to learn its sample
-    /// format), because the rendition's codec goes into the master before the first packet: a
-    /// track whose claim is missing stays on the bed bridge, as before. A claim the stream then
-    /// does not honour plays the bed through the renderer instead (`HeightsBridge`).
-    /// Pure on purpose, like `routeAll`.
+    /// `carriesObjects` is the bitstream's answer (`TrueHDAtmosScout`, read before the master
+    /// because the rendition's codec goes into it), falling back to the probe's
+    /// `AV_PROFILE_TRUEHD_ATMOS` claim only for a track the scout could not ask (an unseekable
+    /// source, no major sync within its budget). A stream that then does not honour the answer
+    /// plays its bed through the renderer instead (`HeightsBridge`). Pure on purpose, like
+    /// `routeAll`.
     static func rendersHeights(
-        track: AudioTrackInfo, mode: AudioRouteMode, rendering: ObjectAudioRendering,
+        track: AudioTrackInfo, carriesObjects: Bool, mode: AudioRouteMode, rendering: ObjectAudioRendering,
         allowsAtmosOutput: Bool, available: Bool
     ) -> Bool {
         rendering == .heights && allowsAtmosOutput && available && mode == .bridge
-            && track.codecName == "truehd" && track.isObjectAudio
+            && track.codecName == "truehd" && carriesObjects
             && [0, Int(HeightsBridgeConstants.sampleRate)].contains(track.sampleRate)
-    }
-
-    static func audioSuspendable(mode: AudioRouteMode, planned: Bool) -> Bool {
-        mode != .streamCopy && planned
     }
 
     /// Which extra dialogue-boost renditions to derive, given what the
