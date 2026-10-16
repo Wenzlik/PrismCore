@@ -8,6 +8,40 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **TrueHD Atmos with its heights, opt-in.** `objectAudioRendering: .heights`
+  (default `.off`) together with `allowsAtmosOutput: true` renders a TrueHD
+  Atmos track's object presentation to 7.1.4 and serves it as a 12-channel
+  Apple Positional Audio rendition (`apac.31.03`), so the heights reach an
+  Atmos receiver, a soundbar or AirPods; `audioTrackDeliveries[…].objectAudio`
+  reads the new `.renderedHeights` once objects play. The decoder and renderer
+  are `Rust/TrueHDObjects`: truehdd's `truehd` crate (Apache-2.0, pinned at
+  `harletty/truehdd@5c8b880`) and a port of SpatialAudioBridge's ETSI TS 103
+  448 renderer (Apache-2.0), behind a five-function C API, built from pinned
+  source into an XCFramework by `Rust/TrueHDObjects/build-xcframework.sh`
+  (iOS, tvOS, visionOS, their simulators, macOS). It is the package's one
+  binary beyond MPVKit — the owner's decision of 2026-10-16, which also
+  covers the patent question the README notes — and it is linked only when
+  built: without it nothing changes. TrueHD only; no DTS code is linked.
+  Measured on an M2: 12.8× real time per core for the whole chain (release),
+  the first APAC packet 23 ms of audio after the first access unit.
+- **Failure never interrupts playback.** Anything before the master (OS
+  before 26, no library, no Atmos claim, not 48 kHz) keeps the bed bridge; a
+  stream the renderer cannot place plays its own 7.1 through the same
+  rendition with silent heights (`.notPreserved`); a stream that cannot be
+  decoded plays silence of its length. The muxed fallback drops heights.
+- `prismcore-cli serve --heights`, and the diagnostic report's
+  `options.objectAudioRendering`.
+
+### Not done
+
+- No silent Dolby Digital Plus Atmos helper stream is bundled. Some
+  receivers switch to Atmos for APAC only while one plays (measured by
+  SpatialAudioBridge and AetherEngine); a host plays it itself if needed.
+- APAC is encoded without DRC metadata (every DRC setting delays the first
+  packet by 1.5–20 s), against Apple's recommendation.
+
 ## [3.6.1] — 2026-10-14
 
 An encoded audio rendition the player switched away from stops being
