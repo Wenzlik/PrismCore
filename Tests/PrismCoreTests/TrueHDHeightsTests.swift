@@ -166,6 +166,84 @@ struct TrueHDHeightsTests {
         #expect(deliveries.last == .notPreserved)
     }
 
+    @Test("Once the master declared apac, a failed encoder rebuild never changes the rendition's codec")
+    func declaredCodecIsLocked() throws {
+        guard ObjectAudioRendering.isAvailable else { return }
+        struct Refused: Error {}
+        let (context, close) = try open("h264_truehd51_tones_3s.mkv")
+        defer { close() }
+        let parent = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let writer = AudioRenditionWriter(
+            route: .init(index: 1, mode: .bridge), track: Self.atmosTrack, ordinal: 0, parent: parent, rendersHeights: true
+        )
+        try writer.open(input: context)
+        #expect(writer.rendition(groupID: "aud", isDefault: true).codecString == "apac.31.03")
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        let timeBase = context.pointee.streams[1]!.pointee.time_base
+        func feed(_ limit: Int) throws {
+            var fed = 0
+            while fed < limit, av_read_frame(context, pkt) >= 0 {
+                defer { av_packet_unref(pkt) }
+                guard pkt.pointee.stream_index == 1 else { continue }
+                try writer.write(pkt, sourceTimeBase: timeBase)
+                fed += 1
+            }
+        }
+        try feed(.max)
+        try writer.cut(durationSeconds: 3)
+        try writer.flushBridge()
+
+        // EOF spent the encoder; the re-anchor's rebuild fails. Before the fix the writer fell
+        // back to AudioBridge here and muxed EAC3/AAC fragments under the served apac entry.
+        writer.heightsBridgeFactoryForTesting = { _ in throw Refused() }
+        try FFmpegError.check(avformat_seek_file(context, 1, Int64.min, 0, 0, 0), "seek")
+        try writer.reanchor(input: context, segmentIndex: 1)
+        #expect(writer.rendersHeights)
+        #expect(writer.rendition(groupID: "aud", isDefault: true).codecString == "apac.31.03")
+        try feed(500)
+        let directory = parent.appendingPathComponent("audio0")
+        #expect(try writer.cut(durationSeconds: 1) == 0, "no encoder, no fragment — and never a foreign one")
+
+        // The next re-anchor builds the encoder again and the rendition plays on.
+        writer.heightsBridgeFactoryForTesting = nil
+        try FFmpegError.check(avformat_seek_file(context, 1, Int64.min, 0, 0, 0), "seek")
+        try writer.reanchor(input: context, segmentIndex: 2)
+        try feed(500)
+        #expect(try writer.cut(durationSeconds: 1) > 0)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("seg00002.m4s").path))
+        writer.close()
+    }
+
+    @Test("A stalled source cannot hold the scout past its time budget")
+    func scoutIsBounded() async throws {
+        let media = try Data(contentsOf: try fixture("h264_truehd51_tones_3s.mkv"))
+        // ~30 KB/s: the header arrives, the major-sync hunt would take ~18 s.
+        let server = try RangeFixtureServer(media: media, bytesPerSecond: 30_000, firstByteDelay: 0)
+        let url = try await server.start()
+        defer { server.stop() }
+        let guardian = ReadInterruptGuard()
+        var input: UnsafeMutablePointer<AVFormatContext>? = guardian.makeContext()
+        try FFmpegError.check(avformat_open_input(&input, url.absoluteString, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        let started = ContinuousClock.now
+        let found = TrueHDAtmosScout.scan(
+            // Stream 0 is the video: it never answers, so only a budget ends the hunt.
+            input: context, streams: [0, 1], interruptGuard: guardian, timeBudget: .milliseconds(300)
+        )
+        let spent = ContinuousClock.now - started
+        #expect(spent < .seconds(2), "scout took \(spent)")
+        #expect(context.pointee.pb?.pointee.error ?? 0 >= 0, "the latched abort must be cleared")
+        _ = found  // whatever arrived in time; the rest falls back to the claim
+        // A byte budget alone also stops it, on a local file, before any answer.
+        let (local, close) = try open("h264_truehd51_tones_3s.mkv")
+        defer { close() }
+        #expect(TrueHDAtmosScout.scan(input: local, streams: [1], byteBudget: 0) == [:])
+    }
+
     @Test("CODECS follows Apple's APAC profile/level table")
     func codecsString() {
         #expect(APACSampleEntry.codecsString(channelCount: 12) == "apac.31.03")
