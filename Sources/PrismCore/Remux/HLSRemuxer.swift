@@ -1037,8 +1037,9 @@ final class HLSRemuxer: @unchecked Sendable {
         var trueHDAtmosEvidence: [Int: Bool] = [:]
         if objectAudioRendering == .heights, allowsAtmosOutput, ObjectAudioRendering.isAvailable,
            let pb = input.pointee.pb, pb.pointee.seekable != 0 {
-            let trueHD = Set(info.audioTracks.filter { $0.codecName == "truehd" }.map(\.streamIndex))
-            trueHDAtmosEvidence = TrueHDAtmosScout.scan(input: input, streams: trueHD)
+            // A `true` claim needs no asking (see `TrueHDAtmosScout`); only the silent ones.
+            let unclaimed = Set(info.audioTracks.filter { $0.codecName == "truehd" && !$0.isObjectAudio }.map(\.streamIndex))
+            trueHDAtmosEvidence = TrueHDAtmosScout.scan(input: input, streams: unclaimed, interruptGuard: interruptGuard)
             needsRewindToHead = true
             for (index, atmos) in trueHDAtmosEvidence {
                 audioDeliveryStore.noteSourceObjectAudio(index: index, present: atmos)
