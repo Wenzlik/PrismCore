@@ -188,6 +188,13 @@ API surface.
   packets until a major sync on purpose, so a re-anchor into the last
   ~107 ms of a stream has input and no output; thrown from `flush`, that
   ended the producer — video included (review r1).
+- **A rendition's codec is a promise once the master read it.** Fallbacks
+  that change the encoder (`makeBridge`) are allowed only before
+  `rendition(groupID:)` was called; after that a failed rebuild produces
+  nothing rather than foreign fragments under the served init (review r2).
+- **Every pre-master read needs a budget.** `TrueHDAtmosScout` arms the
+  context's `ReadInterruptGuard` (750 ms) and checks bytes; unbounded, a
+  30 KB/s source held it 17.5 s in the regression test.
 - **The TrueHD profile is not evidence for heights either.** Gate on the
   bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
   note above says for E-AC-3.

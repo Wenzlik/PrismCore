@@ -359,7 +359,15 @@ DTS:X) is untouched.
   major sync before the master is written, because the probe's
   `AV_PROFILE_TRUEHD_ATMOS` is only set when `find_stream_info` got to decode
   a TrueHD frame inside its read cap. It runs only when heights can engage,
-  and only reads (the head rewind before the copy loop happens anyway).
+  only for tracks the claim calls non-Atmos (a `true` claim is evidence),
+  only reads (the head rewind before the copy loop happens anyway), and is
+  bounded to 750 ms, 8 MB and 4096 packets through the context's interrupt
+  guard: a stalled source falls back to the claim instead of holding the
+  master back.
+- **The codec is fixed once the master has it.** A heights rendition whose
+  encoder cannot be rebuilt later (a resume, a re-anchor after EOF) stays
+  `apac` and produces nothing until the next re-anchor rebuilds it; it never
+  switches to the bed bridge under the served `apac` entry.
 - **Atmos on the receiver.** APAC alone may not switch a receiver to Atmos:
   SpatialAudioBridge measured an Apple TV 4K that only did so while a
   silent Dolby Digital Plus Atmos stream played on a second player, and

@@ -33,8 +33,10 @@ source-compatible.)
   decoded plays silence up to each packet's end on the source clock; an
   epoch with no major sync left (a seek into the last ~107 ms) ends empty.
   The muxed fallback drops heights. Which TrueHD tracks are Atmos is read
-  off their bitstream before the master (`TrueHDAtmosScout`), not off
-  `AVCodecParameters.profile`.
+  off their bitstream before the master (`TrueHDAtmosScout`, bounded to
+  750 ms / 8 MB / 4096 packets, falling back to the profile claim), not off
+  `AVCodecParameters.profile` alone. Once the master declares `apac` the
+  rendition's codec never changes, even if its encoder cannot be rebuilt.
 - `prismcore-cli serve --heights`, and the diagnostic report's
   `options.objectAudioRendering`.
 
