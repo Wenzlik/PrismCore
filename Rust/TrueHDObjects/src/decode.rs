@@ -320,10 +320,13 @@ impl Session {
         }
         if self.mode == Mode::Pending {
             if oamd.is_empty() {
-                self.held_frames += frames;
-                if self.held_frames > MAX_HELD_FRAMES {
+                // Checked before this unit joins the held audio: on a refusal `fall_back` plays
+                // the held units as silence and `emit` this one, so counting it here too would
+                // play it twice and push the bed one unit late (review r2).
+                if self.held_frames + frames > MAX_HELD_FRAMES {
                     return Err(Unsupported("no object metadata within 0.5 s".into()));
                 }
+                self.held_frames += frames;
                 self.held.push(input);
                 return Ok(Ok(()));
             }
@@ -626,6 +629,25 @@ mod tests {
             assert_eq!(g[channel], 1.);
             assert_eq!(g.iter().sum::<f32>(), 1.);
         }
+    }
+
+    #[test]
+    fn metadata_timeout_keeps_every_sample_exactly_once() {
+        // 601 object units of 40 samples with no OAMD: 600 are held (24 000, the limit), the
+        // 601st refuses — and the output must be exactly 601 × 40 samples, no more.
+        let mut session = Session::default();
+        let mut frames = 0usize;
+        let mut sink = |pcm: &[f32]| {
+            frames += pcm.len() / CHANNELS;
+            Ok(())
+        };
+        for _ in 0..601 {
+            session.emit(vec![vec![0.1; 40]; 16], 40, &mut sink).unwrap();
+        }
+        assert_eq!(session.mode(), Mode::Bed);
+        session.limiter.finish(&mut session.limited);
+        session.flush(&mut sink).unwrap();
+        assert_eq!(frames, 601 * 40);
     }
 
     #[test]
