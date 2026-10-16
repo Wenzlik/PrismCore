@@ -37,6 +37,8 @@ struct PrismCoreCLI {
           --display sdr|hdr|dv         display the master is built for (default dv)
           --bridged-audio compressed|lossless  what TrueHD/DTS/PCM become: EAC3 5.1
                                        (default) or FLAC up to 7.1
+          --heights                    serve TrueHD Atmos as 7.1.4 APAC with its heights
+                                       (needs the TrueHDObjects build and macOS 26)
           -v, --verbose                libav* warnings and engine notices on stderr
 
         probe:      --structure none|layout|full   (default layout)

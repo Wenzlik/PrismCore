@@ -327,6 +327,12 @@ public actor PrismCoreSession {
         /// into — `.compressed` (EAC3 5.1, the default) or `.lossless` (FLAC
         /// up to 7.1). See the initializer's doc.
         public var bridgedAudio: BridgedAudioFormat = .compressed
+        /// Whether TrueHD Atmos is rendered with its heights (`.heights`) or
+        /// bridged as its bed (`.off`, the default). See the initializer's doc.
+        public var objectAudioRendering: ObjectAudioRendering = .off
+        /// The host's word that the output plays Dolby Atmos — Aether maps the
+        /// system's Dolby Atmos setting here. `.heights` does nothing without it.
+        public var allowsAtmosOutput: Bool = false
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -610,7 +616,9 @@ public actor PrismCoreSession {
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
-        bridgedAudio: BridgedAudioFormat = .compressed
+        bridgedAudio: BridgedAudioFormat = .compressed,
+        objectAudioRendering: ObjectAudioRendering = .off,
+        allowsAtmosOutput: Bool = false
     ) throws {
         try self.init(
             url: url,
@@ -633,7 +641,9 @@ public actor PrismCoreSession {
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory,
             inBandClosedCaptions: inBandClosedCaptions,
-            bridgedAudio: bridgedAudio
+            bridgedAudio: bridgedAudio,
+            objectAudioRendering: objectAudioRendering,
+            allowsAtmosOutput: allowsAtmosOutput
         )
     }
 
@@ -712,6 +722,23 @@ public actor PrismCoreSession {
     ///   (`AVAudioSession.maximumOutputNumberOfChannels >= 8`).
     ///   Dialogue-boost renditions stay EAC3 either way, and
     ///   `makeMuxedFallbackSession()` goes back to `.compressed`.
+    /// - Parameter objectAudioRendering: `.heights` renders a TrueHD Atmos
+    ///   track's object presentation to 7.1.4 and serves it as Apple
+    ///   Positional Audio (`apac`, 12 channels), so the heights reach an Atmos
+    ///   receiver, a soundbar or AirPods; `audioTrackDeliveries[…].objectAudio`
+    ///   reads `.renderedHeights` once objects play. `.off` (the default) keeps
+    ///   the bed bridge above. Opt-in because APAC is lossy (3 Mbit/s) where
+    ///   `.lossless` keeps the 7.1 bed bit-exact, and because it decodes Dolby's
+    ///   format with an independent decoder (truehdd) — see the README's
+    ///   *TrueHD Atmos with heights* for the licensing note. TrueHD only, OS 26
+    ///   and a build that links `TrueHDObjects` (`ObjectAudioRendering
+    ///   .isAvailable`); a track the probe did not see as Atmos, or anything
+    ///   that fails before the master, keeps `bridgedAudio`; anything after
+    ///   plays the stream's own bed through the same rendition.
+    /// - Parameter allowsAtmosOutput: the host's statement that the route
+    ///   plays Atmos (on tvOS: the user's Dolby Atmos setting is on). Required
+    ///   for `.heights` to engage: on a route that cannot play it, the lossless
+    ///   bed is the better track.
     /// - Parameter inBandClosedCaptions: what the master says about the
     ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
     ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
@@ -743,7 +770,9 @@ public actor PrismCoreSession {
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
-        bridgedAudio: BridgedAudioFormat = .compressed
+        bridgedAudio: BridgedAudioFormat = .compressed,
+        objectAudioRendering: ObjectAudioRendering = .off,
+        allowsAtmosOutput: Bool = false
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -762,7 +791,9 @@ public actor PrismCoreSession {
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory.normalized,
             inBandClosedCaptions: inBandClosedCaptions,
-            bridgedAudio: bridgedAudio
+            bridgedAudio: bridgedAudio,
+            objectAudioRendering: objectAudioRendering,
+            allowsAtmosOutput: allowsAtmosOutput
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -804,6 +835,8 @@ public actor PrismCoreSession {
             preferredSubtitleLanguage: preferredSubtitleLanguage,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
+            objectAudioRendering: objectAudioRendering,
+            allowsAtmosOutput: allowsAtmosOutput,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -885,7 +918,9 @@ public actor PrismCoreSession {
         reachability: LoopbackHTTPServer.Reachability = .loopbackOnly,
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
-        bridgedAudio: BridgedAudioFormat = .compressed
+        bridgedAudio: BridgedAudioFormat = .compressed,
+        objectAudioRendering: ObjectAudioRendering = .off,
+        allowsAtmosOutput: Bool = false
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -905,8 +940,19 @@ public actor PrismCoreSession {
             reachability: reachability,
             subtitleCueHistory: subtitleCueHistory,
             inBandClosedCaptions: inBandClosedCaptions,
-            bridgedAudio: bridgedAudio
+            bridgedAudio: bridgedAudio,
+            objectAudioRendering: objectAudioRendering,
+            allowsAtmosOutput: allowsAtmosOutput
         )
+    }
+
+    /// The diagnostic report's `objectAudioRendering`: what was asked, and why it cannot run.
+    static func describe(_ rendering: ObjectAudioRendering, allowsAtmosOutput: Bool) -> String {
+        guard rendering == .heights else { return rendering.rawValue }
+        if !ObjectAudioRendering.rendererIsLinked { return "heights (unavailable: TrueHDObjects not linked)" }
+        if !ObjectAudioRendering.isAvailable { return "heights (unavailable: no APAC encoder, OS 26 needed)" }
+        if !allowsAtmosOutput { return "heights (off: the host did not allow Atmos output)" }
+        return "heights"
     }
 
     // MARK: - Master rejection (phase 4)
@@ -1014,7 +1060,9 @@ public actor PrismCoreSession {
             // and grow the memory the host bounded on purpose.
             subtitleCueHistory: options.subtitleCueHistory,
             inBandClosedCaptions: options.inBandClosedCaptions,
-            bridgedAudio: options.bridgedAudio
+            bridgedAudio: options.bridgedAudio,
+            objectAudioRendering: options.objectAudioRendering,
+            allowsAtmosOutput: options.allowsAtmosOutput
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
@@ -1061,6 +1109,9 @@ public actor PrismCoreSession {
             // device run has vouched for — a master refused because of it
             // must not be retried with it.
             options.bridgedAudio = .compressed
+            // Nor are rendered heights: APAC over HLS is as young, and this
+            // shape has no rendition for it anyway.
+            options.objectAudioRendering = .off
         }
     }
 
@@ -1383,7 +1434,8 @@ public actor PrismCoreSession {
                 externalSubtitleCount: externalSubtitles.count,
                 // What was delivered, not only what was asked for.
                 bridgedAudio: options.bridgedAudio.isAvailable
-                    ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)"
+                    ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)",
+                objectAudioRendering: Self.describe(options.objectAudioRendering, allowsAtmosOutput: options.allowsAtmosOutput)
             ),
             startup: .init(
                 checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },

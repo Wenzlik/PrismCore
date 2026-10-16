@@ -56,7 +56,9 @@ func withServedSession<T>(
         keyframeIndexCacheDirectory: keyframeIndexCacheDirectory,
         keyframeIndexCacheIdentity: keyframeIndexCacheIdentity,
         coordinatedHTTP: options.coordinatedHTTP,
-        bridgedAudio: options.bridgedAudio
+        bridgedAudio: options.bridgedAudio,
+        objectAudioRendering: options.heights ? .heights : .off,
+        allowsAtmosOutput: options.heights
     )
     await beforeStart(session)
     func finish() async {
