@@ -197,6 +197,18 @@ struct TrueHDHeightsTests {
         #expect(sync > 48_000, "the seek landed past the start")
         #expect(stamps.first == sync - 2048, "first packet sits one priming before the major sync")
         #expect(zip(stamps, stamps.dropFirst()).allSatisfy { $1 - $0 == 1024 })
+
+        // A flushed encoder comes back after a reset: the same path a jump in the source's
+        // timestamps takes mid-stream.
+        try bridge.reset()
+        try FFmpegError.check(avformat_seek_file(context, 1, Int64.min, 0, 0, 0), "seek to start")
+        var again: [Int64] = []
+        while again.count < 10, av_read_frame(context, pkt) >= 0 {
+            defer { av_packet_unref(pkt) }
+            guard pkt.pointee.stream_index == 1 else { continue }
+            try bridge.feed(pkt) { again.append($0.pointee.pts) }
+        }
+        #expect(again.first == -2048, "the stream's first major sync is at 0: \(again.prefix(2))")
     }
 
     /// A real Atmos stream (one of the truehd crate's public test streams, which are not
