@@ -205,24 +205,7 @@ final class HeightsBridge: RenditionEncoder {
     /// alone and whose packets it never parses — and the init segment's entry is replaced with
     /// the real one (`APACSampleEntry`). Fragments name no codec and need nothing.
     func configure(outputStream: UnsafeMutablePointer<AVStream>) throws {
-        let par = outputStream.pointee.codecpar!
-        par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
-        par.pointee.codec_id = AV_CODEC_ID_ALAC
-        par.pointee.codec_tag = 0
-        par.pointee.sample_rate = Self.sampleRate
-        par.pointee.frame_size = Int32(Self.framesPerPacket)
-        par.pointee.bit_rate = Int64(Self.bitRate)
-        av_channel_layout_uninit(&par.pointee.ch_layout)
-        av_channel_layout_default(&par.pointee.ch_layout, Int32(Self.channelCount))
-        let cookie = APACSampleEntry.standInCookie
-        guard let extradata = av_mallocz(cookie.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)) else {
-            throw AudioBridge.Failure.allocationFailed("stand-in extradata")
-        }
-        cookie.withUnsafeBytes { extradata.copyMemory(from: $0.baseAddress!, byteCount: cookie.count) }
-        av_freep(&par.pointee.extradata)
-        par.pointee.extradata = extradata.assumingMemoryBound(to: UInt8.self)
-        par.pointee.extradata_size = Int32(cookie.count)
-        outputStream.pointee.time_base = timeBase
+        try APACSampleEntry.configureStandIn(outputStream: outputStream)
     }
 
     // MARK: - Feeding
@@ -486,6 +469,29 @@ extension ObjectAudioRendering {
 
 /// The `apac` sample entry, and the init-segment rewrite that installs it over the stand-in.
 enum APACSampleEntry {
+
+    /// The stand-in stream's parameters (see `HeightsBridge.configure`). Needs no encoder, so
+    /// a declared heights rendition can mux on while its encoder is being rebuilt.
+    static func configureStandIn(outputStream: UnsafeMutablePointer<AVStream>) throws {
+        let par = outputStream.pointee.codecpar!
+        par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        par.pointee.codec_id = AV_CODEC_ID_ALAC
+        par.pointee.codec_tag = 0
+        par.pointee.sample_rate = HeightsBridgeConstants.sampleRate
+        par.pointee.frame_size = 1024
+        par.pointee.bit_rate = Int64(HeightsBridgeConstants.channelCount * 256_000)
+        av_channel_layout_uninit(&par.pointee.ch_layout)
+        av_channel_layout_default(&par.pointee.ch_layout, Int32(HeightsBridgeConstants.channelCount))
+        let cookie = standInCookie
+        guard let extradata = av_mallocz(cookie.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)) else {
+            throw AudioBridge.Failure.allocationFailed("stand-in extradata")
+        }
+        cookie.withUnsafeBytes { extradata.copyMemory(from: $0.baseAddress!, byteCount: cookie.count) }
+        av_freep(&par.pointee.extradata)
+        par.pointee.extradata = extradata.assumingMemoryBound(to: UInt8.self)
+        par.pointee.extradata_size = Int32(cookie.count)
+        outputStream.pointee.time_base = AVRational(num: 1, den: HeightsBridgeConstants.sampleRate)
+    }
 
     /// The ALAC magic cookie the stand-in stream carries: an `alac` box with a version word and
     /// a 24-byte ALACSpecificConfig (1024 frames, 16 bits, 2 channels, 48 kHz). movenc copies it
