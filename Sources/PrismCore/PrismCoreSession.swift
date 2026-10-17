@@ -328,7 +328,9 @@ public actor PrismCoreSession {
         /// up to 7.1). See the initializer's doc.
         public var bridgedAudio: BridgedAudioFormat = .compressed
         /// Whether TrueHD Atmos is rendered with its heights (`.heights`) or
-        /// bridged as its bed (`.off`, the default). See the initializer's doc.
+        /// bridged as its bed (`.off`, the default). `.heights` needs the
+        /// opt-in `PRISMCORE_OBJECT_AUDIO` build; compiled out by default.
+        /// See the initializer's doc.
         public var objectAudioRendering: ObjectAudioRendering = .off
         /// The host's word that the output plays Dolby Atmos — Aether maps the
         /// system's Dolby Atmos setting here. `.heights` does nothing without it.
@@ -732,7 +734,9 @@ public actor PrismCoreSession {
     ///   format with an independent decoder (truehdd) — see the README's
     ///   *TrueHD Atmos with heights* for the licensing note. TrueHD only, OS 26
     ///   and a build that links `TrueHDObjects` (`ObjectAudioRendering
-    ///   .isAvailable`); a track whose bitstream is not Atmos, or anything
+    ///   .isAvailable`) — which the default package never does: the renderer
+    ///   is compiled in only with the opt-in `PRISMCORE_OBJECT_AUDIO` build
+    ///   flag (Package.swift), so by default `.heights` plays as `.off`. A track whose bitstream is not Atmos, or anything
     ///   that fails before the master, keeps `bridgedAudio`; anything after
     ///   plays the stream's own bed through the same rendition.
     /// - Parameter allowsAtmosOutput: the host's statement that the route
@@ -949,7 +953,9 @@ public actor PrismCoreSession {
     /// The diagnostic report's `objectAudioRendering`: what was asked, and why it cannot run.
     static func describe(_ rendering: ObjectAudioRendering, allowsAtmosOutput: Bool) -> String {
         guard rendering == .heights else { return rendering.rawValue }
-        if !ObjectAudioRendering.rendererIsLinked { return "heights (unavailable: TrueHDObjects not linked)" }
+        if !ObjectAudioRendering.rendererIsLinked {
+            return "heights (unavailable: compiled out, opt-in build flag PRISMCORE_OBJECT_AUDIO)"
+        }
         if !ObjectAudioRendering.isAvailable { return "heights (unavailable: no APAC encoder, OS 26 needed)" }
         if !allowsAtmosOutput { return "heights (off: the host did not allow Atmos output)" }
         return "heights"

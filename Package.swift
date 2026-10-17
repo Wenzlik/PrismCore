@@ -2,17 +2,23 @@
 import Foundation
 import PackageDescription
 
-// TrueHD Atmos heights (`ObjectAudioRendering.heights`) need the Rust renderer
-// in `Rust/TrueHDObjects`, built from its pinned sources by
-// `Rust/TrueHDObjects/build-xcframework.sh` — the one binary this package
-// carries beyond MPVKit's. Since 3.7.0 hosts resolve the zip attached to the
-// release (`.binaryTarget(url:checksum:)`, as MPVKit does for FFmpeg); a local
-// build of the framework, when present, wins for development. A release that
-// rebuilds it attaches the new zip and updates the URL and checksum below.
+// TrueHD Atmos heights (`ObjectAudioRendering.heights`) are COMPILED OUT by default
+// (owner decision 2026-10-18): Dolby's patent claims read on the process — decoding the
+// TrueHD object presentation and rendering objects from their metadata — whoever's code does
+// it, so a runtime switch is not enough; the default package neither fetches nor links the
+// `TrueHDObjects` renderer, nor compiles the Swift that drives it. The sources stay in
+// `Rust/TrueHDObjects` and behind `#if PRISMCORE_OBJECT_AUDIO`.
+//
+// Opt-in is an explicit build action of whoever builds it, from a local checkout only:
+//
+//   Rust/TrueHDObjects/build-xcframework.sh          # or --mac
+//   PRISMCORE_OBJECT_AUDIO=1 swift build
+//
+// There is no remote binary URL: with the flag on, the framework must exist locally, or
+// SwiftPM fails on the missing path. Lossless 7.1 and E-AC-3 (JOC) do not depend on this.
+let objectAudio = Context.environment["PRISMCORE_OBJECT_AUDIO"] == "1"
 let trueHDObjectsPath = "Rust/TrueHDObjects/build/TrueHDObjects.xcframework"
-let linksTrueHDObjects = FileManager.default.fileExists(
-    atPath: Context.packageDirectory + "/" + trueHDObjectsPath
-)
+let objectAudioDefine: [SwiftSetting] = objectAudio ? [.define("PRISMCORE_OBJECT_AUDIO")] : []
 
 let package = Package(
     name: "PrismCore",
@@ -38,27 +44,16 @@ let package = Package(
         .package(url: "https://github.com/mpvkit/MPVKit.git", .upToNextMinor(from: "1.0.0")),
     ],
     targets: [
-        // A local build of the framework wins (development); otherwise the
-        // released zip, checksum-pinned, which is what hosts resolve.
-        linksTrueHDObjects
-            ? .binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)
-            : .binaryTarget(
-                name: "TrueHDObjects",
-                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.7.0/TrueHDObjects.xcframework.zip",
-                checksum: "dd82f6b283fef499496f8ebe013a8808d542fa6cfe59c77824172dbf0faec6b7"
-            ),
-    ] + [
         .target(
             name: "PrismCore",
             dependencies: [
                 .product(name: "MPVKit", package: "MPVKit"),
-                "TrueHDObjects",
-            ],
+            ] + (objectAudio ? ["TrueHDObjects"] : []),
             swiftSettings: [
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.
                 .swiftLanguageMode(.v5),
-            ]
+            ] + objectAudioDefine
         ),
         .executableTarget(
             name: "prismcore-fuzz",
@@ -87,7 +82,12 @@ let package = Package(
                 // (EAC3+JOC needs a real object-audio encode) and Dolby
                 // Vision (real RPUs) — stay manual smoke tests on real media.
                 .copy("Fixtures"),
-            ]
+            ],
+            // The tests that drive the renderer itself exist only in the opt-in build.
+            swiftSettings: objectAudioDefine
         ),
-    ]
+    ] + (objectAudio
+        // Only with the opt-in flag (see the top of this file); never in the default graph.
+        ? [.binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)]
+        : [])
 )
