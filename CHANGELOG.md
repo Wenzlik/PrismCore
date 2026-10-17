@@ -8,6 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.7.0] — 2026-10-17
+
+TrueHD Atmos can play with its height channels: opt-in
+(`objectAudioRendering = .heights` plus `allowsAtmosOutput`), rendered to
+7.1.4 and delivered as Apple Positional Audio (APAC). TrueHD only; off by
+default, and any failure keeps today's 7.1 bridge. Ships one new binary,
+`TrueHDObjects.xcframework`, built from pinned source and attached to this
+release.
+
 ### Added
 
 - **TrueHD Atmos with its heights, opt-in.** `objectAudioRendering: .heights`
@@ -3280,7 +3289,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...HEAD
+[3.7.0]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...3.7.0
 [3.6.1]: https://github.com/Wenzlik/PrismCore/compare/3.6.0...3.6.1
 [3.6.0]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...3.6.0
 [3.5.5]: https://github.com/Wenzlik/PrismCore/compare/3.5.4...3.5.5
