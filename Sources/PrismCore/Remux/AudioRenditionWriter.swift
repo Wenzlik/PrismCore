@@ -43,8 +43,21 @@ final class AudioRenditionWriter {
     /// Read by a sequential session's `SequentialWindow`, which moves the
     /// front of every playlist together.
     let playlist: MediaPlaylistWriter
-    private var bridge: AudioBridge?
+    private var bridge: RenditionEncoder?
     var onBridgeProgress: ((AudioBridgeProgress) -> Void)?
+    /// A `.bridge` route over TrueHD Atmos that renders its heights (`HeightsBridge`) instead
+    /// of bridging its bed. Cleared when the renderer cannot be built — before the master is
+    /// written, so the track is declared as what it will really be.
+    private(set) var rendersHeights: Bool
+    /// The renderer's report of what is playing. Set by the remuxer.
+    var onObjectAudio: ((ObjectAudioDelivery, String?) -> Void)?
+    /// The APAC encoder's cookie, for the sample entry the init segment gets.
+    private var heightsCookie: Data?
+    /// Set once the master has read this rendition's description: from then on its codec is
+    /// a promise to the player, and `rendersHeights` may no longer fall back to another one.
+    private var codecDeclared = false
+    /// Tests only: builds the heights encoder in place of `HeightsBridge`.
+    var heightsBridgeFactoryForTesting: ((UnsafeMutablePointer<AVStream>) throws -> RenditionEncoder)?
     /// The encoder a `.bridge` route asks for. A boost rendition keeps the
     /// compressed default: it is a derived extra whose point is
     /// intelligibility, not fidelity.
@@ -144,9 +157,11 @@ final class AudioRenditionWriter {
         route: HLSRemuxer.AudioRoute, track: AudioTrackInfo, ordinal: Int, parent: URL,
         lazy: Bool = false,
         suspendable: Bool = false,
-        bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec
+        bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec,
+        rendersHeights: Bool = false
     ) {
         self.route = route
+        self.rendersHeights = rendersHeights && route.mode == .bridge
         self.bridgeTarget = route.mode == .bridge ? bridgeTarget : AudioBridge.defaultTargetCodec
         self.track = track
         self.ordinal = ordinal
@@ -283,41 +298,69 @@ final class AudioRenditionWriter {
             // it is released again. Nothing else exists until `arm()`. A
             // suspended rendition lands here too, its negotiation kept.
             if negotiatedChannelCount == nil, route.mode != .streamCopy {
-                let inStream = input.pointee.streams[Int(index)]!
-                let probeBridge = try AudioBridge(
-                    codecpar: inStream.pointee.codecpar,
-                    timeBase: inStream.pointee.time_base,
-                    globalHeader: true,
-                    dialogueBoost: route.mode.dialogueBoostLevel,
-                    targetCodec: bridgeTarget
-                )
-                negotiatedChannelCount = probeBridge.outputChannelCount
-                negotiatedCodecName = probeBridge.outputCodecName
-                probeBridge.close()
+                if let probeBridge = try makeBridge(input.pointee.streams[Int(index)]!) {
+                    negotiatedChannelCount = probeBridge.outputChannelCount
+                    negotiatedCodecName = probeBridge.outputCodecName
+                    probeBridge.close()
+                }
             }
             isProducing = false
             return
         }
 
         if route.mode != .streamCopy, bridge == nil {
-            let inStream = input.pointee.streams[Int(index)]!
-            bridge = try AudioBridge(
-                codecpar: inStream.pointee.codecpar,
-                timeBase: inStream.pointee.time_base,
-                // mp4/mov is a global-header muxer: the encoder's extradata
-                // belongs in codecpar, not in-band.
-                globalHeader: true,
-                // Nil for a plain bridge; a boost rendition's bridge carries
-                // the centre-favouring filter between decode and re-encode.
-                dialogueBoost: route.mode.dialogueBoostLevel,
-                targetCodec: bridgeTarget
-            )
+            bridge = try makeBridge(input.pointee.streams[Int(index)]!)
             bridge?.onProgress = onBridgeProgress
         }
         try openMuxer(input: input, restart: restart)
     }
 
     private var directoryCreated = false
+
+    /// The rendition's encoder: the heights renderer when this route renders heights and it
+    /// can be built here, otherwise FFmpeg's bridge — so a renderer that cannot exist (an OS
+    /// without the APAC encoder, a build without the library) costs the heights, never the
+    /// track.
+    ///
+    /// Only before the master has declared the rendition (`codecDeclared`). After that the
+    /// rendition IS `apac` — its init segment may already be in the player — and a rebuild
+    /// that fails (a resume after suspension, a re-anchor after EOF) must not hand it EAC3 or
+    /// FLAC fragments under that entry: it returns nil, the rendition produces nothing until a
+    /// later re-anchor builds the encoder again, and the video plays on (review r2).
+    private func makeBridge(_ inStream: UnsafeMutablePointer<AVStream>) throws -> RenditionEncoder? {
+        if rendersHeights {
+            do {
+                if let factory = heightsBridgeFactoryForTesting { return try factory(inStream) }
+                guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else {
+                    throw HeightsUnavailable.operatingSystem
+                }
+                let heights = try HeightsBridge(codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base)
+                heightsCookie = heights.magicCookie
+                heights.onObjectAudio = { [weak self] delivery, why in self?.onObjectAudio?(delivery, why) }
+                return heights
+            } catch where codecDeclared {
+                PrismCoreLog.notice("audio rendition \(directoryName) (#\(track.streamIndex)): heights encoder could not be rebuilt (\(error)); silent until the next re-anchor")
+                onObjectAudio?(.notPreserved, "\(error)")
+                return nil
+            } catch {
+                PrismCoreLog.notice("audio rendition \(directoryName) (#\(track.streamIndex)): heights unavailable (\(error)); bridging the bed")
+                rendersHeights = false
+            }
+        }
+        return try AudioBridge(
+            codecpar: inStream.pointee.codecpar,
+            timeBase: inStream.pointee.time_base,
+            // mp4/mov is a global-header muxer: the encoder's extradata
+            // belongs in codecpar, not in-band.
+            globalHeader: true,
+            // Nil for a plain bridge; a boost rendition's bridge carries
+            // the centre-favouring filter between decode and re-encode.
+            dialogueBoost: route.mode.dialogueBoostLevel,
+            targetCodec: bridgeTarget
+        )
+    }
+
+    private enum HeightsUnavailable: Error { case operatingSystem }
 
     /// The muxer alone, described from the bridge when there is one — the
     /// part of `open` a re-anchor repeats.
@@ -330,6 +373,12 @@ final class AudioRenditionWriter {
         if let bridge {
             plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
                 try bridge.configure(outputStream: outStream)
+            }
+        } else if rendersHeights {
+            // A declared heights rendition without its encoder: the same stand-in stream, so
+            // the muxer still describes the entry the served init carries.
+            plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
+                try APACSampleEntry.configureStandIn(outputStream: outStream)
             }
         } else {
             plan = .init(inputIndex: index, language: sourceLanguage)
@@ -379,6 +428,10 @@ final class AudioRenditionWriter {
                 bridge.close()
                 self.bridge = nil
                 try open(input: input, restart: true)
+            } else if rendersHeights, bridge == nil {
+                // A declared heights rendition whose encoder could not be rebuilt: every
+                // re-anchor tries again.
+                try open(input: input, restart: true)
             } else {
                 // The bridge stays: its buffered state is reset, its decoder
                 // lives on (`AudioBridge.reset`; an encoder that delays its
@@ -410,6 +463,9 @@ final class AudioRenditionWriter {
             try bridge.feed(packet) { encoded in
                 try self.emit(encoded, from: bridge.timeBase)
             }
+        } else if rendersHeights {
+            // No encoder (see `makeBridge`): TrueHD bytes must never reach an `apac` track.
+            return
         } else {
             try emit(packet, from: sourceTimeBase)
         }
@@ -442,9 +498,19 @@ final class AudioRenditionWriter {
     /// priming.
     private func writeInitSegment(_ initSegment: Data) throws {
         guard servedTimelineBase == nil else { return }
-        let bytes = atmosComplexityIndex.flatMap {
+        var bytes = atmosComplexityIndex.flatMap {
             EAC3Configuration.patch(initSegment: initSegment, atmosComplexityIndex: $0)
         } ?? initSegment
+        // The muxer wrote the heights renderer's stand-in ALAC entry; the player gets `apac`.
+        if rendersHeights, let heightsCookie {
+            if let patched = APACSampleEntry.patch(
+                initSegment: bytes, magicCookie: heightsCookie, sampleRate: HeightsBridgeConstants.sampleRate
+            ) {
+                bytes = patched
+            } else {
+                PrismCoreLog.notice("audio rendition \(directoryName): no stand-in sample entry to replace with apac")
+            }
+        }
         try bytes.write(
             to: directory.appendingPathComponent(Self.initFileName),
             options: .atomic
@@ -650,7 +716,9 @@ final class AudioRenditionWriter {
 
     /// How this rendition is declared in the master playlist.
     func rendition(groupID: String, isDefault: Bool) -> MasterPlaylistBuilder.AudioRendition {
-        MasterPlaylistBuilder.AudioRendition(
+        // The master is what reads this; from here the codec is the player's.
+        codecDeclared = true
+        return MasterPlaylistBuilder.AudioRendition(
             groupID: groupID,
             name: renditionName,
             language: sourceLanguage,
@@ -714,6 +782,9 @@ final class AudioRenditionWriter {
                 profileName: track.profileName
             )
         case .bridge, .boost:
+            if rendersHeights {
+                return APACSampleEntry.codecsString(channelCount: HeightsBridgeConstants.channelCount)
+            }
             // Whichever encoder the bridge negotiated — FLAC when the host
             // asked for lossless, else EAC3 where the build has it, AAC
             // otherwise — never assumed.

@@ -1,0 +1,4 @@
+module TrueHDObjects {
+    header "TrueHDObjects.h"
+    export *
+}

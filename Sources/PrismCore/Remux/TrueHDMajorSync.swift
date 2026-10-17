@@ -48,6 +48,12 @@ enum TrueHDMajorSync {
         return nil
     }
 
+    /// Whether the packet's FIRST access unit is a restart unit — the only place a decoder can
+    /// start, and so where the heights renderer anchors its clock after a start or a seek.
+    static func startsWithMajorSync(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        majorSync(at: 4, of: bytes) != nil
+    }
+
     static func carriesObjectAudio(in bytes: [UInt8]) -> Bool? {
         bytes.withUnsafeBufferPointer { carriesObjectAudio(in: $0) }
     }

@@ -217,6 +217,10 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         public var externalSubtitleCount: Int
         /// `compressed` or `lossless` — what a bridged track was encoded into.
         public var bridgedAudio: String? = nil
+        /// `off`, `heights`, or why heights were asked for and cannot run here
+        /// (`heights (unavailable: …)`); which tracks rendered them is each
+        /// track's `objectAudio`.
+        public var objectAudioRendering: String? = nil
 
         public struct Display: Sendable, Equatable, Codable {
             public var isHDRReady: Bool

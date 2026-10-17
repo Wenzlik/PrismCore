@@ -3,8 +3,9 @@ import Foundation
 /// Finds a box inside a produced fMP4 init segment and replaces its payload,
 /// keeping every enclosing box's size field honest.
 ///
-/// Two patches need this — the `dec3` JOC declaration and a `hvcC` whose
-/// parameter sets have to be filled in — and both grow their box, which is the
+/// Three patches need this — the `dec3` JOC declaration, a `hvcC` whose
+/// parameter sets have to be filled in, and the heights rendition's `apac`
+/// entry over its ALAC stand-in (`APACSampleEntry`) — and all of them resize their box, which is the
 /// part that isn't a splice: an fMP4 sample entry is nested six deep
 /// (`moov/trak/mdia/minf/stbl/stsd/<entry>/<config>`) and every level carries its
 /// own byte count. Miss one and the tree stops parsing at the first stale length.

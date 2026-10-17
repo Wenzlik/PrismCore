@@ -49,6 +49,21 @@ FFmpeg's version.
 | [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
 | [MPVKit](https://github.com/mpvkit/MPVKit) | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries) |
 | [libdovi](https://github.com/quietvoid/dovi_tool) | MIT | Dolby Vision RPU parsing and the Profile 7 → 8.1 conversion |
+| `Rust/TrueHDObjects` ([truehdd](https://github.com/truehdd/truehdd)'s `truehd` + `oamd`, a port of [SpatialAudioBridge](https://github.com/kristofferR/SpatialAudioBridge)'s renderer, a few MIT/Apache crates) | Apache-2.0 (the crate); the linked crates' terms in its `THIRD-PARTY-NOTICES.md` | optional: TrueHD Atmos heights, linked only when its XCFramework is built from this repository |
+
+### TrueHDObjects
+
+The library in `Rust/TrueHDObjects` is a separate work under the **Apache
+License 2.0**, statically linked into PrismCore when built. Apache-2.0 code
+combines with LGPL-2.1-**or-later** code under the LGPL-3.0 option (the FSF
+counts Apache-2.0 as compatible with (L)GPLv3, not with v2), which is one more
+reason the "or later" matters here. Its notices and every linked crate's
+licence text sit in `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and
+`Rust/TrueHDObjects/licenses/`, and the build copies them into the
+XCFramework (`licenses/`): an app that ships the library ships them in its
+acknowledgements. It decodes Dolby TrueHD with an independent implementation;
+whether that touches patents is a question the owner decided to accept
+(2026-10-16), and the feature is off unless a host turns it on.
 
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
 through MPVKit, which is where their corresponding sources and build recipes live.

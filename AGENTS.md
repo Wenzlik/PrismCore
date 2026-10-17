@@ -156,6 +156,54 @@ API surface.
   decodes to green-and-purple. Profile 8.x deliberately keeps `hvc1`, because
   its base layer *is* the fallback.
 
+### TrueHD Atmos heights (`HeightsBridge`, `Rust/TrueHDObjects`)
+
+- **SwiftPM caches the evaluated manifest, filesystem checks included.**
+  `Package.swift` links `TrueHDObjects.xcframework` only when it exists, and
+  a manifest evaluated before the build ran keeps answering "absent": the
+  heights tests then pass by returning early. The first build after creating
+  (or deleting) the framework needs `--manifest-cache none`.
+- **APAC's DRC setting is its latency.** Every configuration but `.none`
+  holds audio before its first packet — 1.51 s (`.capture`, the default),
+  10 s (`.music`, `.voice`), 20 s (`.movie`) — and a rendition cut on the
+  video's boundaries would ship every segment short by that much. `.none` is
+  why it works; it is also the one Apple guideline (DRC metadata) it misses.
+- **Stamp APAC like AVAssetWriter does: priming before the source time.**
+  AVAssetWriter's own HLS fragments start at T − 2048 frames for a session
+  started at T. Stamped from T instead, every sample plays 43 ms late. The
+  round-trip test decodes the served fMP4 with AVFoundation and pins the
+  onset to within 2 ms.
+- **With `.none`, every APAC packet is an entry point** — decoding from any
+  packet is bit-identical to decoding from the first, and the encoder flags
+  each one independent — so segments need no sync-packet grid. (AVAssetWriter
+  with its default DRC marks only every 75th packet sync; don't copy its
+  sample flags.)
+- **FFmpeg's experimental TrueHD encoder rotates the front three channels**
+  (asked for L/R/C, both FFmpeg's decoder and the truehd crate read R/C/L).
+  The tones fixture's expectations follow the decoders.
+- **ffmpeg treats a `.mlp` file as MLP** ("only supports up to 2
+  substreams") even when it is TrueHD; pass `-f truehd` for truehd's test
+  streams.
+- **`producedNoAudio` is not an error for the heights bridge.** It skips
+  packets until a major sync on purpose, so a re-anchor into the last
+  ~107 ms of a stream has input and no output; thrown from `flush`, that
+  ended the producer — video included (review r1).
+- **A rendition's codec is a promise once the master read it.** Fallbacks
+  that change the encoder (`makeBridge`) are allowed only before
+  `rendition(groupID:)` was called; after that a failed rebuild produces
+  nothing rather than foreign fragments under the served init (review r2).
+- **Every pre-master read needs a budget.** `TrueHDAtmosScout` arms the
+  context's `ReadInterruptGuard` (750 ms) and checks bytes; unbounded, a
+  30 KB/s source held it 17.5 s in the regression test.
+- **The TrueHD profile is not evidence for heights either.** Gate on the
+  bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
+  note above says for E-AC-3.
+- **Do not rebuild the decoder after a seek from the middle of a stream.**
+  It can only start at a major sync, and the renderer's output is anchored
+  on the first access unit fed; packets before the first restart unit are
+  skipped on the Swift side (`TrueHDMajorSync.startsWithMajorSync`) so the
+  anchor is that unit's own PTS.
+
 ### Threading
 
 - **The producer owns a thread; never put it back on the pool.**
@@ -303,6 +351,10 @@ runs shorter. It does not replace them.
   - `PRISMCORE_HDR10PLUS_MEDIA` — the HDR10+ scout on a real encode (the
     fixtures' SEI is script-injected; see `generate_hdr10plus.sh`)
   - `PRISMCORE_BENCH` — startup cost
+  - `PRISMCORE_TRUEHD_VECTORS` — real Atmos through a whole heights session
+    (the truehd crate's test streams in Cargo's checkout, not redistributable
+    here); `TRUEHD_OBJECTS_VECTORS` is the same for `cargo test`
+  - `PRISMCORE_HEIGHTS_BENCH` — heights chain throughput on a TrueHD Atmos file
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
   and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
   pipeline, never the premium claims — Atmos and Dolby Vision need real media
