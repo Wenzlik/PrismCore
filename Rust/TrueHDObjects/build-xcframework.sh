@@ -115,4 +115,4 @@ if command -v swift >/dev/null; then
 fi
 echo "built $OUT/TrueHDObjects.xcframework (${TARGETS[*]})"
 # SwiftPM caches the evaluated manifest, including Package.swift's check for this framework.
-echo "first PrismCore build after this one: swift build --manifest-cache none"
+echo "opt-in build: PRISMCORE_OBJECT_AUDIO=1 swift build (the default package never links it)"
