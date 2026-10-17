@@ -5,6 +5,10 @@ the crates `Cargo.lock` pins. Nothing in it is a prebuilt third-party binary. Th
 texts under `licenses/` and `LICENSE-APACHE` travel inside the framework (`licenses/`) and must
 ship with any app that links it.
 
+Since PrismCore 3.7.1 the framework is **not part of PrismCore's default package**: it is linked
+only into a build made with `PRISMCORE_OBJECT_AUDIO=1` (see the repository's `Package.swift`), so an
+app built against a released PrismCore contains none of the components below.
+
 ## This crate
 
 `truehd-objects` (this directory) is licensed under the **Apache License 2.0** (`LICENSE-APACHE`),

@@ -68,7 +68,7 @@ table: the app's name, a link, and its platforms.
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC, AC3, EAC3, FLAC, ALAC — bit-for-bit |
 | Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1) |
-| TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **Opt-in for TrueHD only:** `objectAudioRendering: .heights` renders the Atmos objects to 7.1.4 and serves APAC, so the heights play (see *TrueHD Atmos with heights*; `.renderedHeights`). Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
+| TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **TrueHD heights are compiled out by default:** only a build made with the opt-in `PRISMCORE_OBJECT_AUDIO` flag renders the Atmos objects to 7.1.4 APAC (see *TrueHD Atmos with heights*); the default package has no object renderer, and `.heights` keeps the bed. Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
 | Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. `preferredAudioLanguage:` decides which one is `DEFAULT`, so playback starts in the right language instead of switching visibly after it. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
 | Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
 | Subtitles (text) | SubRip / ASS / SSA / WebVTT / mov_text converted during the remux read into segmented WebVTT renditions, cut on the video's own boundaries — so text survives PiP and AirPlay instead of living in a host overlay. ASS inline italics / bold / underline become WebVTT tags; `\an` / `\pos` placement and a WebVTT track's own cue settings ride the timing line, so a caption authored at the top of the frame stays there. External `.srt` / `.vtt` register as first-class renditions |
@@ -297,7 +297,36 @@ outside this software surface. ASS colours, fonts, karaoke and drawing overrides
 are not preserved by the text converter — only the inline styles and placement
 WebVTT has words for.
 
-### TrueHD Atmos with heights (opt-in)
+### TrueHD Atmos with heights (opt-in build flag, compiled out by default)
+
+**Not in the default package.** Since 3.7.1 the object-audio path — decoding the
+TrueHD object presentation and rendering objects from their metadata — is
+compiled out unless whoever builds PrismCore opts in: the default package graph
+(what `exactVersion`/`from:` resolves) neither fetches nor links
+`TrueHDObjects.xcframework`, and the Swift that drives it (`HeightsBridge`) is
+not compiled. Why: Dolby's patent claims read on that **process**, whoever's
+code performs it, so a runtime switch that is off by default is not enough
+while the code ships in the binary (the conclusion AetherEngine reached; owner
+decision 2026-10-18). Lossless 7.1 (the TrueHD core through FFmpeg) and E-AC-3 /
+E-AC-3 JOC are not part of this and are unchanged. The sources stay in the
+repository (`Rust/TrueHDObjects`, `#if PRISMCORE_OBJECT_AUDIO`).
+
+In the default build the API below still compiles: `ObjectAudioRendering
+.isAvailable` is `false`, `.heights` plays exactly as `.off` (the
+`bridgedAudio` bridge), `.renderedHeights` is never reported, and the
+diagnostic report says `heights (unavailable: compiled out, …)`.
+
+To opt in, from a local checkout:
+
+```sh
+Rust/TrueHDObjects/build-xcframework.sh        # --mac for this Mac only
+PRISMCORE_OBJECT_AUDIO=1 swift build           # or swift test; set it for Xcode too
+```
+
+With the variable set, `Package.swift` adds the local framework as a
+`binaryTarget(path:)` and defines `PRISMCORE_OBJECT_AUDIO` for the Swift
+code; there is no remote binary URL in the manifest, so a missing framework is
+a resolve error, never a download. Everything below describes that build.
 
 ```swift
 let session = try PrismCoreSession(
@@ -374,9 +403,11 @@ DTS:X) is untouched.
   AetherEngine needs the same for a Samsung soundbar. PrismCore does not
   ship such a stream; a host that wants it plays one itself.
 - **Licensing.** Decoding and rendering Dolby's format with an independent,
-  reverse-engineered decoder may touch Dolby patents in some jurisdictions;
-  shipping it was the owner's decision (2026-10-16), and it stays off unless
-  a host asks. The library's notices are in
+  reverse-engineered decoder may touch Dolby patents in some jurisdictions —
+  the claims cover the process, not a particular implementation. 3.7.0
+  shipped it off at runtime (owner decision 2026-10-16); since 3.7.1 it is
+  not in the default package at all (owner decision 2026-10-18), only in a
+  build made with `PRISMCORE_OBJECT_AUDIO=1`. The library's notices are in
   `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and travel inside the
   XCFramework.
 
@@ -386,13 +417,9 @@ with the Apple targets; `--mac` for this Mac only) builds
 visionOS, visionOS Simulator and macOS from `Cargo.lock --locked`, each slice
 prelinked so that only the C API (and a weak `rust_eh_personality`, shared
 with libdovi's copy of the Rust runtime) is global, plus a zip and its SwiftPM
-checksum. `Package.swift` links it when it exists. SwiftPM caches the
-evaluated manifest, so the first build after creating or deleting it needs
-`swift build --manifest-cache none`. It is not committed: built from pinned
-source it is reproducible, and the precedent is MPVKit's FFmpeg, which hosts
-consume as a released binary, not as bytes in git. A release that ships the
-feature attaches the zip and switches the manifest to
-`.binaryTarget(url:checksum:)`.
+checksum. `Package.swift` links it only with `PRISMCORE_OBJECT_AUDIO=1`. It is
+not committed, and releases no longer attach it (3.7.0 did; 3.7.1 removed the
+`.binaryTarget(url:checksum:)` from the manifest).
 
 ### Host setup on tvOS
 
@@ -813,7 +840,8 @@ passthrough. An open-source object decoder does exist (`truehdd`, Apache-2.0),
 but it is reverse-engineered, experimental and Rust, and it has no renderer.
 The one public path that carries heights, APAC 7.1.4 in HLS, is what
 `objectAudioRendering: .heights` builds on that decoder (see *TrueHD Atmos
-with heights*) — opt-in, and still awaiting a device run against an AVR.
+with heights*) — compiled out of the default package since 3.7.1 (an opt-in
+build flag), and still awaiting a device run against an AVR.
 Without it the engine keeps what is
 keepable. The 7.1 presentation already has the objects mixed in: what is lost
 is their height and placement, not their sound. With `bridgedAudio: .lossless`
@@ -962,10 +990,10 @@ dynamically.
 Dolby Vision RPU conversion goes through
 [libdovi](https://github.com/quietvoid/dovi_tool), which MPVKit already links.
 
-A host that already ships MPVKit adds **zero new binary dependencies** — with one
-owner-approved exception, and only when it is built: `TrueHDObjects.xcframework`
-for TrueHD Atmos heights (see *TrueHD Atmos with heights*), built here from pinned
-Rust source; without it nothing changes. One gotcha
+A host that already ships MPVKit adds **zero new binary dependencies**. The one
+exception, `TrueHDObjects.xcframework` for TrueHD Atmos heights, is not part of the
+default package since 3.7.1: it is linked only into a build made with
+`PRISMCORE_OBJECT_AUDIO=1` from a local checkout (see *TrueHD Atmos with heights*). One gotcha
 if that host vendors its own MPVKit fork: SPM derives a path dependency's identity
 from its *directory name*, so the fork's directory has to be called `MPVKit` for it
 to override the `mpvkit` identity PrismCore asks for.

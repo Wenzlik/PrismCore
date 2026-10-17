@@ -5,8 +5,9 @@
 #   Rust/TrueHDObjects/build-xcframework.sh           # all slices
 #   Rust/TrueHDObjects/build-xcframework.sh --mac     # this Mac's slice only (fast, for tests)
 #
-# Output: Rust/TrueHDObjects/build/ (git-ignored). Package.swift links the framework when it is
-# there; without it PrismCore builds as before and TrueHD keeps its 7.1 bridge.
+# Output: Rust/TrueHDObjects/build/ (git-ignored). Package.swift links the framework only in the
+# opt-in build (`PRISMCORE_OBJECT_AUDIO=1 swift build`); by default it is never linked and
+# TrueHD keeps its 7.1 bridge.
 #
 # Needs rustup's stable toolchain with the Apple targets below (`rustup target add …`); tvOS and
 # visionOS are installable rustup targets, so no nightly or -Zbuild-std is involved. Honours
