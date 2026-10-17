@@ -5,11 +5,10 @@ import PackageDescription
 // TrueHD Atmos heights (`ObjectAudioRendering.heights`) need the Rust renderer
 // in `Rust/TrueHDObjects`, built from its pinned sources by
 // `Rust/TrueHDObjects/build-xcframework.sh` — the one binary this package
-// carries beyond MPVKit's, so it is linked only when it has been built.
-// Without it PrismCore builds and behaves exactly as before: TrueHD keeps its
-// 7.1 bridge and `ObjectAudioRendering.isAvailable` is false. A release that
-// ships it publishes the script's zip and switches this to
-// `.binaryTarget(name:url:checksum:)`, as MPVKit does for FFmpeg.
+// carries beyond MPVKit's. Since 3.7.0 hosts resolve the zip attached to the
+// release (`.binaryTarget(url:checksum:)`, as MPVKit does for FFmpeg); a local
+// build of the framework, when present, wins for development. A release that
+// rebuilds it attaches the new zip and updates the URL and checksum below.
 let trueHDObjectsPath = "Rust/TrueHDObjects/build/TrueHDObjects.xcframework"
 let linksTrueHDObjects = FileManager.default.fileExists(
     atPath: Context.packageDirectory + "/" + trueHDObjectsPath
@@ -38,12 +37,23 @@ let package = Package(
         // Vendor/MPVKitLocal fork (same package identity) at integration time.
         .package(url: "https://github.com/mpvkit/MPVKit.git", .upToNextMinor(from: "1.0.0")),
     ],
-    targets: (linksTrueHDObjects ? [.binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)] : []) + [
+    targets: [
+        // A local build of the framework wins (development); otherwise the
+        // released zip, checksum-pinned, which is what hosts resolve.
+        linksTrueHDObjects
+            ? .binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)
+            : .binaryTarget(
+                name: "TrueHDObjects",
+                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.7.0/TrueHDObjects.xcframework.zip",
+                checksum: "dd82f6b283fef499496f8ebe013a8808d542fa6cfe59c77824172dbf0faec6b7"
+            ),
+    ] + [
         .target(
             name: "PrismCore",
             dependencies: [
                 .product(name: "MPVKit", package: "MPVKit"),
-            ] + (linksTrueHDObjects ? ["TrueHDObjects"] : []),
+                "TrueHDObjects",
+            ],
             swiftSettings: [
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.
