@@ -43,6 +43,31 @@ struct TrueHDHeightsTests {
         }
     }
 
+    #if !PRISMCORE_OBJECT_AUDIO
+    /// The default package (no `PRISMCORE_OBJECT_AUDIO`): the renderer is compiled out, so a
+    /// host asking for heights on a TrueHD Atmos track gets the regular bridge — here the
+    /// lossless 7.1/5.1 bed — and never `.renderedHeights`.
+    @Test("Default build: object rendering is compiled out and a heights request falls back")
+    func compiledOutByDefault() async throws {
+        #expect(!ObjectAudioRendering.isAvailable)
+        #expect(!ObjectAudioRendering.rendererIsLinked)
+        #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true).contains("compiled out"))
+        let session = try PrismCoreSession(
+            url: try fixture("h264_truehd51_tones_3s.mkv"), display: .init(isHDRReady: false, isDolbyVisionCapable: false),
+            bridgedAudio: .lossless, objectAudioRendering: .heights, allowsAtmosOutput: true
+        )
+        let playlist = try await session.start()
+        let master = try String(contentsOf: playlist, encoding: .utf8)
+        #expect(!master.contains("apac"), "no APAC promise in the master")
+        #expect(master.contains("fLaC"), "the lossless bridge serves the bed: \(master)")
+        let tracks = session.audioTrackDeliveries
+        #expect(!tracks.isEmpty)
+        #expect(tracks.allSatisfy { $0.objectAudio != .renderedHeights })
+        #expect(tracks.first?.delivery == .bridged)
+        await session.stop()
+    }
+    #endif
+
     @Test("Only a bridged 48 kHz TrueHD Atmos track, with both flags and the renderer, renders heights")
     func routing() {
         let atmos = Self.atmosTrack
@@ -104,6 +129,7 @@ struct TrueHDHeightsTests {
         await session.stop()
     }
 
+    #if PRISMCORE_OBJECT_AUDIO
     @Test("A re-anchor with no major sync left ends empty, never failing the producer")
     func emptyEpochFlushesQuietly() throws {
         guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
@@ -165,6 +191,7 @@ struct TrueHDHeightsTests {
         #expect(checked > 100)
         #expect(deliveries.last == .notPreserved)
     }
+    #endif
 
     @Test("Once the master declared apac, a failed encoder rebuild never changes the rendition's codec")
     func declaredCodecIsLocked() throws {
@@ -339,6 +366,7 @@ struct TrueHDHeightsTests {
         }
     }
 
+    #if PRISMCORE_OBJECT_AUDIO
     @Test("After a seek the renderer starts at a major sync and stamps from it")
     func seekStartsAtAMajorSync() throws {
         guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
@@ -379,6 +407,7 @@ struct TrueHDHeightsTests {
         }
         #expect(again.first == -2048, "the stream's first major sync is at 0: \(again.prefix(2))")
     }
+    #endif
 
     /// A real Atmos stream (one of the truehd crate's public test streams, which are not
     /// redistributable here) muxed under a test picture and served by a whole session.
@@ -423,6 +452,7 @@ struct TrueHDHeightsTests {
     /// Throughput of the whole heights chain (decode, render, limit, APAC encode, packetize) on
     /// one thread, in CPU time so a loaded machine still measures the work:
     /// `PRISMCORE_HEIGHTS_BENCH=/path/to/truehd-atmos.mkv swift test --filter heightsThroughput`.
+    #if PRISMCORE_OBJECT_AUDIO
     @Test("Heights throughput (opt-in benchmark)")
     func heightsThroughput() throws {
         guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable,
@@ -470,6 +500,7 @@ struct TrueHDHeightsTests {
         ))
         #expect(out > 0)
     }
+    #endif
 
     // MARK: - Helpers
 

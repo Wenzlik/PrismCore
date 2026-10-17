@@ -8,6 +8,37 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.7.1] — 2026-10-18
+
+TrueHD Atmos height rendering is no longer part of the default package: it
+is an opt-in **build** flag, off by default. Source-compatible; lossless 7.1
+and E-AC-3 / E-AC-3 JOC are unchanged.
+
+### Changed
+
+- **Object-audio height rendering is an opt-in build flag, off by default,
+  and not part of the default package.** Dolby's patent claims read on the
+  process — decoding the TrueHD object presentation and rendering objects
+  from their metadata — whoever's code performs it, so 3.7.0's runtime
+  default (`.off`) was not enough while the code shipped in the binary
+  (owner decision 2026-10-18, as AetherEngine concluded). The default
+  package graph now neither fetches nor links `TrueHDObjects.xcframework`
+  (the remote `binaryTarget(url:checksum:)` is gone from `Package.swift`),
+  and the Swift that drives it (`HeightsBridge`) is compiled only under
+  `#if PRISMCORE_OBJECT_AUDIO`. Opt in from a local checkout:
+  `Rust/TrueHDObjects/build-xcframework.sh`, then
+  `PRISMCORE_OBJECT_AUDIO=1 swift build`. The Rust sources stay in the
+  repository.
+- The API stays: in the default build `ObjectAudioRendering.isAvailable` is
+  `false`, `.heights` plays as `.off` (the `bridgedAudio` bridge),
+  `ObjectAudioDelivery.renderedHeights` is never reported, and the
+  diagnostic report reads `heights (unavailable: compiled out, …)`.
+- Lossless 7.1 (the TrueHD core through FFmpeg, `bridgedAudio: .lossless`)
+  and E-AC-3 / E-AC-3 JOC delivery are unchanged.
+- `NOTICE.md` and `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md`: the default
+  product contains none of the TrueHDObjects components, so an app built
+  against a released PrismCore owes none of their notices.
+
 ## [3.7.0] — 2026-10-17
 
 TrueHD Atmos can play with its height channels: opt-in
@@ -3289,7 +3320,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...HEAD
+[3.7.1]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...3.7.1
 [3.7.0]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...3.7.0
 [3.6.1]: https://github.com/Wenzlik/PrismCore/compare/3.6.0...3.6.1
 [3.6.0]: https://github.com/Wenzlik/PrismCore/compare/3.5.5...3.6.0
