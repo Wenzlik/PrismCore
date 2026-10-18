@@ -8,6 +8,27 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.7.2] — 2026-10-18
+
+TrueHD Atmos height rendering is part of the package again, as in 3.7.0;
+still opt-in at runtime (off by default). Source-compatible; no DTS:X.
+
+### Changed
+
+- **`TrueHDObjects` is in the default package again.** `Package.swift`
+  resolves `TrueHDObjects.xcframework` from this release's asset
+  (`.binaryTarget(url:checksum:)`, rebuilt from the pinned sources by
+  `Rust/TrueHDObjects/build-xcframework.sh`); a local build of the framework
+  still wins for development. The `PRISMCORE_OBJECT_AUDIO` build flag of
+  3.7.1 is gone: `HeightsBridge` is compiled whenever the library is linked.
+- **Still off at runtime.** `objectAudioRendering` defaults to `.off`; a host
+  turns heights on with `.heights` plus `allowsAtmosOutput: true`.
+  `ObjectAudioRendering.isAvailable` is `true` again where the OS has the
+  APAC encoder (OS 26), and `.renderedHeights` is reported when objects play.
+- `NOTICE.md` lists the TrueHDObjects components (Apache-2.0) again, since
+  the default product ships them; their notices travel inside the
+  XCFramework (`licenses/`).
+
 ## [3.7.1] — 2026-10-18
 
 TrueHD Atmos height rendering is no longer part of the default package: it
