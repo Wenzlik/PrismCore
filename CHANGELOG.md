@@ -17,11 +17,8 @@ and E-AC-3 / E-AC-3 JOC are unchanged.
 ### Changed
 
 - **Object-audio height rendering is an opt-in build flag, off by default,
-  and not part of the default package.** Dolby's patent claims read on the
-  process — decoding the TrueHD object presentation and rendering objects
-  from their metadata — whoever's code performs it, so 3.7.0's runtime
-  default (`.off`) was not enough while the code shipped in the binary
-  (owner decision 2026-10-18, as AetherEngine concluded). The default
+  and not part of the default package.** 3.7.0 shipped the code in the
+  binary with a runtime default of `.off`. The default
   package graph now neither fetches nor links `TrueHDObjects.xcframework`
   (the remote `binaryTarget(url:checksum:)` is gone from `Package.swift`),
   and the Swift that drives it (`HeightsBridge`) is compiled only under
@@ -61,8 +58,7 @@ release.
   448 renderer (Apache-2.0), behind a five-function C API, built from pinned
   source into an XCFramework by `Rust/TrueHDObjects/build-xcframework.sh`
   (iOS, tvOS, visionOS, their simulators, macOS). It is the package's one
-  binary beyond MPVKit — the owner's decision of 2026-10-16, which also
-  covers the patent question the README notes — and it is linked only when
+  binary beyond MPVKit — the owner's decision of 2026-10-16 — and it is linked only when
   built: without it nothing changes. TrueHD only; no DTS code is linked.
   Measured on an M2: 12.8× real time per core for the whole chain (release),
   the first APAC packet 23 ms of audio after the first access unit.
