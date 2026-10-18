@@ -158,18 +158,14 @@ API surface.
 
 ### TrueHD Atmos heights (`HeightsBridge`, `Rust/TrueHDObjects`)
 
-- **Compiled out by default (since 3.7.1).** The default package must not
-  contain it — not just leave it off. `Package.swift` adds the local
-  `TrueHDObjects.xcframework` and `.define("PRISMCORE_OBJECT_AUDIO")` only
-  when `PRISMCORE_OBJECT_AUDIO=1` is in the environment; everything that
-  drives the renderer (`HeightsBridge`, its tests) is inside
-  `#if PRISMCORE_OBJECT_AUDIO`. Never add a remote `binaryTarget(url:)` back,
-  and never make the flag default on. The public API (`ObjectAudioRendering`,
-  `.renderedHeights`) stays so hosts compile unchanged; `isAvailable` is
-  `false` and `.heights` plays as `.off`. To work on it:
-  `Rust/TrueHDObjects/build-xcframework.sh --mac`, then
-  `PRISMCORE_OBJECT_AUDIO=1 swift test`. The default suite pins the
-  compiled-out behaviour (`compiledOutByDefault`).
+- **SwiftPM caches the evaluated manifest, filesystem checks included.**
+  `Package.swift` always links `TrueHDObjects` (part of the default package
+  again since 3.7.2; the release zip by URL + checksum), and a local
+  `Rust/TrueHDObjects/build/TrueHDObjects.xcframework` wins when it exists. A
+  manifest evaluated before the local build ran keeps resolving the release
+  zip, so the first build after creating (or deleting) the framework needs
+  `--manifest-cache none`. Runtime stays opt-in: `objectAudioRendering`
+  defaults to `.off`.
 - **APAC's DRC setting is its latency.** Every configuration but `.none`
   holds audio before its first packet — 1.51 s (`.capture`, the default),
   10 s (`.music`, `.voice`), 20 s (`.movie`) — and a rendition cut on the

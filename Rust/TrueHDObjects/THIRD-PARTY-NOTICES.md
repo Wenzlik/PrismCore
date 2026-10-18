@@ -5,10 +5,6 @@ the crates `Cargo.lock` pins. Nothing in it is a prebuilt third-party binary. Th
 texts under `licenses/` and `LICENSE-APACHE` travel inside the framework (`licenses/`) and must
 ship with any app that links it.
 
-Since PrismCore 3.7.1 the framework is **not part of PrismCore's default package**: it is linked
-only into a build made with `PRISMCORE_OBJECT_AUDIO=1` (see the repository's `Package.swift`), so an
-app built against a released PrismCore contains none of the components below.
-
 ## This crate
 
 `truehd-objects` (this directory) is licensed under the **Apache License 2.0** (`LICENSE-APACHE`),
@@ -52,6 +48,6 @@ from Cargo's checkout when `TRUEHD_OBJECTS_VECTORS` points there.
 
 ## Status
 
-The truehd crate describes itself as a research implementation, made without Dolby. This library
-is not part of PrismCore's default package; it is built only with the opt-in
-`PRISMCORE_OBJECT_AUDIO=1` flag.
+The truehd crate describes itself as a research implementation, made without Dolby. The library is
+part of PrismCore's default package (again since 3.7.2) and is used only when a host turns TrueHD
+Atmos height rendering on; it is off by default.

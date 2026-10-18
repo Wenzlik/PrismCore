@@ -4,7 +4,7 @@ import Foundation
 import Libavcodec
 import Libavformat
 import Libavutil
-#if PRISMCORE_OBJECT_AUDIO
+#if canImport(TrueHDObjects)
 import TrueHDObjects
 #endif
 
@@ -27,10 +27,6 @@ protocol RenditionEncoder: AnyObject {
 
 extension AudioBridge: RenditionEncoder {}
 
-#if PRISMCORE_OBJECT_AUDIO
-/// **Compiled only with the opt-in `PRISMCORE_OBJECT_AUDIO` build flag** (see Package.swift):
-/// the default package contains neither this type nor the library it drives.
-///
 /// TrueHD Atmos with its heights: the object presentation decoded and rendered to 7.1.4 by the
 /// Rust `TrueHDObjects` library (truehdd's decoder, an ETSI TS 103 448 renderer), encoded to
 /// Apple Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
@@ -103,7 +99,9 @@ final class HeightsBridge: RenditionEncoder {
     private let priming: Int64
     private var packet: UnsafeMutablePointer<AVPacket>?
 
+    #if canImport(TrueHDObjects)
     private var session: OpaquePointer?
+    #endif
     /// Interleaved 7.1.4 waiting for a whole encoder packet.
     private var pending: [Float] = []
     /// The source time (1/48 000) of rendered sample 0 of this epoch; nil until a major sync.
@@ -149,11 +147,13 @@ final class HeightsBridge: RenditionEncoder {
     }
 
     enum Failure: Error, CustomStringConvertible {
+        case notLinked
         case sourceUnsupported(String)
         case encoderUnavailable
 
         var description: String {
             switch self {
+            case .notLinked: return "this build has no TrueHDObjects library"
             case .sourceUnsupported(let why): return "heights need 48 kHz TrueHD: \(why)"
             case .encoderUnavailable: return "this OS has no 7.1.4 APAC encoder"
             }
@@ -161,6 +161,7 @@ final class HeightsBridge: RenditionEncoder {
     }
 
     init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational) throws {
+        guard ObjectAudioRendering.rendererIsLinked else { throw Failure.notLinked }
         guard codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD else {
             throw Failure.sourceUnsupported("not TrueHD")
         }
@@ -298,6 +299,7 @@ final class HeightsBridge: RenditionEncoder {
     // MARK: - Decoding (TrueHDObjects)
 
     private func decode(_ bytes: UnsafeBufferPointer<UInt8>, end: Bool) {
+        #if canImport(TrueHDObjects)
         if session == nil {
             session = truehd_objects_open()
         }
@@ -322,6 +324,9 @@ final class HeightsBridge: RenditionEncoder {
         case UInt32(TRUEHD_OBJECTS_BED): report(.notPreserved, message(session))
         default: break
         }
+        #else
+        fail(Failure.notLinked.description)
+        #endif
     }
 
     private func fail(_ why: String) {
@@ -339,18 +344,22 @@ final class HeightsBridge: RenditionEncoder {
         onObjectAudio?(delivery, why)
     }
 
+    #if canImport(TrueHDObjects)
     private func message(_ session: OpaquePointer) -> String {
         let capacity = truehd_objects_message(session, nil, 0)
         var buffer = [CChar](repeating: 0, count: max(capacity, 1))
         _ = truehd_objects_message(session, &buffer, buffer.count)
         return String(cString: buffer)
     }
+    #endif
 
     private func closeSession() {
+        #if canImport(TrueHDObjects)
         if let session {
             truehd_objects_close(session)
             self.session = nil
         }
+        #endif
     }
 
     // MARK: - Encoding
@@ -438,7 +447,6 @@ final class HeightsBridge: RenditionEncoder {
         }
     }
 }
-#endif
 
 /// The heights rendition's shape, readable on any OS (the master is written before anything
 /// else knows whether the encoder will open).
@@ -448,10 +456,10 @@ enum HeightsBridgeConstants {
 }
 
 extension ObjectAudioRendering {
-    /// Whether this build links the `TrueHDObjects` renderer: only with the opt-in
-    /// `PRISMCORE_OBJECT_AUDIO` build flag (Package.swift), never in the default package.
+    /// Whether this build links the `TrueHDObjects` renderer (the XCFramework is optional:
+    /// Package.swift adds it only when `Rust/TrueHDObjects/build-xcframework.sh` has built it).
     static var rendererIsLinked: Bool {
-        #if PRISMCORE_OBJECT_AUDIO
+        #if canImport(TrueHDObjects)
         return true
         #else
         return false
