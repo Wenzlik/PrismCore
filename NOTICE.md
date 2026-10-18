@@ -64,10 +64,8 @@ reason the "or later" matters here. Its notices and every linked crate's
 licence text sit in `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and
 `Rust/TrueHDObjects/licenses/`, and the build copies them into the
 XCFramework (`licenses/`): an app that ships the library ships them in its
-acknowledgements. It decodes Dolby TrueHD with an independent implementation;
-Dolby's patent claims read on that process whoever implements it, which is
-why the owner moved it out of the default package (2026-10-18; 3.7.0 had
-shipped it off at runtime, decision of 2026-10-16).
+acknowledgements. It decodes Dolby TrueHD with an independent implementation. Since 3.7.1 it is
+not part of the default package.
 
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
 through MPVKit, which is where their corresponding sources and build recipes live.

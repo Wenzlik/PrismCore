@@ -304,10 +304,7 @@ TrueHD object presentation and rendering objects from their metadata — is
 compiled out unless whoever builds PrismCore opts in: the default package graph
 (what `exactVersion`/`from:` resolves) neither fetches nor links
 `TrueHDObjects.xcframework`, and the Swift that drives it (`HeightsBridge`) is
-not compiled. Why: Dolby's patent claims read on that **process**, whoever's
-code performs it, so a runtime switch that is off by default is not enough
-while the code ships in the binary (the conclusion AetherEngine reached; owner
-decision 2026-10-18). Lossless 7.1 (the TrueHD core through FFmpeg) and E-AC-3 /
+not compiled. Lossless 7.1 (the TrueHD core through FFmpeg) and E-AC-3 /
 E-AC-3 JOC are not part of this and are unchanged. The sources stay in the
 repository (`Rust/TrueHDObjects`, `#if PRISMCORE_OBJECT_AUDIO`).
 
@@ -402,12 +399,9 @@ DTS:X) is untouched.
   silent Dolby Digital Plus Atmos stream played on a second player, and
   AetherEngine needs the same for a Samsung soundbar. PrismCore does not
   ship such a stream; a host that wants it plays one itself.
-- **Licensing.** Decoding and rendering Dolby's format with an independent,
-  reverse-engineered decoder may touch Dolby patents in some jurisdictions —
-  the claims cover the process, not a particular implementation. 3.7.0
-  shipped it off at runtime (owner decision 2026-10-16); since 3.7.1 it is
-  not in the default package at all (owner decision 2026-10-18), only in a
-  build made with `PRISMCORE_OBJECT_AUDIO=1`. The library's notices are in
+- **Opt-in only.** 3.7.0 shipped it off at runtime; since 3.7.1 it is not
+  in the default package at all, only in a build made with
+  `PRISMCORE_OBJECT_AUDIO=1`. The library's notices are in
   `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and travel inside the
   XCFramework.
 

@@ -50,9 +50,8 @@ No DTS decoder (`dca`, `harletty-bridge`) is a dependency, and no Dolby-encoded 
 PrismCore. The truehd crate's test streams are not redistributed; `tests/vectors.rs` reads them
 from Cargo's checkout when `TRUEHD_OBJECTS_VECTORS` points there.
 
-## Patents
+## Status
 
-The truehd crate describes itself as a research implementation, made without Dolby. Decoding and
-rendering Dolby TrueHD / Atmos may be covered by patents in some jurisdictions (Firecore cites
-US 9,179,236, US 10,477,339, US 10,904,692 and US 11,412,342). Building and shipping this was the
-PrismCore owner's decision (2026-10-16); the feature is off unless a host turns it on.
+The truehd crate describes itself as a research implementation, made without Dolby. This library
+is not part of PrismCore's default package; it is built only with the opt-in
+`PRISMCORE_OBJECT_AUDIO=1` flag.

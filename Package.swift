@@ -3,9 +3,7 @@ import Foundation
 import PackageDescription
 
 // TrueHD Atmos heights (`ObjectAudioRendering.heights`) are COMPILED OUT by default
-// (owner decision 2026-10-18): Dolby's patent claims read on the process — decoding the
-// TrueHD object presentation and rendering objects from their metadata — whoever's code does
-// it, so a runtime switch is not enough; the default package neither fetches nor links the
+// (since 3.7.1): the default package neither fetches nor links the
 // `TrueHDObjects` renderer, nor compiles the Swift that drives it. The sources stay in
 // `Rust/TrueHDObjects` and behind `#if PRISMCORE_OBJECT_AUDIO`.
 //

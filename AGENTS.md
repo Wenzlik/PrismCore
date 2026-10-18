@@ -158,10 +158,8 @@ API surface.
 
 ### TrueHD Atmos heights (`HeightsBridge`, `Rust/TrueHDObjects`)
 
-- **Compiled out by default (3.7.1, owner decision 2026-10-18).** The patent
-  claims cover the process (decoding the object presentation, rendering
-  objects from metadata), so the default package must not contain it — not
-  just leave it off. `Package.swift` adds the local
+- **Compiled out by default (since 3.7.1).** The default package must not
+  contain it — not just leave it off. `Package.swift` adds the local
   `TrueHDObjects.xcframework` and `.define("PRISMCORE_OBJECT_AUDIO")` only
   when `PRISMCORE_OBJECT_AUDIO=1` is in the environment; everything that
   drives the renderer (`HeightsBridge`, its tests) is inside
