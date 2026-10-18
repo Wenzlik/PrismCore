@@ -49,23 +49,21 @@ FFmpeg's version.
 | [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
 | [MPVKit](https://github.com/mpvkit/MPVKit) | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries) |
 | [libdovi](https://github.com/quietvoid/dovi_tool) | MIT | Dolby Vision RPU parsing and the Profile 7 → 8.1 conversion |
-| `Rust/TrueHDObjects` ([truehdd](https://github.com/truehdd/truehdd)'s `truehd` + `oamd`, a port of [SpatialAudioBridge](https://github.com/kristofferR/SpatialAudioBridge)'s renderer, a few MIT/Apache crates) | Apache-2.0 (the crate); the linked crates' terms in its `THIRD-PARTY-NOTICES.md` | **not in the default package** (since 3.7.1): TrueHD Atmos heights, linked only into a build made with `PRISMCORE_OBJECT_AUDIO=1` from a local checkout |
+| `Rust/TrueHDObjects` ([truehdd](https://github.com/truehdd/truehdd)'s `truehd` + `oamd`, a port of [SpatialAudioBridge](https://github.com/kristofferR/SpatialAudioBridge)'s renderer, a few MIT/Apache crates) | Apache-2.0 (the crate); the linked crates' terms in its `THIRD-PARTY-NOTICES.md` | TrueHD Atmos heights; part of the default package (statically linked), used only when a host turns height rendering on (off by default) |
 
 ### TrueHDObjects
 
 The library in `Rust/TrueHDObjects` is a separate work under the **Apache
-License 2.0**. Since 3.7.1 it is **not part of the default package**: it is
-neither fetched nor linked, and an app built against a released PrismCore
-contains none of it and owes none of its notices. It is statically linked
-only into a build made with the opt-in `PRISMCORE_OBJECT_AUDIO=1` flag. Apache-2.0 code
+License 2.0**, statically linked into PrismCore's default package (again since
+3.7.2), so every app that links PrismCore ships it. Apache-2.0 code
 combines with LGPL-2.1-**or-later** code under the LGPL-3.0 option (the FSF
 counts Apache-2.0 as compatible with (L)GPLv3, not with v2), which is one more
 reason the "or later" matters here. Its notices and every linked crate's
 licence text sit in `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and
 `Rust/TrueHDObjects/licenses/`, and the build copies them into the
 XCFramework (`licenses/`): an app that ships the library ships them in its
-acknowledgements. It decodes Dolby TrueHD with an independent implementation. Since 3.7.1 it is
-not part of the default package.
+acknowledgements. It decodes Dolby TrueHD with an independent implementation,
+and the feature is off unless a host turns it on.
 
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
 through MPVKit, which is where their corresponding sources and build recipes live.
