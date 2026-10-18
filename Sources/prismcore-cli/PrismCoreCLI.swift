@@ -38,7 +38,7 @@ struct PrismCoreCLI {
           --bridged-audio compressed|lossless  what TrueHD/DTS/PCM become: EAC3 5.1
                                        (default) or FLAC up to 7.1
           --heights                    serve TrueHD Atmos as 7.1.4 APAC with its heights
-                                       (opt-in build only: PRISMCORE_OBJECT_AUDIO=1, macOS 26)
+                                       (needs the TrueHDObjects build and macOS 26)
           -v, --verbose                libav* warnings and engine notices on stderr
 
         probe:      --structure none|layout|full   (default layout)

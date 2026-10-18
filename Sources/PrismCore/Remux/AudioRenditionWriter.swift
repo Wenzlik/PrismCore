@@ -334,15 +334,10 @@ final class AudioRenditionWriter {
                 guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else {
                     throw HeightsUnavailable.operatingSystem
                 }
-                #if PRISMCORE_OBJECT_AUDIO
                 let heights = try HeightsBridge(codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base)
                 heightsCookie = heights.magicCookie
                 heights.onObjectAudio = { [weak self] delivery, why in self?.onObjectAudio?(delivery, why) }
                 return heights
-                #else
-                // The default package has no renderer (opt-in build flag, Package.swift).
-                throw HeightsUnavailable.notCompiled
-                #endif
             } catch where codecDeclared {
                 PrismCoreLog.notice("audio rendition \(directoryName) (#\(track.streamIndex)): heights encoder could not be rebuilt (\(error)); silent until the next re-anchor")
                 onObjectAudio?(.notPreserved, "\(error)")
@@ -365,7 +360,7 @@ final class AudioRenditionWriter {
         )
     }
 
-    private enum HeightsUnavailable: Error { case operatingSystem, notCompiled }
+    private enum HeightsUnavailable: Error { case operatingSystem }
 
     /// The muxer alone, described from the bridge when there is one — the
     /// part of `open` a re-anchor repeats.

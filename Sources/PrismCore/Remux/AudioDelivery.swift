@@ -49,9 +49,6 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
     case preserved
     /// The source carries objects; the served rendition is their channel bed.
     case notPreserved
-    /// Never reported by the default package (the renderer is an opt-in
-    /// build flag, `PRISMCORE_OBJECT_AUDIO`).
-    ///
     /// TrueHD Atmos rendered to 7.1.4 and served as APAC: heights included,
     /// the object metadata consumed by the renderer. Lossy where the bed
     /// bridge can be lossless — the trade the host opted into.
@@ -68,12 +65,6 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 }
 
 /// Whether a TrueHD Atmos track's objects are rendered into height channels.
-///
-/// **Compiled out by default.** The renderer exists only in a build made with
-/// the opt-in `PRISMCORE_OBJECT_AUDIO` flag (Package.swift); in the default
-/// package this type stays for source compatibility, `isAvailable` is
-/// `false`, and `.heights` keeps today's bridge (lossless 7.1 or E-AC-3) —
-/// `ObjectAudioDelivery.renderedHeights` is never reported.
 ///
 /// Off by default, and engaged only when the host also says the output plays
 /// Atmos (`PrismCoreSession.Options.allowsAtmosOutput`, which Aether maps to the
@@ -94,17 +85,10 @@ public enum ObjectAudioRendering: String, Sendable, Equatable {
 
     /// Whether this build and OS can render heights at all: the
     /// `TrueHDObjects` library is linked and the APAC encoder exists.
-    ///
-    /// Always `false` in the default package: the renderer is compiled in
-    /// only with the opt-in `PRISMCORE_OBJECT_AUDIO` build flag (see
-    /// Package.swift), and `.heights` then plays exactly as `.off`.
     public static var isAvailable: Bool {
-        #if PRISMCORE_OBJECT_AUDIO
+        guard rendererIsLinked else { return false }
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return false }
         return HeightsBridge.encoderExists
-        #else
-        return false
-        #endif
     }
 }
 
