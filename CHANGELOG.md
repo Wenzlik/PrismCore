@@ -8,10 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
-For a server-side host (one process remuxing for several clients and
-proxying the loopback server): pick tracks by stream index, byte ranges,
-the segmentation read back, and the declared field order. Source-compatible;
-every new parameter defaults to today's behaviour.
+## [3.7.3] — 2026-10-19
+
+FFmpeg with the `eac3` encoder, from the `Wenzlik/MPVKit` fork: the audio
+bridge serves EAC3 5.1 without a local MPVKit checkout. And, for a
+server-side host (one process remuxing for several clients and proxying the
+loopback server): pick tracks by stream index, byte ranges, the segmentation
+read back, and the declared field order. Source-compatible; every new
+parameter defaults to today's behaviour. A host that commits a
+`Package.resolved` must regenerate it (see Changed).
 
 ### Added
 
@@ -3418,7 +3423,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...HEAD
+[3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3
 [3.7.2]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...3.7.2
 [3.7.1]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...3.7.1
 [3.7.0]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...3.7.0
