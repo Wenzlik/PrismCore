@@ -8,6 +8,23 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **Heights from the bed (prototype, behind `PRISMCORE_HEIGHTS_FROM_BED`).**
+  `ObjectAudioRendering.heightsFromBed` serves the same 7.1.4 APAC rendition
+  as `.heights`, but every channel is a share of the stream's own 7.1
+  presentation, split per frequency bin between ear level and the heights by
+  where the objects' energy lies (`Rust/TrueHDObjects/src/split.rs`,
+  `truehd_objects_open_from_bed`). Objects are read as points and never reach
+  an output; without objects or readable metadata it is the plain 7.1. Needs
+  a local `TrueHDObjects` build (the 3.7.2 zip lacks the entry point); without
+  the flag the case routes like `.off`. `.heights` is unchanged.
+  `prismcore-cli --heights-from-bed`; opt-in `heightsListeningExport` writes
+  both modes of a file to 7.1.4 CAF/APAC for listening. Measured on a
+  synthetic scene: 0.92 % of the energy on another speaker than the exact
+  point render (median of 0.25 s windows), heights within 0.15 dB; see the
+  README for what that number does and does not cover.
+
 ## [3.7.2] — 2026-10-18
 
 TrueHD Atmos height rendering is part of the package again, as in 3.7.0;

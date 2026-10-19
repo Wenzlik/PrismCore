@@ -201,6 +201,10 @@ API surface.
 - **The TrueHD profile is not evidence for heights either.** Gate on the
   bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
   note above says for E-AC-3.
+- **Heights from the bed need a framework built from this source.** The
+  released zip lacks `truehd_objects_open_from_bed`, so the Swift side calls
+  it only under `PRISMCORE_HEIGHTS_FROM_BED` (Package.swift defines it only
+  with a local build); without it `.heightsFromBed` routes like `.off`.
 - **Do not rebuild the decoder after a seek from the middle of a stream.**
   It can only start at a major sync, and the renderer's output is anchored
   on the first access unit fed; packets before the first restart unit are
@@ -358,6 +362,10 @@ runs shorter. It does not replace them.
     (the truehd crate's test streams in Cargo's checkout, not redistributable
     here); `TRUEHD_OBJECTS_VECTORS` is the same for `cargo test`
   - `PRISMCORE_HEIGHTS_BENCH` — heights chain throughput on a TrueHD Atmos file
+    (both modes when built with `PRISMCORE_HEIGHTS_FROM_BED=1`)
+  - `PRISMCORE_HEIGHTS_EXPORT` — both heights modes of a file to 7.1.4 CAF and
+    APAC `.mp4` for a listening comparison (`heightsListeningExport`);
+    `TRUEHD_OBJECTS_COMPARE` compares the two in `cargo test` on raw `.thd`
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
   and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
   pipeline, never the premium claims — Atmos and Dolby Vision need real media

@@ -379,6 +379,52 @@ DTS:X) is untouched.
   `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and travel inside the
   XCFramework.
 
+#### Heights from the bed (prototype, build flag)
+
+`objectAudioRendering: .heightsFromBed` serves the same 12-channel `apac`
+rendition, built differently: **every output channel is a share of the
+stream's own 7.1 presentation** (the bed FFmpeg and `.lossless` play), and the
+objects only say where its energy belongs.
+
+- **The split.** Per STFT bin (2048-frame Hann windows, 512-frame hop), each
+  ear-level bed channel is divided between itself and the four heights. An
+  object contributes its bin power times its ear-level (floor-projected)
+  gain² into that channel, and that part goes up in proportion to the
+  object's point-panned power on each height. Shares are real, non-negative
+  and sum to one per channel and bin (energy preserving); a height fed by
+  several channels is set to the energy of its shares. Estimates are smoothed
+  over about 25 ms, so a fly-over glides instead of stepping. The LFE is the
+  bed's own.
+- **What the objects are used for.** Their audio is decoded only to measure
+  its spectrum, and their metadata is read as points at the last update block
+  of each payload: no size, divergence, snap, zones, screen anchoring,
+  elevation switch, trims or ramps. No object signal reaches an output.
+- **When there is nothing to split by.** A stream without objects, metadata
+  this reading does not take (ISF, several beds, a count mismatch), or bins
+  where no object has energy: the plain 7.1, heights silent, exactly what the
+  bed bridge plays. A channel-based immersive stream (no object metadata)
+  therefore plays its 7.1 here, where `.heights` routes its own heights.
+- **Timing.** The splitter runs 1536 frames (32 ms) behind its input inside
+  the renderer, which hides it: output sample N is still input sample N, so
+  the bridge's anchoring, seeking and fallbacks are those of `.heights`.
+- **Building it.** It needs a `TrueHDObjects` built from this source (the
+  released zip lacks `truehd_objects_open_from_bed`), so it is behind a build
+  flag: `Rust/TrueHDObjects/build-xcframework.sh --mac`, then
+  `PRISMCORE_HEIGHTS_FROM_BED=1 swift build --manifest-cache none`. Without
+  the flag `.heightsFromBed` routes like `.off`, and the diagnostic report
+  says why. `prismcore-cli serve --heights-from-bed` serves it.
+- **Measured.** On a synthetic eight-object scene whose 7.1 is the objects'
+  floor projection (`split::tests::scene_against_the_exact_render`), 0.92 % of
+  the energy lands on another speaker than in the exact point render (median
+  of 0.25 s windows; 90th percentile 1.18 %), heights within 0.15 dB. That
+  scene is the splitter's own model of how a bed is made, so it is a best
+  case; the truehd crate's public Atmos vectors carry almost no height
+  content and only show that the timeline, the fallbacks and the level of the
+  bed are kept. The splitter alone costs about 45 ms of CPU per second of
+  audio with 16 objects (M2, `cargo run --release --example splitbench`);
+  `PRISMCORE_HEIGHTS_EXPORT` renders both modes of a file to 7.1.4 CAF and
+  APAC `.mp4` for listening (`heightsListeningExport`).
+
 **Building it.** `Rust/TrueHDObjects/build-xcframework.sh` (rustup stable
 with the Apple targets; `--mac` for this Mac only) builds
 `TrueHDObjects.xcframework` for iOS, iOS Simulator, tvOS, tvOS Simulator,
