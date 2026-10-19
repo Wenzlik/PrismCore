@@ -308,6 +308,19 @@ public actor PrismCoreSession {
         /// without it — see the doc on the initializer before pairing this
         /// with a host-drawn overlay.
         public var preferredSubtitleLanguage: String?
+        /// Which audio track is marked DEFAULT, by its source stream index
+        /// (`AudioTrackInfo.streamIndex`) — ahead of `preferredAudioLanguage`,
+        /// which cannot tell two tracks of one language apart. No match falls
+        /// back to the language, then to the source's own order.
+        public var preferredAudioStreamIndex: Int?
+        /// Which subtitle rendition is marked DEFAULT, by source stream index
+        /// (`SubtitleTrackInfo.streamIndex`) — ahead of
+        /// `preferredSubtitleLanguage`, with the same fallback.
+        public var preferredSubtitleStreamIndex: Int?
+        /// The duration, in whole seconds, the remux aims each segment at
+        /// (6 by default). Clamped to 1...10 when the session is built, so a
+        /// value read back here is the one in force.
+        public var segmentTargetDuration: Int = PrismCoreSession.defaultSegmentTargetDuration
         /// Clamped to ±2 s when the session is built, so a value read back here
         /// is the one in force, not the one asked for.
         public var audioDelaySeconds: Double
@@ -357,6 +370,18 @@ public actor PrismCoreSession {
         var current = configuration
         current.audioDelaySeconds = audioDelayForClone
         return current
+    }
+
+    /// The planned segmentation, segment for segment — what every media
+    /// playlist of this session lists, in order (the video variant's
+    /// `seg00000.m4s` is entry 0). For a host that maps a fetched segment
+    /// back to a playback position, instead of assuming a fixed stride.
+    ///
+    /// `nil` until `start()` has planned the source, and for good on a
+    /// sequential session (no keyframe index: its playlists grow as the
+    /// producer cuts, so there is no plan to read).
+    public nonisolated var segmentTimeline: SegmentTimeline? {
+        demand.publishedPlan.map(SegmentTimeline.init(plan:))
     }
 
     private let configuration: Options
@@ -610,6 +635,9 @@ public actor PrismCoreSession {
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
+        preferredAudioStreamIndex: Int? = nil,
+        preferredSubtitleStreamIndex: Int? = nil,
+        segmentTargetDuration: Int = PrismCoreSession.defaultSegmentTargetDuration,
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
@@ -635,6 +663,9 @@ public actor PrismCoreSession {
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
+            preferredAudioStreamIndex: preferredAudioStreamIndex,
+            preferredSubtitleStreamIndex: preferredSubtitleStreamIndex,
+            segmentTargetDuration: segmentTargetDuration,
             audioDelaySeconds: audioDelaySeconds,
             coordinatedHTTP: coordinatedHTTP,
             input: input,
@@ -704,6 +735,27 @@ public actor PrismCoreSession {
     ///   Do **not** pass this together with `setTimedTextCueHandler` unless
     ///   the host suppresses its own overlay: engaging the rendition means
     ///   AVKit draws the cues, and the handler draws them again.
+    /// - Parameter preferredAudioStreamIndex: the audio track to mark DEFAULT,
+    ///   by its source stream index (`AudioTrackInfo.streamIndex`). Wins over
+    ///   `preferredAudioLanguage`, which exists for the host that only knows a
+    ///   language; this one is for the host that already chose a *track* —
+    ///   two English tracks (TrueHD Atmos and EAC3-JOC) are indistinguishable
+    ///   by language. Same contract otherwise: nothing is dropped, and an index
+    ///   that names no audio track this build can carry falls back to the
+    ///   language, then to the source's own order — never an error.
+    /// - Parameter preferredSubtitleStreamIndex: the subtitle rendition to
+    ///   mark DEFAULT, by source stream index — ahead of
+    ///   `preferredSubtitleLanguage`, the same way. A stream that gets no
+    ///   rendition (a bitmap track beside a text one stays host-drawn) falls
+    ///   back to the language.
+    /// - Parameter segmentTargetDuration: the duration, in whole seconds, each
+    ///   segment aims for; cuts land on the first keyframe at or after each
+    ///   multiple, so the keyframe cadence decides the real lengths and
+    ///   `EXT-X-TARGETDURATION` is the ceiling of the longest one, as before.
+    ///   6 by default; clamped to 1...10. The first segment stays the short
+    ///   one `start()` waits for (`SegmentPlan.defaultFirstSegmentSeconds`,
+    ///   or this value when it is shorter). Read what was planned back from
+    ///   `segmentTimeline`.
     /// - Parameter subtitleCueHistory: how much of the cue tap's past is kept
     ///   for a handler registered late. `.complete` (the default) keeps every
     ///   cue for the session's lifetime; `.bounded` keeps the newest only —
@@ -764,6 +816,9 @@ public actor PrismCoreSession {
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
+        preferredAudioStreamIndex: Int? = nil,
+        preferredSubtitleStreamIndex: Int? = nil,
+        segmentTargetDuration: Int = PrismCoreSession.defaultSegmentTargetDuration,
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
@@ -786,6 +841,9 @@ public actor PrismCoreSession {
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
+            preferredAudioStreamIndex: preferredAudioStreamIndex,
+            preferredSubtitleStreamIndex: preferredSubtitleStreamIndex,
+            segmentTargetDuration: Self.normalizedSegmentTargetDuration(segmentTargetDuration),
             audioDelaySeconds: AudioDelay.normalized(audioDelaySeconds),
             coordinatedHTTP: coordinatedHTTP || probed?.interruptGuard.usesCoordinatedHTTP == true,
             reachability: reachability,
@@ -821,6 +879,7 @@ public actor PrismCoreSession {
             sourceURL: url,
             httpHeaders: httpHeaders,
             outputDirectory: directory,
+            segmentSeconds: configuration.segmentTargetDuration,
             // `offersHDR`, not `isHDRReady`: a panel currently presenting HDR
             // takes an HDR master even when the capability read came back
             // empty, so the certain signal rescues the conservative one.
@@ -833,6 +892,8 @@ public actor PrismCoreSession {
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
+            preferredAudioStreamIndex: preferredAudioStreamIndex,
+            preferredSubtitleStreamIndex: preferredSubtitleStreamIndex,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
             objectAudioRendering: objectAudioRendering,
@@ -912,6 +973,9 @@ public actor PrismCoreSession {
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
+        preferredAudioStreamIndex: Int? = nil,
+        preferredSubtitleStreamIndex: Int? = nil,
+        segmentTargetDuration: Int = PrismCoreSession.defaultSegmentTargetDuration,
         audioDelaySeconds: Double = 0,
         coordinatedHTTP: Bool = false,
         input: PrismCoreInputFactory? = nil,
@@ -934,6 +998,9 @@ public actor PrismCoreSession {
             dialogueBoost: dialogueBoost,
             preferredAudioLanguage: preferredAudioLanguage,
             preferredSubtitleLanguage: preferredSubtitleLanguage,
+            preferredAudioStreamIndex: preferredAudioStreamIndex,
+            preferredSubtitleStreamIndex: preferredSubtitleStreamIndex,
+            segmentTargetDuration: segmentTargetDuration,
             audioDelaySeconds: audioDelaySeconds,
             coordinatedHTTP: coordinatedHTTP,
             input: input,
@@ -944,6 +1011,16 @@ public actor PrismCoreSession {
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput
         )
+    }
+
+    /// The HLS-classic 6 s, which Apple's authoring guidance recommends.
+    public static let defaultSegmentTargetDuration = 6
+
+    /// Clamped rather than refused, like the audio delay. Past ten seconds a
+    /// demand-driven seek waits for a longer segment before AVPlayer can show
+    /// anything, and below one the keyframe cadence decides every cut anyway.
+    static func normalizedSegmentTargetDuration(_ seconds: Int) -> Int {
+        min(max(seconds, 1), 10)
     }
 
     /// The diagnostic report's `objectAudioRendering`: what was asked, and why it cannot run.
@@ -1046,6 +1123,9 @@ public actor PrismCoreSession {
             dialogueBoost: options.dialogueBoost,
             preferredAudioLanguage: options.preferredAudioLanguage,
             preferredSubtitleLanguage: options.preferredSubtitleLanguage,
+            preferredAudioStreamIndex: options.preferredAudioStreamIndex,
+            preferredSubtitleStreamIndex: options.preferredSubtitleStreamIndex,
+            segmentTargetDuration: options.segmentTargetDuration,
             audioDelaySeconds: options.audioDelaySeconds,
             coordinatedHTTP: options.coordinatedHTTP,
             // Carried, never chosen: a successor that quietly went back to
@@ -1435,7 +1515,10 @@ public actor PrismCoreSession {
                 // What was delivered, not only what was asked for.
                 bridgedAudio: options.bridgedAudio.isAvailable
                     ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)",
-                objectAudioRendering: Self.describe(options.objectAudioRendering, allowsAtmosOutput: options.allowsAtmosOutput)
+                objectAudioRendering: Self.describe(options.objectAudioRendering, allowsAtmosOutput: options.allowsAtmosOutput),
+                preferredAudioStreamIndex: options.preferredAudioStreamIndex,
+                preferredSubtitleStreamIndex: options.preferredSubtitleStreamIndex,
+                segmentTargetDuration: options.segmentTargetDuration
             ),
             startup: .init(
                 checkpoints: marks.map { .init(phase: $0.phase.caseName, elapsedSeconds: seconds($0.elapsed)) },

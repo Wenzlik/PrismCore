@@ -525,3 +525,31 @@ struct SegmentPlan: Equatable {
         return candidate
     }
 }
+
+/// The read-only face of a session's `SegmentPlan`: `PrismCoreSession.segmentTimeline`.
+///
+/// Times are on the playlist's timeline — each `start` is the sum of the
+/// `EXTINF`s before it — not the source's PTS, because that is the timeline a
+/// player (and a proxy counting segments) actually sees.
+public struct SegmentTimeline: Sendable, Equatable {
+    public struct Segment: Sendable, Equatable {
+        /// Seconds from the start of the playlist.
+        public let start: Double
+        /// The segment's `EXTINF`.
+        public let duration: Double
+    }
+
+    public let segments: [Segment]
+    /// The playlists' `EXT-X-TARGETDURATION`: the longest segment, rounded up.
+    public let targetDuration: Int
+
+    init(plan: SegmentPlan) {
+        var start = 0.0
+        segments = plan.entries.map { entry in
+            defer { start += entry.duration }
+            return Segment(start: start, duration: entry.duration)
+        }
+        // `MediaPlaylistWriter.targetDuration`'s rule, so the two never disagree.
+        targetDuration = max(1, Int((plan.entries.map(\.duration).max() ?? 1).rounded(.up)))
+    }
+}
