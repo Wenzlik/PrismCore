@@ -62,7 +62,7 @@ let package = Package(
             : .binaryTarget(
                 name: "TrueHDObjects",
                 url: "https://github.com/Wenzlik/PrismCore/releases/download/3.7.3/TrueHDObjects.xcframework.zip",
-                checksum: "5c6a9964e8dc7b81c916cd42e153db6813795579307b8056189410379dd263d9"
+                checksum: "4984a0912447525bcc2499a1f8e721a825f4693990fd22b04ab3a9fa9c0122dc"
             ),
     ] + [
         .target(
