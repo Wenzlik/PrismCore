@@ -8,6 +8,50 @@ source-compatible.)
 
 ## [Unreleased]
 
+For a server-side host (one process remuxing for several clients and
+proxying the loopback server): pick tracks by stream index, byte ranges,
+the segmentation read back, and the declared field order. Source-compatible;
+every new parameter defaults to today's behaviour.
+
+### Added
+
+- **`preferredAudioStreamIndex:` / `preferredSubtitleStreamIndex:`** on every
+  `PrismCoreSession` initializer and in `Options` (carried by
+  `makeSession(changing:)`). The named source stream is the master's
+  `DEFAULT`, ahead of `preferredAudioLanguage` / `preferredSubtitleLanguage`
+  — a language cannot tell two English tracks apart (TrueHD Atmos and
+  EAC3-JOC; a full and a forced SRT). An index that names no carriable
+  track, or a subtitle stream that got no rendition, falls back to the
+  language, then to the source's order; nothing is dropped. The diagnostic
+  report's `options` records both.
+- **HTTP `Range` on `LoopbackHTTPServer`.** One range (`bytes=a-b`, `a-`,
+  `-n`) is a `206` with `Content-Range`; a range that starts past the end
+  is a `416` with `Content-Range: bytes */length`; `Accept-Ranges: bytes`
+  replaces `none`. Multi-range, malformed ranges and any `If-Range` (the
+  server issues no validators) get the whole body as a `200`, as RFC 9110
+  allows. A payload still being produced when the slow-serve threshold
+  (2 s) passes is also a whole-body `200`, chunked: its headers have to go
+  before AVPlayer's watchdog fires, and a `206` cannot be framed without
+  the length. A range on a payload that lands inside the threshold is
+  honoured. HEAD answers the same headers.
+- **`segmentTargetDuration:`** (whole seconds, default 6, clamped to
+  1...10) on every initializer and in `Options`. Cuts still land on the
+  first keyframe at or after each multiple, the first segment stays the
+  short one `start()` waits for, and `EXT-X-TARGETDURATION` stays the
+  ceiling of the longest `EXTINF`.
+- **`PrismCoreSession.segmentTimeline`** (`SegmentTimeline`): a planned
+  session's segments — start and `EXTINF` on the playlist timeline, entry
+  for entry with every media playlist — plus the `TARGETDURATION`. `nil`
+  before `start()` and on a sequential session, which has no plan.
+- **`VideoTrackInfo.codedFieldOrder`** (`CodedFieldOrder`: `progressive`,
+  `tt`, `bb`, `tb`, `bt`, `unknown` — ffprobe's spellings): the field order
+  the stream declares, unverified and with the mixed orders kept apart.
+  `fieldOrder` stays the verified answer routing uses.
+- **`ConcurrentSessionsStressTests`**: six sessions over copied, bridged
+  (TrueHD, DTS), multi-rendition and subtitled fixtures start, serve every
+  segment and stop at once in one process. Clean under Thread Sanitizer
+  (`swift test --sanitize=thread --filter ConcurrentSessionsStressTests`).
+
 ## [3.7.2] — 2026-10-18
 
 TrueHD Atmos height rendering is part of the package again, as in 3.7.0;

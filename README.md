@@ -201,6 +201,13 @@ the remux path a switch also costs a rendition fetch.
   changes. A preferred track this build can neither copy nor bridge is passed
   over, because a rendition AVPlayer cannot play is worse than the wrong
   language.
+- **Picking a track, not a language.** Two English tracks — TrueHD Atmos and
+  EAC3-JOC, or a full and an SDH subtitle — cannot be told apart by language.
+  A host that already chose one passes its source stream index
+  (`preferredAudioStreamIndex:` / `preferredSubtitleStreamIndex:`, the
+  `streamIndex` of `SourceInfo`'s track); it outranks the language, and an
+  index that names nothing this build can serve falls back to the language,
+  then to the source's own order.
 
 ### How much of the cue tap a session remembers
 
@@ -558,8 +565,13 @@ Source URL ──► libavformat demux ───┼─► audio 0 ─► audio0/
 
 The segmentation is ours. MPVKit's libavformat is built without the `hls` muxer,
 so `FMP4SegmentWriter` drives the `mp4` muxer with `frag_custom` and cuts where we
-say (video keyframes at or after each 6 s boundary), and `MediaPlaylistWriter`
-turns those fragments into a playlist. Two production modes exist:
+say (video keyframes at or after each 6 s boundary — `segmentTargetDuration:`
+moves it, 1–10 s), and `MediaPlaylistWriter` turns those fragments into a
+playlist. A planned session publishes its segmentation as
+`PrismCoreSession.segmentTimeline` (each segment's start and `EXTINF` on the
+playlist timeline, and the `TARGETDURATION`), so a host that proxies the
+segments can map one back to a position instead of assuming a fixed stride.
+Two production modes exist:
 
 - **Planned (demand-driven)** — the default for seekable VOD. `SegmentPlan` maps
   every segment upfront from the demuxer's keyframe index (trusted only past two
