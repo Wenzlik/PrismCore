@@ -991,7 +991,8 @@ the old lockfile (upstream's 1.0.0 pin) fails against the `1.0.1` floor.
 `FFmpegBuild` reports the build that is actually loaded — a line per linked
 library with the header version beside it whenever the two disagree, FFmpeg's own
 version string, and the capability answers that change what this engine does with
-a source: the `eac3` encoder (without it the audio bridge cannot run), the AV1
+a source: the `eac3` encoder (without it the audio bridge encodes AAC 5.1, which
+keeps the remux but cannot be passed through to a receiver), the AV1
 decoder and whether this device has hardware for it, dialogue boost, and the GPU
 deinterlacer:
 
