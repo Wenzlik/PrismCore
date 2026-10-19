@@ -3423,7 +3423,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...HEAD
+[3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3
 [3.7.2]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...3.7.2
 [3.7.1]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...3.7.1
 [3.7.0]: https://github.com/Wenzlik/PrismCore/compare/3.6.1...3.7.0
