@@ -369,7 +369,8 @@ DTS:X) is untouched.
   bitstream is not Atmos, a rate other than 48 kHz: the track is bridged as before
   (`bridgedAudio`). After the master is written nothing can change the
   rendition's codec, so a stream the split has nothing to go by for (no
-  objects, ISF, several beds, an object count the metadata does not match) plays its
+  objects, ISF, several beds, an object count the metadata does not match, no
+  object metadata within half a second — the 7.1 plays meanwhile) plays its
   own channel presentation — the 7.1 FFmpeg would have decoded — in the same
   rendition with silent heights, and reports `.notPreserved`; a stream that
   will not decode at all plays silence of its length rather than stopping
@@ -390,10 +391,10 @@ DTS:X) is untouched.
   `apac` and produces nothing until the next re-anchor rebuilds it; it never
   switches to the bed bridge under the served `apac` entry.
 - **Atmos on the receiver.** APAC alone may not switch a receiver to Atmos:
-  SpatialAudioBridge measured an Apple TV 4K that only did so while a
-  silent Dolby Digital Plus Atmos stream played on a second player, and
-  AetherEngine needs the same for a Samsung soundbar. PrismCore does not
-  ship such a stream; a host that wants it plays one itself.
+  an Apple TV 4K has been seen to do so only while a silent Dolby Digital
+  Plus Atmos stream played on a second player, and a soundbar has been seen
+  to need the same. PrismCore does not ship such a stream; a host that
+  wants it plays one itself.
 - **In the package, off at runtime.** The library is part of the default
   package (again since 3.7.2; 3.7.1 compiled it out) and stays off unless a
   host sets `objectAudioRendering: .heights`. The library's notices are in

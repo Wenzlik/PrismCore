@@ -22,10 +22,13 @@ same rendition; source-compatible.
   bin's energy comes from objects above ear level; object positions are read
   as points, and no object signal reaches an output. Each floor channel's
   level is matched to what the objects put into it (about 4 s, within ±3 dB).
-  A channel-based immersive presentation plays as its own feeds; a stream
-  without objects, or with metadata the split does not read, plays its 7.1
-  with silent heights and reports `.notPreserved`, as before
-  (`Rust/TrueHDObjects/src/split.rs`).
+  A height bin whose shares would cancel (anti-phase channels) keeps them on
+  the floor, and shares fade back to the floor within the smoothing when the
+  objects fall silent. A channel-based immersive presentation plays as its
+  own feeds; a stream without objects, with metadata the split does not
+  read, or without object metadata for half a second (the 7.1 plays
+  meanwhile) plays its 7.1 with silent heights and reports `.notPreserved`,
+  as before (`Rust/TrueHDObjects/src/split.rs`).
 - **Measured against the previous object render** on two scenes of a TrueHD
   Atmos film (0.25 s windows with height content): 1.0 % of the energy on
   another speaker (median; p90 2.4 % / 1.8 %), heights within 0.1 dB

@@ -56,7 +56,7 @@ extension AudioBridge: RenditionEncoder {}
 ///   AVAssetWriter stamps its own APAC fragments — the first at the source time minus 2048
 ///   frames — so the first source sample plays at its own time; the muxer's edit list trims
 ///   the head as it does for AAC's priming.
-/// - **256 kbps per channel** (3.07 Mbit/s for 7.1.4), as SpatialAudioBridge chose. CPU: about
+/// - **256 kbps per channel** (3.07 Mbit/s for 7.1.4). CPU: about
 ///   14× real time per core for the encoder on an M2 (synthetic 7.1.4).
 ///
 /// ## Timing
