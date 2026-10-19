@@ -38,6 +38,13 @@ typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uin
 /// A new session, or NULL when allocation failed.
 TrueHDObjects *truehd_objects_open(void);
 
+/// A new session for heights from the bed, or NULL when allocation failed: every output channel
+/// is a share of the stream's own 7.1 presentation, split per frequency bin between ear level
+/// and heights by where the objects' energy lies; no object signal reaches an output. Without
+/// objects, or with metadata it does not read, the plain 7.1 with silent heights. Same calls,
+/// timing contract and modes as `truehd_objects_open` (RENDERED once the split runs).
+TrueHDObjects *truehd_objects_open_from_bed(void);
+
 /// Feeds TrueHD bytes of this track only, starting at a major sync. `end` nonzero flushes the
 /// last 2 ms. Output is contiguous from the first sample of the first access unit: held,
 /// concealed and fallback audio all keep their length, so sample N of the output is sample N of

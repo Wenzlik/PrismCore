@@ -25,6 +25,14 @@ pub extern "C" fn truehd_objects_open() -> *mut Handle {
         .unwrap_or(ptr::null_mut())
 }
 
+/// As `truehd_objects_open`, for heights from the bed: every output a share of the stream's own
+/// 7.1 presentation (`split`), the objects only a guide to where its energy lies.
+#[unsafe(no_mangle)]
+pub extern "C" fn truehd_objects_open_from_bed() -> *mut Handle {
+    catch_unwind(|| Box::into_raw(Box::new(Handle { session: Session::from_bed(), error: String::new(), ended: false })))
+        .unwrap_or(ptr::null_mut())
+}
+
 /// # Safety
 /// `handle` is live; `data` references `length` bytes; the callback must not reenter.
 #[unsafe(no_mangle)]
@@ -145,6 +153,17 @@ mod tests {
             assert_eq!(frames, 0);
             truehd_objects_close(handle);
             truehd_objects_close(ptr::null_mut());
+
+            // The same contract for a session from the bed.
+            let handle = truehd_objects_open_from_bed();
+            assert!(!handle.is_null());
+            assert_eq!(truehd_objects_push(handle, ptr::null(), 0, 0, None, context), -1);
+            truehd_objects_close(handle);
+            let handle = truehd_objects_open_from_bed();
+            assert_eq!(truehd_objects_push(handle, ptr::null(), 0, 1, Some(count), context), 0);
+            assert_eq!(frames, 0);
+            assert_eq!(truehd_objects_mode(handle), 0);
+            truehd_objects_close(handle);
             assert_eq!(truehd_objects_mode(ptr::null()), 0);
         }
     }

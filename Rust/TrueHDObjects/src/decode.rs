@@ -12,6 +12,7 @@
 use crate::{
     limit::Limiter,
     render::{self, CHANNELS, Event, Gains, Object, Renderer, Speaker},
+    split::{BedSplitter, Weight},
 };
 use truehd::{
     process::{
@@ -73,6 +74,10 @@ pub struct Session {
     unit_frames: Option<usize>,
     rendered: Vec<f32>,
     limited: Vec<f32>,
+    /// Heights from the bed (`from_bed`): the 7.1 presentation split per bin, guided by where
+    /// the objects' energy lies; the object presentation is never rendered.
+    from_bed: bool,
+    split: Option<BedSplitter>,
 }
 
 impl Default for Session {
@@ -96,11 +101,19 @@ impl Default for Session {
             unit_frames: None,
             rendered: Vec::new(),
             limited: Vec::new(),
+            from_bed: false,
+            split: None,
         }
     }
 }
 
 impl Session {
+    /// A session whose every output is a share of the stream's own 7.1 presentation (see
+    /// `split`). Without objects, or with metadata it cannot read, that is the plain 7.1.
+    pub fn from_bed() -> Self {
+        Self { from_bed: true, ..Self::default() }
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -156,6 +169,10 @@ impl Session {
                 // The widest channel presentation below the object one: 7.1 on Atmos.
                 self.bed_presentation = (sync.substreams as usize).clamp(1, 3) - 1;
             }
+            if self.from_bed && self.mode != Mode::Bed {
+                self.decode_from_bed(&au, restarting, output)?;
+                continue;
+            }
             let presentation = if self.mode == Mode::Bed { self.bed_presentation } else { ATMOS_PRESENTATION };
             if let Err(e) = self.decoder.decode_presentation_into(&au, presentation, &mut self.decoded) {
                 self.lose(restarting, format!("TrueHD decoding: {e}"), output)?;
@@ -188,6 +205,7 @@ impl Session {
             if self.held_frames > 0 {
                 self.fall_back("the stream ended before its first object metadata", output)?;
             }
+            self.drain_split(output)?;
             self.limiter.finish(&mut self.limited);
             self.flush(output)?;
         }
@@ -204,6 +222,7 @@ impl Session {
         if self.mode == Mode::Bed {
             return Ok(());
         }
+        self.drain_split(output)?;
         self.fallback_reason = Some(reason.into());
         self.mode = Mode::Bed;
         self.switching = true;
@@ -256,7 +275,73 @@ impl Session {
     fn silence(&mut self, frames: usize, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
         self.renderer.sample += frames as u64;
         self.rendered.clear();
-        self.rendered.resize(frames * CHANNELS, 0.);
+        if let Some(split) = self.split.as_mut() {
+            // Through the splitter, which delays what it holds: silence takes its turn.
+            split.push(&vec![0.; frames * CHANNELS], &[], frames, &mut self.rendered);
+        } else {
+            self.rendered.resize(frames * CHANNELS, 0.);
+        }
+        self.limit_and_flush(output)
+    }
+
+    /// One access unit of heights from the bed: the bed and object presentations decoded
+    /// together (the objects only to learn where their energy lies), the bed routed by its labels
+    /// and split.
+    fn decode_from_bed(
+        &mut self,
+        au: &truehd::structs::access_unit::AccessUnit,
+        restarting: Option<String>,
+        output: &mut impl FnMut(&[f32]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut wanted = [false; 4];
+        wanted[self.bed_presentation] = true;
+        wanted[ATMOS_PRESENTATION] = true;
+        let decoded = match self.decoder.decode_presentations(au, &wanted) {
+            Ok(d) => d,
+            Err(e) => return self.lose(restarting, format!("TrueHD decoding: {e}"), output),
+        };
+        let (Some(bed), Some(objects)) = (&decoded[self.bed_presentation], &decoded[ATMOS_PRESENTATION]) else {
+            return self.lose(restarting, "TrueHD decoding: a presentation is missing".into(), output);
+        };
+        if bed.is_duplicate {
+            return Ok(());
+        }
+        if bed.sampling_frequency != 48_000 {
+            return Err("only 48 kHz TrueHD is rendered".into());
+        }
+        let frames = bed.sample_length;
+        let planar = |d: &DecodedAccessUnit| -> Vec<Vec<f32>> {
+            (0..d.channel_count).map(|ch| (0..frames).map(|s| d.pcm_data[s][ch] as f32 / 8_388_608.).collect()).collect()
+        };
+        let (bed_pcm, object_pcm) = (planar(bed), planar(objects));
+        let labels: Vec<Speaker> = if bed.channel_labels.len() == bed_pcm.len() {
+            bed.channel_labels.iter().map(|l| speaker(*l)).collect()
+        } else {
+            default_speakers(bed_pcm.len())
+        };
+        let split = self.split.get_or_insert_with(BedSplitter::default);
+        // Metadata comes every few access units; the last one read stays in force until the
+        // next. Anything this reading does not accept leaves no guide: the plain 7.1.
+        if let Some(metadata) = objects.oamd.last() {
+            split.set_weights(point_weights(metadata, object_pcm.len()).unwrap_or_default());
+        }
+        for (channel, speaker) in labels.into_iter().enumerate() {
+            self.renderer.route(channel, render::bed(speaker));
+        }
+        let mut routed = Vec::with_capacity(frames * CHANNELS);
+        self.renderer.render(&bed_pcm, frames, &mut routed);
+        self.rendered.clear();
+        split.push(&routed, &object_pcm, frames, &mut self.rendered);
+        self.unit_frames = Some(frames);
+        self.mode = Mode::Objects;
+        self.limit_and_flush(output)
+    }
+
+    /// Whatever the splitter still holds, out; the session continues without it.
+    fn drain_split(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+        let Some(mut split) = self.split.take() else { return Ok(()) };
+        self.rendered.clear();
+        split.finish(&mut self.rendered);
         self.limit_and_flush(output)
     }
 
@@ -527,6 +612,67 @@ fn for_each_block(
         }
     }
     Ok(())
+}
+
+/// Where each object of one OAMD payload sits at its last update block, as a point: no size,
+/// snap, zones, screen anchoring, elevation switch or ramps (the split only needs to know where
+/// energy lies). `None` for metadata this reading does not take; the caller then plays the 7.1.
+fn point_weights(metadata: &ObjectAudioMetadataPayload, channels: usize) -> Option<Vec<Weight>> {
+    let program = &metadata.program_assignment;
+    if program.num_isf_objects != 0 || program.bed_assignment.len() > 1 {
+        return None;
+    }
+    let element = metadata.object_element.as_ref()?;
+    if metadata.object_count != channels || element.object_data.len() != channels {
+        return None;
+    }
+    let beds = program.bed_assignment.first().map(|b| b.to_index_vec()).unwrap_or_default();
+    let positions = metadata.get_damf_pos();
+    // Room positions of the OAMD bed channel indices (TS 103 420); the LFEs carry no place.
+    const BED: [Option<[f32; 3]>; 17] = [
+        Some([0., 0., 0.]),
+        Some([1., 0., 0.]),
+        Some([0.5, 0., 0.]),
+        None,
+        Some([0., 0.5, 0.]),
+        Some([1., 0.5, 0.]),
+        Some([0., 1., 0.]),
+        Some([1., 1., 0.]),
+        Some([0.25, 0.25, 1.]),
+        Some([0.75, 0.25, 1.]),
+        Some([0.25, 0.5, 1.]),
+        Some([0.75, 0.5, 1.]),
+        Some([0.25, 0.75, 1.]),
+        Some([0.75, 0.75, 1.]),
+        Some([0., 0.2929, 0.]),
+        Some([1., 0.2929, 0.]),
+        None,
+    ];
+    (0..channels)
+        .map(|channel| {
+            let blocks = &element.object_data[channel];
+            let last = blocks.len().checked_sub(1)?;
+            let block = &blocks[last];
+            if block.b_object_not_active || block.object_basic_info.object_gain == -128 {
+                return Some(Weight::default());
+            }
+            let gain = 10f32.powf(block.object_basic_info.object_gain as f32 / 20.);
+            let position = if block.b_object_in_bed_or_isf {
+                match BED.get(*beds.get(channel)?)? {
+                    Some(p) => *p,
+                    None => return Some(Weight::default()),
+                }
+            } else {
+                let [x, y, z] = *positions.get(channel)?.get(last)?;
+                if ![x, y, z].iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                // DAMF coordinates to TS 103 448 room coordinates.
+                [x / 2. + 0.5, 0.5 - y / 2., z].map(|v| v as f32)
+            };
+            Some(Weight::at(position, gain))
+        })
+        .collect()
 }
 
 /// Trim gain at a preprocessed position (TS 103 448 clause 5.3). Without trim metadata the

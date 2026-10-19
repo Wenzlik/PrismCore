@@ -10,9 +10,13 @@
 use truehd_objects::decode::{Mode, Session};
 
 fn decode(name: &str, chunk: usize) -> Option<(Result<(), String>, Vec<f32>, Mode)> {
+    decode_with(name, chunk, Session::default)
+}
+
+fn decode_with(name: &str, chunk: usize, open: fn() -> Session) -> Option<(Result<(), String>, Vec<f32>, Mode)> {
     let dir = std::env::var("TRUEHD_OBJECTS_VECTORS").ok()?;
     let data = std::fs::read(std::path::Path::new(&dir).join(name)).expect("vector");
-    let mut session = Session::default();
+    let mut session = open();
     let mut pcm = Vec::new();
     let mut sink = |block: &[f32]| {
         pcm.extend_from_slice(block);
@@ -64,4 +68,129 @@ fn a_stream_without_objects_falls_back_to_its_bed() {
     // Heights stay silent; the bed carries the audio.
     assert!((8..12).all(|c| energy(&pcm, c) == 0.));
     assert!((0..8).map(|c| energy(&pcm, c)).sum::<f64>() > 0.);
+}
+
+#[test]
+fn heights_from_bed_keep_the_timeline_and_fall_back_to_the_plain_bed() {
+    for name in ["fba_atmos_dimtrim.mlp", "fba_atmos_cbi.mlp", "fba_spliced.mlp", "fbb_6ch.mlp"] {
+        let Some((result, pcm, mode)) = decode_with(name, 4096, Session::from_bed) else { return };
+        assert!(result.is_ok(), "{name}: {result:?}");
+        let (_, exact, _) = decode(name, 4096).unwrap();
+        assert_eq!(pcm.len(), exact.len(), "{name}: same length as the exact path");
+        assert!(pcm.iter().all(|x| x.is_finite() && x.abs() <= 1.), "{name}");
+        let (_, again, _) = decode_with(name, 317, Session::from_bed).unwrap();
+        assert_eq!(pcm, again, "{name}: independent of chunking");
+        println!("{name}: {mode:?}");
+    }
+    // No objects: the plain bed, heights silent, exactly as the object path's fallback.
+    let (_, pcm, mode) = decode_with("fbb_6ch.mlp", 4096, Session::from_bed).unwrap();
+    let (_, exact, _) = decode("fbb_6ch.mlp", 4096).unwrap();
+    assert_eq!(mode, Mode::Bed);
+    assert_eq!(pcm, exact);
+}
+
+unsafe extern "C" {
+    fn clock_gettime_nsec_np(clock: u32) -> u64;
+}
+
+/// CPU seconds of this thread (CLOCK_THREAD_CPUTIME_ID): a loaded machine still measures the work.
+fn cpu() -> f64 {
+    unsafe { clock_gettime_nsec_np(16) as f64 / 1e9 }
+}
+
+/// Heights from the bed against the exact object render, on the same stream: how much of the
+/// energy lands on another speaker, per channel and over windows, plus CPU and the input it
+/// takes before the first output. Measurement only (prints; asserts nothing about quality).
+/// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
+#[test]
+fn compare_heights_from_bed_with_the_exact_render() {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("TRUEHD_OBJECTS_VECTORS") {
+        for name in ["fba_atmos_obj.mlp", "fba_atmos_dimtrim.mlp"] {
+            files.push(std::path::Path::new(&dir).join(name));
+        }
+    }
+    if let Ok(list) = std::env::var("TRUEHD_OBJECTS_COMPARE") {
+        files.extend(list.split(':').filter(|s| !s.is_empty()).map(std::path::PathBuf::from));
+    }
+    const NAMES: [&str; 12] = ["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr"];
+    for path in files {
+        let data = std::fs::read(&path).expect("stream");
+        let run = |mut session: Session| {
+            let mut pcm = Vec::new();
+            let mut first: Option<usize> = None;
+            let start = cpu();
+            let mut fed = 0;
+            for bytes in data.chunks(4096) {
+                fed += bytes.len();
+                session
+                    .push(bytes, false, &mut |b: &[f32]| {
+                        pcm.extend_from_slice(b);
+                        Ok(())
+                    })
+                    .unwrap();
+                if first.is_none() && !pcm.is_empty() {
+                    first = Some(fed);
+                }
+            }
+            session.push(&[], true, &mut |b: &[f32]| {
+                pcm.extend_from_slice(b);
+                Ok(())
+            })
+            .unwrap();
+            (pcm, cpu() - start, first.unwrap_or(fed), session.mode())
+        };
+        let (exact, exact_time, exact_first, exact_mode) = run(Session::default());
+        let (bed, bed_time, bed_first, bed_mode) = run(Session::from_bed());
+        assert_eq!(exact.len(), bed.len(), "both keep the stream's length");
+        let frames = exact.len() / 12;
+        let seconds = frames as f64 / 48_000.;
+        let total = |pcm: &[f32]| -> Vec<f64> { (0..12).map(|c| energy(pcm, c)).collect() };
+        let (e, b) = (total(&exact), total(&bed));
+        let (se, sb) = (e.iter().sum::<f64>(), b.iter().sum::<f64>());
+        if se == 0. || sb == 0. {
+            println!("\n{}: silent, nothing to compare", path.display());
+            continue;
+        }
+        println!("\n{} ({:.2} s; exact {exact_mode:?}, from bed {bed_mode:?})", path.file_name().unwrap().to_string_lossy(), seconds);
+        println!("  channel   exact %   bed %   diff dB");
+        for c in 0..12 {
+            let (pe, pb) = (e[c] / se * 100., b[c] / sb * 100.);
+            println!("  {:>4}   {:>8.2}  {:>7.2}  {:>+7.2}", NAMES[c], pe, pb, 10. * ((b[c] + 1e-12) / (e[c] + 1e-12)).log10());
+        }
+        // Energy on another speaker: half the L1 distance between the two distributions, per
+        // 0.25 s window, over windows where the exact render has heights (> 1 % of energy).
+        let window = 12_000;
+        let mut moved = Vec::new();
+        for w in 0..frames / window {
+            let slice = |pcm: &[f32]| total(&pcm[w * window * 12..(w + 1) * window * 12]);
+            let (we, wb) = (slice(&exact), slice(&bed));
+            let (te, tb) = (we.iter().sum::<f64>(), wb.iter().sum::<f64>());
+            if te <= 0. || tb <= 0. || we[8..].iter().sum::<f64>() / te < 0.01 {
+                continue;
+            }
+            moved.push(0.5 * (0..12).map(|c| (we[c] / te - wb[c] / tb).abs()).sum::<f64>() * 100.);
+        }
+        moved.sort_by(f64::total_cmp);
+        let no_lfe = |v: &[f64]| -> Vec<f64> {
+            let s: f64 = v.iter().enumerate().filter(|(c, _)| *c != 3).map(|(_, x)| x).sum();
+            v.iter().enumerate().map(|(c, x)| if c == 3 { 0. } else { x / s }).collect()
+        };
+        let (ne, nb) = (no_lfe(&e), no_lfe(&b));
+        println!("  energy on another speaker without the LFE: {:.2} %", 0.5 * (0..12).map(|c| (ne[c] - nb[c]).abs()).sum::<f64>() * 100.);
+        let whole = 0.5 * (0..12).map(|c| (e[c] / se - b[c] / sb).abs()).sum::<f64>() * 100.;
+        let heights = |v: &[f64], s: f64| v[8..].iter().sum::<f64>() / s * 100.;
+        println!(
+            "  energy on another speaker: whole {whole:.2} %, windows with heights {} (median {:.2} %, max {:.2} %)",
+            moved.len(),
+            moved.get(moved.len() / 2).copied().unwrap_or(f64::NAN),
+            moved.last().copied().unwrap_or(f64::NAN)
+        );
+        println!("  heights share: exact {:.2} %, from bed {:.2} %; total level bed/exact {:+.2} dB", heights(&e, se), heights(&b, sb), 10. * (sb / se).log10());
+        println!(
+            "  CPU (this thread) per second of audio: exact {:.2} ms, from bed {:.2} ms; input before the first output: exact {exact_first} B, from bed {bed_first} B",
+            exact_time * 1e3 / seconds,
+            bed_time * 1e3 / seconds
+        );
+    }
 }
