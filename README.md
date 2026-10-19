@@ -992,14 +992,15 @@ deinterlacer:
 
 ```swift
 print(FFmpegBuild.summary)
-// FFmpeg n8.1.2
+// FFmpeg n8.1.2-eac3-vt.1
 //   libavutil 60.26.102
 //   libavcodec 62.28.102
 //   …
-//   eac3 encoder: NO — audio bridge disabled
+//   eac3 encoder: yes
+//   audio bridge: eac3
 //   av1 decoder: libdav1d (hardware: no)
-//   dialogue boost: no
-//   gpu deinterlacer: none — CPU route
+//   dialogue boost: yes
+//   gpu deinterlacer: yadif_videotoolbox
 ```
 
 Worth a line in a host's launch log and worth attaching to a bug report: half of
