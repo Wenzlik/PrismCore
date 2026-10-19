@@ -5,6 +5,9 @@ import Libavcodec
 import Libavformat
 import Libavutil
 @testable import PrismCore
+#if canImport(TrueHDObjects)
+import TrueHDObjects
+#endif
 
 /// TrueHD Atmos with its heights (`ObjectAudioRendering.heights`): off unless asked for, routed
 /// only where every condition holds, served as a real `apac` track, and placed channel by
@@ -469,6 +472,93 @@ struct TrueHDHeightsTests {
             String(describing: ContinuousClock.now - wall), Double(worstFeed) / 1e6, firstOutputAfter
         ))
         #expect(out > 0)
+    }
+
+    /// One TrueHD Atmos source rendered to 12-channel 7.1.4 CAF (Float32,
+    /// `kAudioChannelLayoutTag_Atmos_7_1_4`) and, with `afconvert`, APAC `.mp4`, for listening:
+    /// `<name>.heights.*` is what `.heights` plays; a measurement build (`PRISMCORE_EXACT_HEIGHTS`,
+    /// see Package.swift) adds `<name>.exact.*`, the exact object render it is compared with.
+    /// `PRISMCORE_HEIGHTS_EXPORT=/path/to/atmos.mkv [PRISMCORE_HEIGHTS_EXPORT_SECONDS=60]
+    /// swift test --filter heightsListeningExport`. Files land next to the source.
+    @Test("Heights listening export (opt-in)")
+    func heightsListeningExport() throws {
+        guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable,
+              let path = ProcessInfo.processInfo.environment["PRISMCORE_HEIGHTS_EXPORT"] else { return }
+        let limit = ProcessInfo.processInfo.environment["PRISMCORE_HEIGHTS_EXPORT_SECONDS"].flatMap(Double.init) ?? .infinity
+        let source = URL(fileURLWithPath: path)
+        var exact = [false]
+        #if PRISMCORE_EXACT_HEIGHTS
+        exact.append(true)
+        #endif
+        for exact in exact {
+            let stem = source.deletingPathExtension().path + (exact ? ".exact" : ".heights")
+            let caf = URL(fileURLWithPath: stem + ".caf")
+            try? FileManager.default.removeItem(at: caf)
+            let pcm = try exportPCM(source: source, exact: exact, seconds: limit)
+            let layout = try #require(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Atmos_7_1_4))
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: true, channelLayout: layout)
+            let file = try AVAudioFile(forWriting: caf, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: true)
+            let frames = pcm.count / 12
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)))
+            pcm.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: pcm.count) }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            try file.write(from: buffer)
+            // `mp4f`: afconvert refuses APAC in `m4af`.
+            let mp4 = stem + ".mp4"
+            try? FileManager.default.removeItem(atPath: mp4)
+            let afconvert = Process()
+            afconvert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+            afconvert.arguments = ["-f", "mp4f", "-d", "apac", "-b", "\(HeightsBridge.bitRate)", caf.path, mp4]
+            try afconvert.run()
+            afconvert.waitUntilExit()
+            print("heights export: \(caf.path) (\(Double(frames) / 48_000) s)\(afconvert.terminationStatus == 0 ? ", " + mp4 : "; afconvert failed")")
+        }
+    }
+
+    /// The library's interleaved 7.1.4 for a TrueHD track, through the C API the bridge uses,
+    /// from the first major sync on.
+    private func exportPCM(source: URL, exact: Bool, seconds: Double) throws -> [Float] {
+        #if canImport(TrueHDObjects)
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, source.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        let index = try #require((0..<Int(context.pointee.nb_streams)).first {
+            context.pointee.streams[$0]!.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
+        })
+        #if PRISMCORE_EXACT_HEIGHTS
+        let session = try #require(exact ? truehd_objects_open_exact() : truehd_objects_open())
+        #else
+        let session = try #require(truehd_objects_open())
+        #endif
+        defer { truehd_objects_close(session) }
+        final class Sink { var pcm: [Float] = [] }
+        let sink = Sink()
+        let context2 = Unmanaged.passUnretained(sink).toOpaque()
+        let callback: TrueHDObjectsPCM = { context, pcm, frames in
+            let sink = Unmanaged<Sink>.fromOpaque(context!).takeUnretainedValue()
+            sink.pcm.append(contentsOf: UnsafeBufferPointer(start: pcm, count: Int(frames) * 12))
+            return 0
+        }
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        var started = false
+        while av_read_frame(context, pkt) >= 0, Double(sink.pcm.count / 12) / 48_000 < seconds {
+            defer { av_packet_unref(pkt) }
+            guard Int(pkt.pointee.stream_index) == index, let data = pkt.pointee.data else { continue }
+            let bytes = UnsafeBufferPointer(start: data, count: Int(pkt.pointee.size))
+            if !started { started = TrueHDMajorSync.startsWithMajorSync(bytes) }
+            guard started else { continue }
+            #expect(truehd_objects_push(session, bytes.baseAddress, bytes.count, 0, callback, context2) == 0)
+        }
+        #expect(truehd_objects_push(session, nil, 0, 1, callback, context2) == 0)
+        print("heights export: \(exact ? "exact" : "heights") mode \(truehd_objects_mode(session))")
+        return sink.pcm
+        #else
+        return []
+        #endif
     }
 
     // MARK: - Helpers
