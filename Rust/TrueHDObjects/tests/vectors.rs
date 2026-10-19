@@ -162,6 +162,7 @@ fn compare_heights_from_bed_with_the_exact_render() {
         // 0.25 s window, over windows where the exact render has heights (> 1 % of energy).
         let window = 12_000;
         let mut moved = Vec::new();
+        let mut height_db = Vec::new();
         for w in 0..frames / window {
             let slice = |pcm: &[f32]| total(&pcm[w * window * 12..(w + 1) * window * 12]);
             let (we, wb) = (slice(&exact), slice(&bed));
@@ -170,8 +171,11 @@ fn compare_heights_from_bed_with_the_exact_render() {
                 continue;
             }
             moved.push(0.5 * (0..12).map(|c| (we[c] / te - wb[c] / tb).abs()).sum::<f64>() * 100.);
+            height_db.push(10. * (wb[8..].iter().sum::<f64>() / we[8..].iter().sum::<f64>()).log10());
         }
         moved.sort_by(f64::total_cmp);
+        height_db.sort_by(f64::total_cmp);
+        let pick = |v: &[f64], q: f64| v.get(((v.len() as f64 - 1.) * q).round() as usize).copied().unwrap_or(f64::NAN);
         let no_lfe = |v: &[f64]| -> Vec<f64> {
             let s: f64 = v.iter().enumerate().filter(|(c, _)| *c != 3).map(|(_, x)| x).sum();
             v.iter().enumerate().map(|(c, x)| if c == 3 { 0. } else { x / s }).collect()
@@ -181,10 +185,15 @@ fn compare_heights_from_bed_with_the_exact_render() {
         let whole = 0.5 * (0..12).map(|c| (e[c] / se - b[c] / sb).abs()).sum::<f64>() * 100.;
         let heights = |v: &[f64], s: f64| v[8..].iter().sum::<f64>() / s * 100.;
         println!(
-            "  energy on another speaker: whole {whole:.2} %, windows with heights {} (median {:.2} %, max {:.2} %)",
+            "  energy on another speaker: whole {whole:.2} %, windows with heights {} of {} (median {:.2} %, p90 {:.2} %, max {:.2} %); heights from bed vs exact per window: median {:+.2} dB (p10 {:+.2}, p90 {:+.2})",
             moved.len(),
-            moved.get(moved.len() / 2).copied().unwrap_or(f64::NAN),
-            moved.last().copied().unwrap_or(f64::NAN)
+            frames / window,
+            pick(&moved, 0.5),
+            pick(&moved, 0.9),
+            pick(&moved, 1.),
+            pick(&height_db, 0.5),
+            pick(&height_db, 0.1),
+            pick(&height_db, 0.9)
         );
         println!("  heights share: exact {:.2} %, from bed {:.2} %; total level bed/exact {:+.2} dB", heights(&e, se), heights(&b, sb), 10. * (sb / se).log10());
         println!(
