@@ -100,6 +100,21 @@ struct StreamIndexPreferenceTests {
         #expect(await session.options.preferredAudioStreamIndex == 2)
     }
 
+    @Test("An index no stream can have is unmatched, not a trap")
+    func unrepresentableIndexFallsBack() async throws {
+        let session = try PrismCoreSession(
+            url: try fixture("h264_multi_audio.mkv"),
+            preferredAudioLanguage: "cs",
+            preferredAudioStreamIndex: Int.max,
+            preferredSubtitleStreamIndex: Int.min
+        )
+        defer { Task { await session.stop() } }
+        let defaults = try await master(of: session).split(separator: "\n")
+            .filter { $0.hasPrefix("#EXT-X-MEDIA:TYPE=AUDIO") && $0.contains("DEFAULT=YES") }
+        #expect(defaults.count == 1)
+        #expect(defaults.first?.contains("LANGUAGE=\"ces\"") == true)
+    }
+
     @Test("End to end: the named subtitle stream is the DEFAULT, even a forced one")
     func subtitleIndexInTheServedMaster() async throws {
         // Two English SRT tracks: stream 2 full, stream 3 forced. The language

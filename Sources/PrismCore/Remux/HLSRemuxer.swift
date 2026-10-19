@@ -1033,7 +1033,7 @@ final class HLSRemuxer: @unchecked Sendable {
         let subtitleStreams = try subtitles.prepare(
             input: input,
             preferredLanguage: preferredSubtitleLanguage,
-            preferredStreamIndex: preferredSubtitleStreamIndex.map(Int32.init),
+            preferredStreamIndex: preferredSubtitleStreamIndex.flatMap { Int32(exactly: $0) },
             closedCaptions: closedCaptions,
             closedCaptionLanguage: closedCaptionLanguage
         )
@@ -1063,7 +1063,7 @@ final class HLSRemuxer: @unchecked Sendable {
             candidates: candidates,
             best: bestAudio >= 0 ? bestAudio : nil,
             preferredLanguage: preferredAudioLanguage,
-            preferredStreamIndex: preferredAudioStreamIndex.map(Int32.init)
+            preferredStreamIndex: preferredAudioStreamIndex.flatMap { Int32(exactly: $0) }
         )
 
         // Can this source be honestly wrapped in a master playlist at all? The
@@ -1112,7 +1112,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 candidates: candidates,
                 best: bestAudio >= 0 ? bestAudio : nil,
                 preferredLanguage: preferredAudioLanguage,
-                preferredStreamIndex: preferredAudioStreamIndex.map(Int32.init)
+                preferredStreamIndex: preferredAudioStreamIndex.flatMap { Int32(exactly: $0) }
             ))
 
         // Demand-driven mode needs a trustworthy upfront segmentation. Only a

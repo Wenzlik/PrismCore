@@ -54,8 +54,10 @@ struct LoopbackRangeTests {
         for (header, expected) in cases {
             #expect(LoopbackHTTPServer.byteRange(header, length: 1000) == expected, "\(header ?? "nil")")
         }
-        // A zero-length body has no byte to satisfy any range with.
+        // A zero-length body has no first byte to start at, but a nonzero
+        // suffix is satisfiable (RFC 9110 §14.1.2) — by the empty 200.
         #expect(LoopbackHTTPServer.byteRange("bytes=0-", length: 0) == .unsatisfiable)
+        #expect(LoopbackHTTPServer.byteRange("bytes=-1", length: 0) == .whole)
     }
 
     @Test("A single range is a 206 with its Content-Range", arguments: ["bytes=0-99", "bytes=900-", "bytes=-100"])
@@ -95,15 +97,17 @@ struct LoopbackRangeTests {
         }
     }
 
-    @Test("HEAD with a range sends the 206 headers and no body")
-    func headRange() async throws {
+    @Test("HEAD ignores Range: the whole body's headers, never a 206 or 416")
+    func headIgnoresRange() async throws {
         let server = LoopbackHTTPServer(provider: Provider(delay: nil))
         defer { Task { await server.stop() } }
-        let (data, response) = try await request(server, method: "HEAD", headers: ["Range": "bytes=10-19"])
-        #expect(response.statusCode == 206)
-        #expect(response.value(forHTTPHeaderField: "Content-Length") == "10")
-        #expect(response.value(forHTTPHeaderField: "Content-Range") == "bytes 10-19/1000")
-        #expect(data.isEmpty)
+        for range in ["bytes=10-19", "bytes=1000-"] {
+            let (data, response) = try await request(server, method: "HEAD", headers: ["Range": range])
+            #expect(response.statusCode == 200, "\(range)")
+            #expect(response.value(forHTTPHeaderField: "Content-Length") == "1000")
+            #expect(response.value(forHTTPHeaderField: "Content-Range") == nil)
+            #expect(data.isEmpty)
+        }
     }
 
     @Test("A segment still being produced: ranged once it lands in time, whole past the threshold")

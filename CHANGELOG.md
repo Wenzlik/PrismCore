@@ -33,7 +33,7 @@ every new parameter defaults to today's behaviour.
   (2 s) passes is also a whole-body `200`, chunked: its headers have to go
   before AVPlayer's watchdog fires, and a `206` cannot be framed without
   the length. A range on a payload that lands inside the threshold is
-  honoured. HEAD answers the same headers.
+  honoured. HEAD ignores `Range` (RFC 9110 defines ranges for GET only).
 - **`segmentTargetDuration:`** (whole seconds, default 6, clamped to
   1...10) on every initializer and in `Options`. Cuts still land on the
   first keyframe at or after each multiple, the first segment stays the

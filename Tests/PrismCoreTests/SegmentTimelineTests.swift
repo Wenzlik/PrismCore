@@ -59,9 +59,8 @@ struct SegmentTimelineTests {
         let extinf = playlist.split(separator: "\n").filter { $0.hasPrefix("#EXTINF:") }
             .compactMap { Double($0.dropFirst("#EXTINF:".count).dropLast()) }
         #expect(extinf.count == timeline.segments.count)
-        for (listed, planned) in zip(extinf, timeline.segments) {
-            #expect(abs(listed - planned.duration) < 1e-4)
-        }
+        // Exactly: the timeline carries the printed values, not the planned ones.
+        #expect(extinf == timeline.segments.map(\.duration))
     }
 
     @Test("The index witnesses keep their 6 s calibration whatever the target")

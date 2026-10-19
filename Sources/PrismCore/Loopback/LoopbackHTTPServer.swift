@@ -19,7 +19,9 @@ import Network
 ///   answered `200` with the whole body, which RFC 9110 allows for each. A
 ///   payload still being produced past the slow-serve threshold (below) is
 ///   also a whole-body `200`: its length is not known when the headers have
-///   to go, and a `206` cannot be framed without it.
+///   to go, and a `206` cannot be framed without it. `HEAD` ignores `Range`
+///   (RFC 9110 defines ranges for GET only) and answers the whole body's
+///   headers.
 /// - **Keep-alive** per HTTP/1.1 default: after a response the connection loops
 ///   back to reading the next request, bounded by `Limits.maxRequestsPerConnection`
 ///   and `Limits.idleTimeout` so abandoned sockets can't pile up. `Connection:
@@ -723,9 +725,11 @@ public actor LoopbackHTTPServer {
         let first = spec[..<dash]
         let last = spec[spec.index(after: dash)...]
         if first.isEmpty {
-            // `-n`: the final n bytes, all of a shorter body.
+            // `-n`: the final n bytes, all of a shorter body — an empty one
+            // included, which has no 206 to frame and gets its empty 200.
             guard let suffix = Int(last), suffix >= 0 else { return .whole }
-            guard suffix > 0, length > 0 else { return .unsatisfiable }
+            guard suffix > 0 else { return .unsatisfiable }
+            guard length > 0 else { return .whole }
             return .partial(max(0, length - suffix)...(length - 1))
         }
         guard let start = Int(first), start >= 0 else { return .whole }
@@ -768,7 +772,9 @@ public actor LoopbackHTTPServer {
         body: Data, contentType: String, range: String? = nil,
         keepAlive: Bool, headOnly: Bool, on connection: NWConnection
     ) async -> Bool {
-        switch Self.byteRange(range, length: body.count) {
+        // Range is defined for GET only; any other method ignores it (RFC
+        // 9110 §14.2), so a HEAD gets the full response's headers.
+        switch Self.byteRange(headOnly ? nil : range, length: body.count) {
         case .whole:
             break
         case .unsatisfiable:

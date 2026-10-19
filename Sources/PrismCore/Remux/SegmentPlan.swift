@@ -552,10 +552,14 @@ public struct SegmentTimeline: Sendable, Equatable {
     public let targetDuration: Int
 
     init(plan: SegmentPlan) {
+        // The durations as the playlist prints them (`%.5f`), not as planned:
+        // a 181/30 s segment is `6.03333` on the wire, and summing the
+        // unrounded value would drift every later start off the playlist's.
+        let listed = plan.entries.map { Double(String(format: "%.5f", $0.duration)) ?? $0.duration }
         var start = 0.0
-        segments = plan.entries.map { entry in
-            defer { start += entry.duration }
-            return Segment(start: start, duration: entry.duration)
+        segments = listed.map { duration in
+            defer { start += duration }
+            return Segment(start: start, duration: duration)
         }
         // `MediaPlaylistWriter.targetDuration`'s rule, so the two never disagree.
         targetDuration = max(1, Int((plan.entries.map(\.duration).max() ?? 1).rounded(.up)))
