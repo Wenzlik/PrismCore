@@ -77,6 +77,14 @@ struct SegmentPlan: Equatable {
     var indexCoversEnd: Bool? = nil
     var indexBudgetExpired = false
 
+    /// The segment length the index witnesses (coverage, end) measure in,
+    /// whatever length the host asked the segments to be. They were
+    /// calibrated on field sources at the 6 s default; scaled with a host's
+    /// `segmentTargetDuration` they would distrust a short title's complete
+    /// index at 10 s (coverage) and a 4 s-GOP source's at 2 s (end), turning
+    /// a request for different segments into no plan at all.
+    static let witnessSeconds = 6
+
     /// Largest tolerated keyframe gap before the index is declared junk.
     /// Generous: open-GOP 10 s intervals are real; 60 s is not a VOD cadence.
     static let maxTrustedGapSeconds = 60.0
@@ -185,7 +193,7 @@ struct SegmentPlan: Equatable {
             keyframes = cachedKeyframes
         } else if indexIsLoadedAtOpen(
             input: input, stream: stream, tickSeconds: tick,
-            durationSeconds: durationSeconds, targetSeconds: targetSeconds
+            durationSeconds: durationSeconds, targetSeconds: witnessSeconds
         ) {
             // Nothing to nudge: the index is already in the stream. Two Range
             // requests saved on every plain MP4 (stss lives in the moov the
@@ -235,7 +243,7 @@ struct SegmentPlan: Equatable {
         let coveredThroughPTS = cachedKeyframes != nil ? cachedCoveredThroughPTS : nil
         let trusted = coveredThroughPTS.map { limit in keyframes.filter { $0 <= limit } } ?? keyframes
         let coversEnd: Bool? = trusted.isEmpty ? nil : reachesEnd(
-            trusted.sorted(), durationSeconds: durationSeconds, tickSeconds: tick, targetSeconds: targetSeconds
+            trusted.sorted(), durationSeconds: durationSeconds, tickSeconds: tick, targetSeconds: witnessSeconds
         )
         if let planned = keyframePlan(
             keyframes: keyframes,
@@ -394,7 +402,7 @@ struct SegmentPlan: Equatable {
         if Double(largestGap) * tickSeconds > maxTrustedGapSeconds { return nil }
         // Witness 2: coverage spans at least one target duration.
         let span = Double(sorted.last! - sorted.first!) * tickSeconds
-        guard span >= Double(targetSeconds) else { return nil }
+        guard span >= Double(witnessSeconds) else { return nil }
         // Witness 3, for a map that claims to be complete: it reaches the
         // container's end — the end its last entry runs to. Witnesses 1 and
         // 2 are just as happy with a head prefix, which is what an index-load
@@ -417,8 +425,8 @@ struct SegmentPlan: Equatable {
         // of the source.
         if coveredThroughPTS == nil {
             let reached = indexLoadInterrupted
-                ? reachesEnd(sorted, durationSeconds: durationSeconds, tickSeconds: tickSeconds, targetSeconds: targetSeconds)
-                : Double(sorted.last!) * tickSeconds >= durationSeconds - max(Double(targetSeconds), maxTrustedGapSeconds + 1)
+                ? reachesEnd(sorted, durationSeconds: durationSeconds, tickSeconds: tickSeconds, targetSeconds: witnessSeconds)
+                : Double(sorted.last!) * tickSeconds >= durationSeconds - max(Double(witnessSeconds), maxTrustedGapSeconds + 1)
             guard reached else { return nil }
         }
 

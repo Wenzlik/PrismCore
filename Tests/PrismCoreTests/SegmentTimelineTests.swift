@@ -64,6 +64,23 @@ struct SegmentTimelineTests {
         }
     }
 
+    @Test("The index witnesses keep their 6 s calibration whatever the target")
+    func witnessesIgnoreTheHostTarget() throws {
+        let tick = 1.0 / 1000
+        // An 8 s title, a keyframe every 2 s: complete, and planned at 6 s. A
+        // coverage witness scaled to a 10 s target would refuse it.
+        let short: [Int64] = [0, 2000, 4000, 6000]
+        #expect(SegmentPlan.keyframePlan(
+            keyframes: short, durationSeconds: 8, tickSeconds: tick, targetSeconds: 10
+        ) != nil)
+        // The stride is still the host's: 2 s, then 10 s steps cut at the
+        // next keyframe — here the title's end.
+        let entries = try #require(SegmentPlan.keyframePlan(
+            keyframes: short, durationSeconds: 8, tickSeconds: tick, targetSeconds: 10, firstSegmentSeconds: 2
+        ))
+        #expect(entries.map(\.duration) == [2, 6])
+    }
+
     @Test("The default stays 6 s")
     func defaultTarget() async throws {
         let session = try PrismCoreSession(url: try fixture("h264_aac_30s.mkv"))

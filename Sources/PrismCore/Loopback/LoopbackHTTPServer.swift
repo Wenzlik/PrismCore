@@ -621,11 +621,12 @@ public actor LoopbackHTTPServer {
             resolution.cancel()
             return .aborted
         }
-        // A HEAD response carries no body, so there is nothing left to stream;
-        // the honest answer for an unknown length is the chunked framing with
-        // an immediate terminator.
+        // A HEAD response carries no body — not even the chunked framing's
+        // terminator. `Transfer-Encoding` here only says how a GET would be
+        // framed (RFC 9112 §6.1); a `0\r\n\r\n` after it would sit in a
+        // keep-alive client's buffer and be read as the start of the next
+        // response.
         if headOnly {
-            _ = await send(Self.chunkTerminator, on: connection)
             // Answered already; the wait would otherwise run on to a timeout.
             resolution.cancel()
             return .completed

@@ -1247,7 +1247,7 @@ final class HLSRemuxer: @unchecked Sendable {
                    lastKeyframePTS: last,
                    tickSeconds: av_q2d(stream.pointee.time_base),
                    durationSeconds: durationSeconds,
-                   targetSeconds: segmentSeconds
+                   targetSeconds: SegmentPlan.witnessSeconds
                ) {
                 let timeBase = stream.pointee.time_base
                 keyframeCache.store(.init(

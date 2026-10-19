@@ -281,6 +281,35 @@ struct LoopbackHardeningTests {
         #expect(!result.text.contains("0\r\n\r\n"))
     }
 
+    @Test("A slow HEAD sends no chunk terminator, and the connection stays in step", arguments: [false, true])
+    func slowHeadKeepsTheConnectionInStep(overLAN: Bool) async throws {
+        let server = LoopbackHTTPServer(
+            provider: SlowProvider(delay: .milliseconds(800), outcome: .data(Data("xy".utf8))),
+            limits: .init(slowServeThreshold: .milliseconds(200)),
+            reachability: Self.reachability(overLAN)
+        )
+        defer { Task { await server.stop() } }
+
+        // `nil` means this machine has no interface the LAN mode could bind
+        // (Wi-Fi off, or a CI box with nothing but loopback). The loopback
+        // pass of the same test still covers the behavior.
+        guard let harness = try await Self.connect(to: server) else { return }
+        defer { harness.client.close() }
+
+        // A HEAD past the threshold, then a GET on the same socket. A
+        // terminator after the HEAD's headers would be the first bytes the
+        // client reads as the GET's response.
+        await harness.client.send(harness.request("HEAD", "/late.m4s"))
+        let head = await harness.client.read { $0.contains("\r\n\r\n") }
+        #expect(head.text.hasPrefix("HTTP/1.1 200 OK"))
+        // Each read starts empty, so a terminator shows up either glued to the
+        // headers or at the head of the next read.
+        #expect(!head.text.contains("\r\n\r\n0\r\n\r\n"))
+        await harness.client.send(harness.get("/late.m4s"))
+        let get = await harness.client.read(timeout: .seconds(3)) { $0.contains("xy\r\n0\r\n\r\n") }
+        #expect(get.text.hasPrefix("HTTP/1.1 200 OK"), "after the HEAD came: \(get.text.prefix(40))")
+    }
+
     @Test("HEAD answers with headers only", arguments: [false, true])
     func headRequest(overLAN: Bool) async throws {
         let root = try makeRoot()

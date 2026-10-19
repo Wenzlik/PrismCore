@@ -38,7 +38,11 @@ every new parameter defaults to today's behaviour.
   1...10) on every initializer and in `Options`. Cuts still land on the
   first keyframe at or after each multiple, the first segment stays the
   short one `start()` waits for, and `EXT-X-TARGETDURATION` stays the
-  ceiling of the longest `EXTINF`.
+  ceiling of the longest `EXTINF`. The keyframe-index witnesses (coverage,
+  end) keep measuring in the 6 s they were calibrated at
+  (`SegmentPlan.witnessSeconds`): scaled with the target, a 10 s target
+  would have refused a short title's complete index and a 2 s one a 4 s-GOP
+  source's late index, turning a request for other segments into no plan.
 - **`PrismCoreSession.segmentTimeline`** (`SegmentTimeline`): a planned
   session's segments — start and `EXTINF` on the playlist timeline, entry
   for entry with every media playlist — plus the `TARGETDURATION`. `nil`
@@ -47,6 +51,16 @@ every new parameter defaults to today's behaviour.
   `tt`, `bb`, `tb`, `bt`, `unknown` — ffprobe's spellings): the field order
   the stream declares, unverified and with the mixed orders kept apart.
   `fieldOrder` stays the verified answer routing uses.
+### Fixed
+
+- **A slow-served HEAD no longer writes a chunk terminator.** Past the
+  slow-serve threshold a HEAD got the chunked headers *and* `0\r\n\r\n`;
+  a HEAD response has no body (RFC 9112 §6.1), so a keep-alive client read
+  those five bytes as the start of its next response. AVPlayer never sends
+  HEAD; a proxying host does.
+
+### Tests
+
 - **`ConcurrentSessionsStressTests`**: six sessions over copied, bridged
   (TrueHD, DTS), multi-rendition and subtitled fixtures start, serve every
   segment and stop at once in one process. Clean under Thread Sanitizer
