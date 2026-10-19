@@ -68,7 +68,7 @@ table: the app's name, a link, and its platforms.
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC, AC3, EAC3, FLAC, ALAC — bit-for-bit |
 | Audio (bridge) | TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1) |
-| TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **Opt-in for TrueHD only:** `objectAudioRendering: .heights` renders the Atmos objects to 7.1.4 and serves APAC, so the heights play (see *TrueHD Atmos with heights*; `.renderedHeights`). Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
+| TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **Opt-in for TrueHD only:** `objectAudioRendering: .heights` derives 7.1.4 from the stream's 7.1, guided by its objects, and serves APAC, so the heights play (see *TrueHD Atmos with heights*; `.renderedHeights`). Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
 | Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. `preferredAudioLanguage:` decides which one is `DEFAULT`, so playback starts in the right language instead of switching visibly after it. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
 | Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
 | Subtitles (text) | SubRip / ASS / SSA / WebVTT / mov_text converted during the remux read into segmented WebVTT renditions, cut on the video's own boundaries — so text survives PiP and AirPlay instead of living in a host overlay. ASS inline italics / bold / underline become WebVTT tags; `\an` / `\pos` placement and a WebVTT track's own cue settings ride the timing line, so a caption authored at the top of the frame stays there. External `.srt` / `.vtt` register as first-class renditions |
@@ -310,21 +310,39 @@ let session = try PrismCoreSession(
 ```
 
 A TrueHD track whose bitstream says Atmos (its major sync, read before the
-master is written — the probe's profile claim only where that cannot be asked) is decoded to its 16-channel
-object presentation, rendered to 7.1.4 speaker feeds and served as **Apple
+master is written — the probe's profile claim only where that cannot be asked) becomes 7.1.4
+speaker feeds **derived from its own 7.1 presentation**, and is served as **Apple
 Positional Audio** — a 12-channel `apac` rendition (`CODECS="apac.31.03"`,
 `CHANNELS="12"`), which tvOS sends to the receiver and iOS plays as Spatial
 Audio. Everything else (other codecs, TrueHD without Atmos,
 DTS:X) is untouched.
 
-- **What decodes and renders it.** `Rust/TrueHDObjects`, a small static
-  library built from pinned source: truehdd's `truehd` crate (Apache-2.0,
-  harletty fork at `5c8b880`) decodes the access units and their object
-  metadata (ETSI TS 103 420); a port of SpatialAudioBridge's ETSI TS 103 448
-  consumer renderer (Apache-2.0) places the objects — point, size,
-  divergence, snap, zones, trims — and a linked peak limiter holds the sum
-  below −0.1 dBFS. Channel-based immersive Atmos is routed by its labels. No
-  DTS code is linked.
+- **How the heights are made.** `Rust/TrueHDObjects`, a small static library
+  built from pinned source: truehdd's `truehd` crate (Apache-2.0, harletty fork
+  at `5c8b880`) decodes each access unit's 7.1 presentation (the bed FFmpeg and
+  `.lossless` play), its Atmos presentation and the object metadata (ETSI TS
+  103 420). Every output is a share of the 7.1: per STFT bin (2048-frame Hann
+  windows, 512-frame hop) each ear-level channel is divided between itself
+  and the four heights by how much of that bin's energy, in that channel,
+  comes from objects above ear level. An object counts with its bin power
+  times its floor-projected point-panner gain² into the channel, and goes up
+  in proportion to its point-panned power on each height; positions are read
+  as points (no size, snap, zones, screen anchoring, elevation switch, trims
+  or ramps). No object signal reaches an output. Shares are real,
+  non-negative and sum to one per channel and bin, a height fed by several
+  channels is set to the energy of its shares, and estimates are smoothed
+  over about 25 ms. Each floor channel's level is matched to what the objects
+  put into it (averaged over about 4 s, within ±3 dB: a film's 7.1 measured
+  its surrounds 1.5 dB under its objects). The LFE is the bed's own; a
+  channel-based immersive presentation plays as its own feeds; a linked peak
+  limiter holds the sum below −0.1 dBFS. No DTS code is linked.
+- **Measured** against the exact object render (a TS 103 448 renderer with
+  size, snap, zones and trims, kept only for measurement builds:
+  `cargo test --features exact-render`), on 0.25 s windows with height
+  content: two scenes of a TrueHD Atmos film, 1.0 % of the energy on another
+  speaker (median; p90 2.4 % and 1.8 %), heights within 0.1 dB (median), the
+  floor within 0.3 dB and the front heights within 0.7 dB over the clip; a
+  synthetic eight-object scene, 0.9 % (p90 1.2 %).
 - **The encoder.** `AVAudioConverter` APAC (OS 26), 3.07 Mbit/s, no DRC
   (every other DRC setting holds 1.5–20 s of audio before its first packet,
   which a segmenter that cuts on video boundaries cannot absorb; Apple's
@@ -339,16 +357,19 @@ DTS:X) is untouched.
   position (at most 107 ms later), the encoder is reset, and the timeline
   is re-anchored on that access unit — the same re-anchor every bridged
   rendition takes.
-- **Cost.** 12.8× real time per core for the whole chain on an M2 (release
-  build, a 33 s Atmos stream; the encoder is about three quarters of it), first APAC
-  packet 23 ms of audio after the first access unit, worst single feed 4 ms.
+- **Cost.** The split decodes the Atmos presentation as well as the 7.1 and
+  runs about 50 FFTs per 10.7 ms hop: decode and split take about 55 ms of
+  CPU per second of audio on an M2 (the previous object render about 20 ms),
+  the whole chain with the APAC encoder about 7× real time per core. The
+  first APAC packet comes 64 ms of audio after the first access unit (the
+  split's 32 ms included), worst single feed 5 ms.
 - **When it does not happen.** `.off` (the default), `allowsAtmosOutput`
   false, an OS before 26, a build without the library
   (`ObjectAudioRendering.isAvailable == false`), a track whose
   bitstream is not Atmos, a rate other than 48 kHz: the track is bridged as before
   (`bridgedAudio`). After the master is written nothing can change the
-  rendition's codec, so a stream the renderer cannot place (no objects, ISF,
-  several beds, bed downmix metadata, objects outside the room) plays its
+  rendition's codec, so a stream the split has nothing to go by for (no
+  objects, ISF, several beds, an object count the metadata does not match) plays its
   own channel presentation — the 7.1 FFmpeg would have decoded — in the same
   rendition with silent heights, and reports `.notPreserved`; a stream that
   will not decode at all plays silence of its length rather than stopping
@@ -373,57 +394,11 @@ DTS:X) is untouched.
   silent Dolby Digital Plus Atmos stream played on a second player, and
   AetherEngine needs the same for a Samsung soundbar. PrismCore does not
   ship such a stream; a host that wants it plays one itself.
-- **In the package, off at runtime.** The renderer is part of the default
+- **In the package, off at runtime.** The library is part of the default
   package (again since 3.7.2; 3.7.1 compiled it out) and stays off unless a
   host sets `objectAudioRendering: .heights`. The library's notices are in
   `Rust/TrueHDObjects/THIRD-PARTY-NOTICES.md` and travel inside the
   XCFramework.
-
-#### Heights from the bed (prototype, build flag)
-
-`objectAudioRendering: .heightsFromBed` serves the same 12-channel `apac`
-rendition, built differently: **every output channel is a share of the
-stream's own 7.1 presentation** (the bed FFmpeg and `.lossless` play), and the
-objects only say where its energy belongs.
-
-- **The split.** Per STFT bin (2048-frame Hann windows, 512-frame hop), each
-  ear-level bed channel is divided between itself and the four heights. An
-  object contributes its bin power times its ear-level (floor-projected)
-  gain² into that channel, and that part goes up in proportion to the
-  object's point-panned power on each height. Shares are real, non-negative
-  and sum to one per channel and bin (energy preserving); a height fed by
-  several channels is set to the energy of its shares. Estimates are smoothed
-  over about 25 ms, so a fly-over glides instead of stepping. The LFE is the
-  bed's own.
-- **What the objects are used for.** Their audio is decoded only to measure
-  its spectrum, and their metadata is read as points at the last update block
-  of each payload: no size, divergence, snap, zones, screen anchoring,
-  elevation switch, trims or ramps. No object signal reaches an output.
-- **When there is nothing to split by.** A stream without objects, metadata
-  this reading does not take (ISF, several beds, a count mismatch), or bins
-  where no object has energy: the plain 7.1, heights silent, exactly what the
-  bed bridge plays. A channel-based immersive stream (no object metadata)
-  therefore plays its 7.1 here, where `.heights` routes its own heights.
-- **Timing.** The splitter runs 1536 frames (32 ms) behind its input inside
-  the renderer, which hides it: output sample N is still input sample N, so
-  the bridge's anchoring, seeking and fallbacks are those of `.heights`.
-- **Building it.** It needs a `TrueHDObjects` built from this source (the
-  released zip lacks `truehd_objects_open_from_bed`), so it is behind a build
-  flag: `Rust/TrueHDObjects/build-xcframework.sh --mac`, then
-  `PRISMCORE_HEIGHTS_FROM_BED=1 swift build --manifest-cache none`. Without
-  the flag `.heightsFromBed` routes like `.off`, and the diagnostic report
-  says why. `prismcore-cli serve --heights-from-bed` serves it.
-- **Measured.** On a synthetic eight-object scene whose 7.1 is the objects'
-  floor projection (`split::tests::scene_against_the_exact_render`), 0.92 % of
-  the energy lands on another speaker than in the exact point render (median
-  of 0.25 s windows; 90th percentile 1.18 %), heights within 0.15 dB. That
-  scene is the splitter's own model of how a bed is made, so it is a best
-  case; the truehd crate's public Atmos vectors carry almost no height
-  content and only show that the timeline, the fallbacks and the level of the
-  bed are kept. The splitter alone costs about 45 ms of CPU per second of
-  audio with 16 objects (M2, `cargo run --release --example splitbench`);
-  `PRISMCORE_HEIGHTS_EXPORT` renders both modes of a file to 7.1.4 CAF and
-  APAC `.mp4` for listening (`heightsListeningExport`).
 
 **Building it.** `Rust/TrueHDObjects/build-xcframework.sh` (rustup stable
 with the Apple targets; `--mac` for this Mac only) builds
@@ -857,8 +832,8 @@ tvOS 26's `…ContentSource_Passthrough` is a loudness/DRC hint, not bitstream
 passthrough. An open-source object decoder does exist (`truehdd`, Apache-2.0),
 but it is reverse-engineered, experimental and Rust, and it has no renderer.
 The one public path that carries heights, APAC 7.1.4 in HLS, is what
-`objectAudioRendering: .heights` builds on that decoder (see *TrueHD Atmos
-with heights*) — opt-in, and still awaiting a device run against an AVR.
+`objectAudioRendering: .heights` builds on that decoder, deriving the heights
+from the stream's 7.1 (see *TrueHD Atmos with heights*) — opt-in, and still awaiting a device run against an AVR.
 Without it the engine keeps what is
 keepable. The 7.1 presentation already has the objects mixed in: what is lost
 is their height and placement, not their sound. With `bridgedAudio: .lossless`

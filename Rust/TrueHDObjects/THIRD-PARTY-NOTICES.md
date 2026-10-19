@@ -16,8 +16,8 @@ Parts are adapted from **SpatialAudioBridge** by kristofferR
 
 | file | what was adapted | what changed |
 |---|---|---|
-| `src/render.rs` | the ETSI TS 103 448 source panner (point, size, divergence, snap, zones, trims), the bed routing table and the ramped gain mixer | 7.1.4 only; the DTS:X polar panner and 9.1.6 removed; absent bed speakers routed by table |
-| `src/decode.rs` | mapping TrueHD OAMD to renderer events: DAMF→room coordinates, block scheduling, trims, concealment to the next major sync, holding audio until the first metadata | TrueHD only (no DTS); unsupported presentations fall back to the bed instead of ending the session; channel-based immersive presentations are routed by label; no dialogue normalisation |
+| `src/render.rs` | the ETSI TS 103 448 source panner (point, size, divergence, snap, zones, trims), the bed routing table and the ramped gain mixer | 7.1.4 only; the DTS:X polar panner and 9.1.6 removed; absent bed speakers routed by table; since 3.7.3 size, divergence, snap, zones and trims build only with the measurement feature `exact-render`, and releases use the point panner alone (as weights for the heights split) |
+| `src/decode.rs` | mapping TrueHD OAMD to renderer events: DAMF→room coordinates, block scheduling, trims, concealment to the next major sync, holding audio until the first metadata | TrueHD only (no DTS); unsupported presentations fall back to the bed instead of ending the session; channel-based immersive presentations are routed by label; no dialogue normalisation; since 3.7.3 the event mapping, trims and held audio build only with `exact-render`, and releases keep the coordinate conversion and concealment |
 | `src/limit.rs` | the design of the peak limiter (linked gain, 2 ms linear approach, 100 ms release, −0.1 dBFS) | own implementation |
 | `build-xcframework.sh`, `scripts/mark-weak.py` | prelinking each slice to one object exporting only the C API and a weak `rust_eh_personality` | own implementation |
 
