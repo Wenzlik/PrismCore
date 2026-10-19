@@ -9,7 +9,9 @@
 //! bin power times its ear-level (floor-projected) gain² into the bed channel, and that part
 //! goes up in proportion to the object's point-panned power on each height. No object signal
 //! reaches an output, so every output sample is a linear, per-bin, non-negative real gain of
-//! bed samples: floor share + height shares = 1 per bed channel and bin (energy preserving).
+//! bed samples: floor share + height shares = 1 per bed channel and bin (energy preserving),
+//! after each bed channel has been brought to the level the objects predict for it (within
+//! ±3 dB, over seconds; see `LEVEL_SMOOTHING`).
 //! A bin no object explains stays where it is, so silence, a bed without metadata and a stream
 //! whose metadata the session ignores all come out as the plain 7.1.
 
@@ -33,6 +35,16 @@ const OUTPUTS: [usize; 11] = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11];
 /// constant of about 25 ms, so a share follows a fly-over without stepping between hops.
 const SMOOTHING: f32 = 0.65;
 const TINY: f32 = 1e-20;
+/// Level matching: the bed's channels are not always at the level the objects put into them (a
+/// TrueHD Atmos film measured its four surrounds 1.5 dB under the objects' own floor projection,
+/// steady across scenes). Per floor channel, the objects' predicted energy and the bed's own are
+/// averaged over about four seconds (one-pole per hop), the channel is scaled by the root of
+/// their ratio, held within ±3 dB, and the applied gain follows over about half a second
+/// (`LEVEL_FOLLOW`). Without a guide the gain returns to unity. A calibration, not a mix: it never
+/// moves energy between channels. (A two-second average measured the same within 0.05 %.)
+const LEVEL_SMOOTHING: f32 = 0.997_34;
+const LEVEL_FOLLOW: f32 = 0.978_9;
+const LEVEL_LIMIT_DB: f32 = 3.;
 
 /// Where one object's energy lies: its ear-level gain² into each 7.1.4 floor output, and the
 /// fraction of its point-panned power on each height (sum ≤ 1).
@@ -46,11 +58,11 @@ impl Weight {
     /// An object at a TS 103 448 room position, as a point (no size, snap or zones), with a
     /// linear gain.
     pub fn at(position: [f32; 3], gain: f32) -> Self {
-        use crate::render::{Object, object};
+        use crate::render::point_gains;
         let [x, y, z] = position.map(|v| v.clamp(0., 1.));
-        let mut ear = object(&Object::point([x, y, 0.]));
+        let mut ear = point_gains([x, y, 0.]);
         ear.iter_mut().for_each(|g| *g = *g * *g * gain * gain);
-        let placed = object(&Object::point([x, y, z]));
+        let placed = point_gains([x, y, z]);
         let total: f32 = placed.iter().map(|g| g * g).sum();
         let up = if total > 0. { HEIGHTS.map(|c| placed[c] * placed[c] / total) } else { [0.; 4] };
         Self { ear, up }
@@ -83,6 +95,10 @@ pub struct BedSplitter {
     out_spec: Vec<f32>,
     up_energy: Vec<f32>,
     power: Vec<f32>,
+    /// Level matching per floor channel: averaged predicted and bed energy, applied gain.
+    predicted: [f32; 7],
+    bed_energy: [f32; 7],
+    level: [f32; 7],
 }
 
 impl Default for BedSplitter {
@@ -109,6 +125,9 @@ impl Default for BedSplitter {
             out_spec: vec![0.; 2 * OUTPUTS.len() * BINS],
             up_energy: vec![0.; HEIGHTS.len() * BINS],
             power: vec![0.; BINS],
+            predicted: [0.; 7],
+            bed_energy: [0.; 7],
+            level: [1.; 7],
         }
     }
 }
@@ -195,7 +214,9 @@ impl BedSplitter {
         for v in self.den.iter_mut().chain(self.top.iter_mut()) {
             *v *= SMOOTHING;
         }
-        if !weights.is_empty() && weights.len() == self.objects.len() {
+        let guided = !weights.is_empty() && weights.len() == self.objects.len();
+        let mut predicted = [0f32; 7];
+        if guided {
             let placed: Vec<usize> = (0..weights.len()).filter(|&k| FLOOR.iter().any(|&c| weights[k].ear[c] > 0.)).collect();
             for two in placed.chunks(2) {
                 let objects = std::mem::take(&mut self.objects);
@@ -204,10 +225,13 @@ impl BedSplitter {
                 for (slot, &k) in two.iter().enumerate() {
                     let w = weights[k];
                     let (re, im) = (&self.pair[2 * slot], &self.pair[2 * slot + 1]);
+                    let mut total = 0.;
                     for ((p, re), im) in self.power.iter_mut().zip(re).zip(im) {
                         *p = re * re + im * im;
+                        total += *p;
                     }
                     for (j, &c) in FLOOR.iter().enumerate() {
+                        predicted[j] += w.ear[c] * total;
                         let a = w.ear[c] * (1. - SMOOTHING);
                         if a == 0. {
                             continue;
@@ -239,6 +263,7 @@ impl BedSplitter {
                 self.bed_spec[at + BINS..at + 2 * BINS].copy_from_slice(&self.pair[2 * slot + 1]);
             }
         }
+        self.match_levels(guided, predicted);
         // Each floor output is its own bed channel less what went up; each height sums the
         // shares sent to it.
         self.out_spec.fill(0.);
@@ -291,6 +316,31 @@ impl BedSplitter {
             let (acc, bed) = (&mut self.acc[c], &self.bed[c]);
             for i in 0..HOP {
                 acc[i] += bed[i];
+            }
+        }
+    }
+
+    /// Scales each floor channel's spectrum towards the level the objects predict for it.
+    fn match_levels(&mut self, guided: bool, predicted: [f32; 7]) {
+        let (a, limit) = (LEVEL_SMOOTHING, 10f32.powf(LEVEL_LIMIT_DB / 20.));
+        for j in 0..FLOOR.len() {
+            let spec = &mut self.bed_spec[2 * j * BINS..2 * (j + 1) * BINS];
+            let mut target = 1.;
+            if guided {
+                let bed: f32 = spec.iter().map(|v| v * v).sum();
+                self.predicted[j] = a * self.predicted[j] + (1. - a) * predicted[j];
+                self.bed_energy[j] = a * self.bed_energy[j] + (1. - a) * bed;
+                // A channel neither side has measurably filled keeps its gain where it is.
+                target = if self.predicted[j] > 1e-6 && self.bed_energy[j] > 1e-6 {
+                    (self.predicted[j] / self.bed_energy[j]).sqrt().clamp(1. / limit, limit)
+                } else {
+                    self.level[j]
+                };
+            }
+            self.level[j] = LEVEL_FOLLOW * self.level[j] + (1. - LEVEL_FOLLOW) * target;
+            let g = self.level[j];
+            if g != 1. {
+                spec.iter_mut().for_each(|v| *v *= g);
             }
         }
     }
@@ -511,6 +561,22 @@ mod tests {
         assert!(Weight::at([0.25, 0.25, 0.5], 1.).up.iter().all(|u| u.is_finite() && *u >= 0.));
     }
 
+    #[test]
+    fn levels_match_the_objects_within_three_decibels() {
+        // The bed's surround 1.5 dB (and then 6 dB) under the object it carries: after a few
+        // seconds the output plays at the object's level, the second clamped at +3 dB.
+        let frames = 48_000 * 12;
+        let signal = noise(frames, 11);
+        let tail = frames - 48_000 * 3..frames - FFT;
+        for (offset, expected) in [(-1.5f32, 0.), (-6., -3.)] {
+            let g = 10f32.powf(offset / 20.);
+            let bed = bed_with(4, &signal.iter().map(|x| x * g).collect::<Vec<_>>());
+            let out = run(&bed, &[signal.clone()], vec![Weight::at([0., 0.5, 0.], 1.)]);
+            let db = 10. * (energy(&out[4][tail.clone()]) / energy(&signal[tail.clone()])).log10();
+            assert!((db - expected).abs() < 0.2, "{offset} dB bed: {db:.2} dB out");
+        }
+    }
+
     /// A licence-clean scene measured against the exact point render: eight objects of
     /// overlapping coloured noise (static ones at ear level and overhead, a fly-over front to
     /// back, one circling half way up), their 7.1 fold made by panning each object's
@@ -519,7 +585,7 @@ mod tests {
     /// `cargo test --release scene -- --nocapture` prints the numbers.
     #[test]
     fn scene_against_the_exact_render() {
-        use crate::render::{Object, object};
+        use crate::render::point_gains;
         let frames = 48_000 * 8;
         let objects = 8;
         // Coloured noise: white through a one-pole low pass and a one-pole high pass, so the
@@ -568,8 +634,8 @@ mod tests {
             let mut weights = Vec::new();
             for k in 0..objects {
                 let p = position(k, start);
-                let floor = object(&Object::point([p[0], p[1], 0.]));
-                let placed = object(&Object::point(p));
+                let floor = point_gains([p[0], p[1], 0.]);
+                let placed = point_gains(p);
                 for n in start..end {
                     for c in 0..CHANNELS {
                         bed[c][n] += floor[c] * signals[k][n];

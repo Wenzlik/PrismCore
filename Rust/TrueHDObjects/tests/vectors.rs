@@ -71,28 +71,44 @@ fn a_stream_without_objects_falls_back_to_its_bed() {
 }
 
 #[test]
-fn heights_from_bed_keep_the_timeline_and_fall_back_to_the_plain_bed() {
+fn heights_keep_the_timeline_and_fall_back_to_the_plain_bed() {
     for name in ["fba_atmos_dimtrim.mlp", "fba_atmos_cbi.mlp", "fba_spliced.mlp", "fbb_6ch.mlp"] {
-        let Some((result, pcm, mode)) = decode_with(name, 4096, Session::from_bed) else { return };
+        let Some((result, pcm, mode)) = decode(name, 4096) else { return };
         assert!(result.is_ok(), "{name}: {result:?}");
-        let (_, exact, _) = decode(name, 4096).unwrap();
-        assert_eq!(pcm.len(), exact.len(), "{name}: same length as the exact path");
         assert!(pcm.iter().all(|x| x.is_finite() && x.abs() <= 1.), "{name}");
-        let (_, again, _) = decode_with(name, 317, Session::from_bed).unwrap();
+        let (_, again, _) = decode(name, 317).unwrap();
         assert_eq!(pcm, again, "{name}: independent of chunking");
+        #[cfg(feature = "exact-render")]
+        {
+            let (_, exact, _) = decode_with(name, 4096, Session::exact).unwrap();
+            assert_eq!(pcm.len(), exact.len(), "{name}: same length as the exact render");
+        }
         println!("{name}: {mode:?}");
     }
-    // No objects: the plain bed, heights silent, exactly as the object path's fallback.
-    let (_, pcm, mode) = decode_with("fbb_6ch.mlp", 4096, Session::from_bed).unwrap();
-    let (_, exact, _) = decode("fbb_6ch.mlp", 4096).unwrap();
+    // No objects: the plain bed, heights silent.
+    let (_, pcm, mode) = decode("fbb_6ch.mlp", 4096).unwrap();
     assert_eq!(mode, Mode::Bed);
-    assert_eq!(pcm, exact);
+    assert!((8..12).all(|c| energy(&pcm, c) == 0.));
+    #[cfg(feature = "exact-render")]
+    assert_eq!(pcm, decode_with("fbb_6ch.mlp", 4096, Session::exact).unwrap().1, "exactly the exact render's fallback");
+    // Channel-based immersive: it plays as its own speaker feeds, as the exact render routes
+    // them (the public vector's content is all in L, so this pins the routing, not heights).
+    let (_, cbi, _) = decode("fba_atmos_cbi.mlp", 4096).unwrap();
+    assert!(energy(&cbi, 0) > 0.);
+    #[cfg(feature = "exact-render")]
+    {
+        let (_, exact, _) = decode_with("fba_atmos_cbi.mlp", 4096, Session::exact).unwrap();
+        let worst = cbi.iter().zip(&exact).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-4, "CBI through the splitter is the routed presentation: {worst}");
+    }
 }
 
+#[cfg(feature = "exact-render")]
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: u32) -> u64;
 }
 
+#[cfg(feature = "exact-render")]
 /// CPU seconds of this thread (CLOCK_THREAD_CPUTIME_ID): a loaded machine still measures the work.
 fn cpu() -> f64 {
     unsafe { clock_gettime_nsec_np(16) as f64 / 1e9 }
@@ -102,8 +118,9 @@ fn cpu() -> f64 {
 /// energy lands on another speaker, per channel and over windows, plus CPU and the input it
 /// takes before the first output. Measurement only (prints; asserts nothing about quality).
 /// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
+#[cfg(feature = "exact-render")]
 #[test]
-fn compare_heights_from_bed_with_the_exact_render() {
+fn compare_heights_with_the_exact_render() {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(dir) = std::env::var("TRUEHD_OBJECTS_VECTORS") {
         for name in ["fba_atmos_obj.mlp", "fba_atmos_dimtrim.mlp"] {
@@ -140,8 +157,8 @@ fn compare_heights_from_bed_with_the_exact_render() {
             .unwrap();
             (pcm, cpu() - start, first.unwrap_or(fed), session.mode())
         };
-        let (exact, exact_time, exact_first, exact_mode) = run(Session::default());
-        let (bed, bed_time, bed_first, bed_mode) = run(Session::from_bed());
+        let (exact, exact_time, exact_first, exact_mode) = run(Session::exact());
+        let (bed, bed_time, bed_first, bed_mode) = run(Session::default());
         assert_eq!(exact.len(), bed.len(), "both keep the stream's length");
         let frames = exact.len() / 12;
         let seconds = frames as f64 / 48_000.;

@@ -12,6 +12,12 @@ name = "truehd_objects"
 # staticlib for the XCFramework, rlib for `cargo test`.
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# The exact object render (TS 103 448 with size, snap, zones, trims and ramps) the heights split
+# is measured against: `cargo test --features exact-render`, or a measurement framework
+# (`TRUEHD_OBJECTS_FEATURES=exact-render build-xcframework.sh --mac`). Never in a release.
+exact-render = []
+
 [dependencies]
 # The decoder SpatialAudioBridge and LibTrueHD pin: truehdd's `truehd` crate (Apache-2.0) from
 # the harletty fork, at an exact commit. TrueHD only: no DTS crate is a dependency.
