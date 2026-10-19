@@ -168,7 +168,7 @@ final class LateIndexLoader: @unchecked Sendable {
         guard let last = keyframes.last,
               SegmentPlan.indexCoversThroughEnd(
                   lastKeyframePTS: last, tickSeconds: tick,
-                  durationSeconds: durationSeconds, targetSeconds: target.segmentSeconds
+                  durationSeconds: durationSeconds, targetSeconds: SegmentPlan.witnessSeconds
               ),
               let entries = SegmentPlan.keyframePlan(
                   keyframes: keyframes, durationSeconds: durationSeconds, tickSeconds: tick,

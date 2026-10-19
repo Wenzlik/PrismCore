@@ -10,8 +10,18 @@ import Network
 /// server at scale:
 ///
 /// - **`GET` and `HEAD`**; anything else is `405`.
-/// - **Whole-payload responses** with `Content-Length` (`Range` is ignored —
-///   HLS clients fetch whole segments).
+/// - **Whole-payload responses** with `Content-Length`, and a **single byte
+///   range** (`bytes=a-b`, `a-`, `-n`) as `206` with `Content-Range`, or `416`
+///   when it starts past the end. AVPlayer fetches whole segments; a host that
+///   proxies this server (and forwards its own client's `Range`) need not hold
+///   a 4K segment in memory to answer one. Multi-range, a malformed range and
+///   any `If-Range` (this server issues no validators for one to match) are
+///   answered `200` with the whole body, which RFC 9110 allows for each. A
+///   payload still being produced past the slow-serve threshold (below) is
+///   also a whole-body `200`: its length is not known when the headers have
+///   to go, and a `206` cannot be framed without it. `HEAD` ignores `Range`
+///   (RFC 9110 defines ranges for GET only) and answers the whole body's
+///   headers.
 /// - **Keep-alive** per HTTP/1.1 default: after a response the connection loops
 ///   back to reading the next request, bounded by `Limits.maxRequestsPerConnection`
 ///   and `Limits.idleTimeout` so abandoned sockets can't pile up. `Connection:
@@ -428,6 +438,10 @@ public actor LoopbackHTTPServer {
         /// `X-PrismCore-Token`, for clients that can set headers. AirPlay
         /// receivers cannot, which is why the path prefix is the primary form.
         let token: String?
+        /// `Range`, unless an `If-Range` came with it: no validator this
+        /// server issues can match one, so the range is ignored (RFC 9110
+        /// §13.1.5) and the whole body goes out.
+        let range: String?
 
         init?(head: String) {
             let lines = head.split(separator: "\r\n", omittingEmptySubsequences: true)
@@ -440,6 +454,8 @@ public actor LoopbackHTTPServer {
             var connectionHeader: String?
             var contentLength = 0
             var tokenHeader: String?
+            var rangeHeader: String?
+            var hasIfRange = false
             for line in lines.dropFirst() {
                 guard let colon = line.firstIndex(of: ":") else { continue }
                 let name = line[..<colon].lowercased()
@@ -453,10 +469,13 @@ public actor LoopbackHTTPServer {
                 case "content-length": contentLength = Int(value) ?? 0
                 case "transfer-encoding": contentLength = value.isEmpty ? 0 : 1
                 case SessionAccessToken.headerName.lowercased(): tokenHeader = raw
+                case "range": rangeHeader = value
+                case "if-range": hasIfRange = true
                 default: break
                 }
             }
             token = tokenHeader
+            range = hasIfRange ? nil : rangeHeader
             // HTTP/1.1 keeps the connection alive unless told otherwise; 1.0 is
             // the other way round.
             if version == "HTTP/1.0" {
@@ -539,13 +558,15 @@ public actor LoopbackHTTPServer {
             return .completed
         case .data(let body, let contentType):
             _ = await sendResponse(
-                body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly, on: connection
+                body: body, contentType: contentType, range: request.range,
+                keepAlive: keepAlive, headOnly: headOnly, on: connection
             )
             return .completed
         case .pending(let pending):
             return await respondToPending(
                 pending,
                 path: path,
+                range: request.range,
                 on: connection,
                 keepAlive: keepAlive,
                 headOnly: headOnly
@@ -556,6 +577,7 @@ public actor LoopbackHTTPServer {
     private func respondToPending(
         _ pending: PendingResult,
         path: String,
+        range: String?,
         on connection: NWConnection,
         keepAlive: Bool,
         headOnly: Bool
@@ -581,7 +603,8 @@ public actor LoopbackHTTPServer {
             switch quick {
             case .data(let body, let contentType):
                 _ = await sendResponse(
-                    body: body, contentType: contentType, keepAlive: keepAlive, headOnly: headOnly, on: connection
+                    body: body, contentType: contentType, range: range,
+                    keepAlive: keepAlive, headOnly: headOnly, on: connection
                 )
             default:
                 _ = await send(Self.errorResponse(status: "404 Not Found", keepAlive: keepAlive), on: connection)
@@ -590,7 +613,9 @@ public actor LoopbackHTTPServer {
         }
 
         // Slow serve. Headers go out now, before the watchdog notices the
-        // silence. The content type has to be guessed from the path because the
+        // silence — as a whole-body 200 even when a range was asked for: a
+        // 206 needs the length the provider has not produced yet, and
+        // waiting for it is exactly what the watchdog punishes. The content type has to be guessed from the path because the
         // provider hasn't spoken yet — fine here, where the extension is the
         // authority anyway (`.m4s` / `.mp4` / `.m3u8`).
         let contentType = Self.contentType(for: URL(fileURLWithPath: path))
@@ -598,11 +623,12 @@ public actor LoopbackHTTPServer {
             resolution.cancel()
             return .aborted
         }
-        // A HEAD response carries no body, so there is nothing left to stream;
-        // the honest answer for an unknown length is the chunked framing with
-        // an immediate terminator.
+        // A HEAD response carries no body — not even the chunked framing's
+        // terminator. `Transfer-Encoding` here only says how a GET would be
+        // framed (RFC 9112 §6.1); a `0\r\n\r\n` after it would sit in a
+        // keep-alive client's buffer and be read as the start of the next
+        // response.
         if headOnly {
-            _ = await send(Self.chunkTerminator, on: connection)
             // Answered already; the wait would otherwise run on to a timeout.
             resolution.cancel()
             return .completed
@@ -666,7 +692,7 @@ public actor LoopbackHTTPServer {
         var response = "HTTP/1.1 200 OK\r\n"
         response += "Content-Type: \(contentType)\r\n"
         response += "Content-Length: \(bodyCount)\r\n"
-        response += "Accept-Ranges: none\r\n"
+        response += "Accept-Ranges: bytes\r\n"
         response += commonHeaders(keepAlive: keepAlive, contentType: contentType)
         response += "\r\n"
         return Data(response.utf8)
@@ -680,12 +706,91 @@ public actor LoopbackHTTPServer {
         return payload
     }
 
+    /// What one `Range` header asks of a body `length` bytes long.
+    enum ByteRange: Equatable {
+        /// No range, or one this server answers with the whole body.
+        case whole
+        case partial(ClosedRange<Int>)
+        /// Well-formed, but nothing of the body falls inside it: `416`.
+        case unsatisfiable
+    }
+
+    /// RFC 9110 §14.1.2, one range only. Anything this cannot parse is
+    /// `.whole`, never an error: a server may always ignore `Range`, and a
+    /// 200 is a correct answer where a wrong 416 is not.
+    static func byteRange(_ header: String?, length: Int) -> ByteRange {
+        guard let header, header.hasPrefix("bytes=") else { return .whole }
+        let spec = header.dropFirst("bytes=".count).trimmingCharacters(in: .whitespaces)
+        guard !spec.contains(","), let dash = spec.firstIndex(of: "-") else { return .whole }
+        let first = spec[..<dash]
+        let last = spec[spec.index(after: dash)...]
+        if first.isEmpty {
+            // `-n`: the final n bytes, all of a shorter body — an empty one
+            // included, which has no 206 to frame and gets its empty 200.
+            guard let suffix = Int(last), suffix >= 0 else { return .whole }
+            guard suffix > 0 else { return .unsatisfiable }
+            guard length > 0 else { return .whole }
+            return .partial(max(0, length - suffix)...(length - 1))
+        }
+        guard let start = Int(first), start >= 0 else { return .whole }
+        var end = length - 1
+        if !last.isEmpty {
+            guard let requested = Int(last), requested >= start else { return .whole }
+            end = min(requested, length - 1)
+        }
+        guard start < length else { return .unsatisfiable }
+        return .partial(start...end)
+    }
+
+    static func partialResponseHeader(
+        range: ClosedRange<Int>, length: Int, contentType: String, keepAlive: Bool
+    ) -> Data {
+        var response = "HTTP/1.1 206 Partial Content\r\n"
+        response += "Content-Type: \(contentType)\r\n"
+        response += "Content-Length: \(range.count)\r\n"
+        response += "Content-Range: bytes \(range.lowerBound)-\(range.upperBound)/\(length)\r\n"
+        response += "Accept-Ranges: bytes\r\n"
+        response += commonHeaders(keepAlive: keepAlive, contentType: contentType)
+        response += "\r\n"
+        return Data(response.utf8)
+    }
+
+    static func rangeNotSatisfiableResponse(length: Int, keepAlive: Bool) -> Data {
+        var response = "HTTP/1.1 416 Range Not Satisfiable\r\n"
+        response += "Content-Type: text/plain\r\n"
+        response += "Content-Length: 0\r\n"
+        response += "Content-Range: bytes */\(length)\r\n"
+        response += commonHeaders(keepAlive: keepAlive)
+        response += "\r\n"
+        return Data(response.utf8)
+    }
+
     /// Header, then body, as two sends on the connection. NWConnection
     /// serialises sends in order, so the wire is identical to one buffer —
     /// minus the copy of the body into it.
     private nonisolated func sendResponse(
-        body: Data, contentType: String, keepAlive: Bool, headOnly: Bool, on connection: NWConnection
+        body: Data, contentType: String, range: String? = nil,
+        keepAlive: Bool, headOnly: Bool, on connection: NWConnection
     ) async -> Bool {
+        // Range is defined for GET only; any other method ignores it (RFC
+        // 9110 §14.2), so a HEAD gets the full response's headers.
+        switch Self.byteRange(headOnly ? nil : range, length: body.count) {
+        case .whole:
+            break
+        case .unsatisfiable:
+            return await send(Self.rangeNotSatisfiableResponse(length: body.count, keepAlive: keepAlive), on: connection)
+        case .partial(let range):
+            guard await send(
+                Self.partialResponseHeader(
+                    range: range, length: body.count, contentType: contentType, keepAlive: keepAlive
+                ),
+                on: connection
+            ) else { return false }
+            if headOnly { return true }
+            // A slice, not a copy: `Data` shares the segment's storage.
+            let offset = body.startIndex
+            return await send(body[(offset + range.lowerBound)...(offset + range.upperBound)], on: connection)
+        }
         guard await send(
             Self.responseHeader(bodyCount: body.count, contentType: contentType, keepAlive: keepAlive),
             on: connection
