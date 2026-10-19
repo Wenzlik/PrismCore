@@ -1035,7 +1035,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // (`TrueHDAtmosScout`). Only when heights can engage at all; reads only, the head
         // rewind below happens either way.
         var trueHDAtmosEvidence: [Int: Bool] = [:]
-        if objectAudioRendering.rendersInThisBuild, allowsAtmosOutput, ObjectAudioRendering.isAvailable,
+        if objectAudioRendering == .heights, allowsAtmosOutput, ObjectAudioRendering.isAvailable,
            let pb = input.pointee.pb, pb.pointee.seekable != 0 {
             // A `true` claim needs no asking (see `TrueHDAtmosScout`); only the silent ones.
             let unclaimed = Set(info.audioTracks.filter { $0.codecName == "truehd" && !$0.isObjectAudio }.map(\.streamIndex))
@@ -1374,8 +1374,7 @@ final class HLSRemuxer: @unchecked Sendable {
                         track: track, carriesObjects: trueHDAtmosEvidence[track.streamIndex] ?? track.isObjectAudio,
                         mode: route.mode, rendering: objectAudioRendering,
                         allowsAtmosOutput: allowsAtmosOutput, available: ObjectAudioRendering.isAvailable
-                    ),
-                    heightsFromBed: objectAudioRendering == .heightsFromBed
+                    )
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
@@ -2714,7 +2713,7 @@ final class HLSRemuxer: @unchecked Sendable {
         track: AudioTrackInfo, carriesObjects: Bool, mode: AudioRouteMode, rendering: ObjectAudioRendering,
         allowsAtmosOutput: Bool, available: Bool
     ) -> Bool {
-        rendering.rendersInThisBuild && allowsAtmosOutput && available && mode == .bridge
+        rendering == .heights && allowsAtmosOutput && available && mode == .bridge
             && track.codecName == "truehd" && carriesObjects
             && [0, Int(HeightsBridgeConstants.sampleRate)].contains(track.sampleRate)
     }

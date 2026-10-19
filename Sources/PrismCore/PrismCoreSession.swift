@@ -948,13 +948,11 @@ public actor PrismCoreSession {
 
     /// The diagnostic report's `objectAudioRendering`: what was asked, and why it cannot run.
     static func describe(_ rendering: ObjectAudioRendering, allowsAtmosOutput: Bool) -> String {
-        guard rendering != .off else { return rendering.rawValue }
-        let name = rendering.rawValue
-        if !ObjectAudioRendering.rendererIsLinked { return "\(name) (unavailable: TrueHDObjects not linked)" }
-        if !ObjectAudioRendering.isAvailable { return "\(name) (unavailable: no APAC encoder, OS 26 needed)" }
-        if !rendering.rendersInThisBuild { return "\(name) (unavailable: built without PRISMCORE_HEIGHTS_FROM_BED)" }
-        if !allowsAtmosOutput { return "\(name) (off: the host did not allow Atmos output)" }
-        return name
+        guard rendering == .heights else { return rendering.rawValue }
+        if !ObjectAudioRendering.rendererIsLinked { return "heights (unavailable: TrueHDObjects not linked)" }
+        if !ObjectAudioRendering.isAvailable { return "heights (unavailable: no APAC encoder, OS 26 needed)" }
+        if !allowsAtmosOutput { return "heights (off: the host did not allow Atmos output)" }
+        return "heights"
     }
 
     // MARK: - Master rejection (phase 4)

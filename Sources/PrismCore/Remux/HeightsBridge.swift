@@ -102,9 +102,6 @@ final class HeightsBridge: RenditionEncoder {
     #if canImport(TrueHDObjects)
     private var session: OpaquePointer?
     #endif
-    /// `ObjectAudioRendering.heightsFromBed`: the session splits the 7.1 bed instead of
-    /// rendering the objects; everything else (timing, encoder, fallbacks) is the same.
-    private let fromBed: Bool
     /// Interleaved 7.1.4 waiting for a whole encoder packet.
     private var pending: [Float] = []
     /// The source time (1/48 000) of rendered sample 0 of this epoch; nil until a major sync.
@@ -163,8 +160,7 @@ final class HeightsBridge: RenditionEncoder {
         }
     }
 
-    init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, fromBed: Bool = false) throws {
-        self.fromBed = fromBed
+    init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational) throws {
         guard ObjectAudioRendering.rendererIsLinked else { throw Failure.notLinked }
         guard codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD else {
             throw Failure.sourceUnsupported("not TrueHD")
@@ -305,11 +301,7 @@ final class HeightsBridge: RenditionEncoder {
     private func decode(_ bytes: UnsafeBufferPointer<UInt8>, end: Bool) {
         #if canImport(TrueHDObjects)
         if session == nil {
-            #if PRISMCORE_HEIGHTS_FROM_BED
-            session = fromBed ? truehd_objects_open_from_bed() : truehd_objects_open()
-            #else
             session = truehd_objects_open()
-            #endif
         }
         guard let session else {
             fail("the renderer could not allocate a session")
@@ -472,25 +464,6 @@ extension ObjectAudioRendering {
         #else
         return false
         #endif
-    }
-
-    /// Whether this build has heights from the bed (`PRISMCORE_HEIGHTS_FROM_BED`, see
-    /// Package.swift); without it `.heightsFromBed` routes like `.off`.
-    static var heightsFromBedIsBuilt: Bool {
-        #if PRISMCORE_HEIGHTS_FROM_BED
-        return rendererIsLinked
-        #else
-        return false
-        #endif
-    }
-
-    /// Whether `self` asks for a heights rendition this build can make.
-    var rendersInThisBuild: Bool {
-        switch self {
-        case .off: return false
-        case .heights: return true
-        case .heightsFromBed: return Self.heightsFromBedIsBuilt
-        }
     }
 }
 

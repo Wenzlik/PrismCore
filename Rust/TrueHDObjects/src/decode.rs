@@ -344,8 +344,11 @@ impl Session {
         let split = self.split.get_or_insert_with(BedSplitter::default);
         // Metadata comes every few access units; the last one read stays in force until the
         // next. Anything this reading does not accept leaves no guide: the plain 7.1.
+        let mut unreadable = false;
         if let Some(metadata) = objects.oamd.last() {
-            split.set_weights(point_weights(metadata, object_pcm.len()).unwrap_or_default());
+            let weights = point_weights(metadata, object_pcm.len());
+            unreadable = weights.is_none();
+            split.set_weights(weights.unwrap_or_default());
         } else if immersive {
             split.set_weights(Vec::new());
         }
@@ -358,7 +361,13 @@ impl Session {
         split.push(&routed, &object_pcm, frames, &mut self.rendered);
         self.unit_frames = Some(frames);
         self.mode = Mode::Objects;
-        self.limit_and_flush(output)
+        self.limit_and_flush(output)?;
+        if unreadable {
+            // This unit already played unsplit; from the next major sync on, the plain bed, and
+            // the host is told the heights are gone.
+            self.fall_back("object metadata the split does not read (ISF, several beds or a count mismatch)", output)?;
+        }
+        Ok(())
     }
 
     /// Whatever the splitter still holds, out; the session continues without it.
@@ -837,6 +846,16 @@ mod tests {
         session.limiter.finish(&mut session.limited);
         session.flush(&mut sink).unwrap();
         assert_eq!(frames, 601 * 40);
+    }
+
+    #[test]
+    fn metadata_the_split_does_not_read_gives_no_guide() {
+        let mut isf = ObjectAudioMetadataPayload { object_count: 1, ..Default::default() };
+        isf.program_assignment.num_isf_objects = 1;
+        assert!(point_weights(&isf, 1).is_none());
+        // No object element at all: nothing to place either.
+        let empty = ObjectAudioMetadataPayload { object_count: 1, ..Default::default() };
+        assert!(point_weights(&empty, 1).is_none());
     }
 
     #[test]

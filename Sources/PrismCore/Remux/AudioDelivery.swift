@@ -82,13 +82,6 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 public enum ObjectAudioRendering: String, Sendable, Equatable {
     case off
     case heights
-    /// Heights from the bed: the same 7.1.4 APAC rendition, but every channel
-    /// is a share of the stream's own 7.1 presentation — split per frequency
-    /// bin between ear level and the heights by where the objects' energy
-    /// lies. No object signal reaches an output; without objects, or with
-    /// metadata the splitter does not read, it plays the plain 7.1. See the
-    /// README's *Heights from the bed*. Prototype, opt-in like `.heights`.
-    case heightsFromBed
 
     /// Whether this build and OS can render heights at all: the
     /// `TrueHDObjects` library is linked and the APAC encoder exists.
