@@ -983,8 +983,8 @@ non-root packages that disagree are settled by declaration order, so don't
 leave it to them, and assert `FFmpegBuild.capabilities.hasEAC3Encoder` once at
 launch if the AAC fallback would matter. A committed `Package.resolved` pins
 `mpvkit` by location too: regenerate it (`swift package resolve`, or Xcode's
-*Resolve Package Versions*) when taking this version, or a resolve restricted
-to the lockfile keeps upstream's binaries.
+*Resolve Package Versions*) when taking this version: a resolve restricted to
+the old lockfile (upstream's 1.0.0 pin) fails against the `1.0.1` floor.
 
 ### Which FFmpeg answered
 
@@ -1084,10 +1084,13 @@ applies. Two things are asked of you in return:
    source lives. Aether's About screen is a worked example.
 
 **FFmpeg is a separate obligation, and it is not new.** The exception covers
-PrismCore's own code only. FFmpeg stays under plain LGPL-2.1-or-later — the same
-terms every FFmpeg-based app already ships under. Whether it is linked statically
-(MPVKit's prebuilt xcframeworks) or dynamically depends on the FFmpeg build your
-app uses, and how LGPL section 6 is met depends on that choice; see
+PrismCore's own code only. FFmpeg stays under its own plain LGPL — version 3 or
+later for MPVKit's builds, which are configured `--enable-version3` (this package's
+fork included), 2.1-or-later for a build without that flag — the same terms every
+FFmpeg-based app already ships under. Whether it is linked statically (MPVKit's
+prebuilt xcframeworks) or dynamically depends on the FFmpeg build your app uses,
+and how the LGPL's combined-work section (3.0 §4, 2.1 §6) is met depends on that
+choice; see
 [`NOTICE.md`](NOTICE.md).
 
 Why LGPL rather than something permissive: `Sources/PrismCore/Remux/EAC3Syncframe.swift`

@@ -21,10 +21,14 @@ source-compatible.)
   exactly as it overrode upstream (and keeps whatever FFmpeg that checkout
   has). **Migrating:** regenerate a committed `Package.resolved` — the
   `mpvkit` pin moves to `https://github.com/Wenzlik/MPVKit.git` 1.0.1, and a
-  resolve restricted to the old lockfile keeps upstream's AAC build. A host
+  resolve restricted to the old lockfile (upstream's 1.0.0 pin) fails against
+  the floor. A host
   that depends on MPVKit directly must point that dependency at the fork:
   the root's URL wins the identity, and the `1.0.1` floor only refuses
   upstream's URL while upstream has no 1.0.1.
+- NOTICE / README: MPVKit's FFmpeg (stock and this fork) is configured
+  `--enable-version3`, so the shipped libraries are LGPL-3.0-or-later; the
+  combined-work section is 3.0 §4 (2.1 §6 before). LICENSE is unchanged.
 
 ## [3.7.2] — 2026-10-18
 

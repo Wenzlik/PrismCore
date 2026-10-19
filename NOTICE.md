@@ -46,7 +46,7 @@ FFmpeg's version.
 
 | | licence | how it is used |
 |---|---|---|
-| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
+| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ source; the MPVKit builds are configured `--enable-version3`, so the shipped libraries are **LGPL-3.0-or-later** | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
 | [MPVKit](https://github.com/mpvkit/MPVKit), through the [Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) fork | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries); the fork rebuilds FFmpeg with the `eac3` encoder and `yadif_videotoolbox`, everything else is upstream's |
 | [libdovi](https://github.com/quietvoid/dovi_tool) | MIT | Dolby Vision RPU parsing and the Profile 7 → 8.1 conversion |
 | `Rust/TrueHDObjects` ([truehdd](https://github.com/truehdd/truehdd)'s `truehd` + `oamd`, a port of [SpatialAudioBridge](https://github.com/kristofferR/SpatialAudioBridge)'s renderer, a few MIT/Apache crates) | Apache-2.0 (the crate); the linked crates' terms in its `THIRD-PARTY-NOTICES.md` | TrueHD Atmos heights; part of the default package (statically linked), used only when a host turns height rendering on (off by default) |
@@ -74,11 +74,13 @@ component is enabled.
 How FFmpeg is linked depends on the build a host uses: MPVKit's prebuilt
 xcframeworks are static libraries, so FFmpeg is linked statically into the app;
 a host that supplies dynamic FFmpeg frameworks links it dynamically. Which of the
-ways LGPL section 6 offers applies follows from that choice.
+ways the LGPL offers for a combined work (version 3 §4, which is version 2.1 §6)
+applies follows from that choice.
 
 Anything built on PrismCore inherits FFmpeg's obligations: ship the licence texts,
-say which versions you used, and meet section 6 of the LGPL for the way your build
-links FFmpeg. The Application Store Exception above covers PrismCore's own code
+say which versions you used, and meet the LGPL's combined-work section (3.0 §4 for
+MPVKit's `version3` builds, this fork's included) for the way your build links
+FFmpeg. The Application Store Exception above covers PrismCore's own code
 and does not reach FFmpeg — but nothing here makes FFmpeg's terms harder than they
 already are for any app that ships it.
 
