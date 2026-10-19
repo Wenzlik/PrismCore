@@ -32,11 +32,19 @@ let package = Package(
         .executable(name: "prismcore-cli", targets: ["prismcore-cli"]),
     ],
     dependencies: [
-        // FFmpeg (LGPL) as prebuilt xcframeworks — the same package Aether
-        // already ships for the Prism (libmpv) engine, so integrating apps add
-        // ZERO new binary dependencies. Aether overrides this with its local
-        // Vendor/MPVKitLocal fork (same package identity) at integration time.
-        .package(url: "https://github.com/mpvkit/MPVKit.git", .upToNextMinor(from: "1.0.0")),
+        // FFmpeg (LGPL) as prebuilt xcframeworks: MPVKit 1.0.0 with FFmpeg
+        // rebuilt from the same n8.1.2 source and configure line plus the
+        // `eac3` encoder (the audio bridge's EAC3 5.1; stock MPVKit falls
+        // back to AAC) and `yadif_videotoolbox`. libmpv and every other
+        // binary stay upstream's 1.0.0. The fork keeps the package identity
+        // `mpvkit` (the URL's last component) on purpose: a graph holds ONE
+        // package per identity, so a host that also uses MPVKit for libmpv
+        // still links one FFmpeg, and a host's local `MPVKit` checkout still
+        // overrides this the way it overrode upstream. The URL, not the
+        // version, is what selects the fork: a root package that names
+        // upstream's URL wins the identity, and today fails this floor only
+        // because upstream has no 1.0.1 yet. See README *Requirements*.
+        .package(url: "https://github.com/Wenzlik/MPVKit.git", .upToNextMinor(from: "1.0.1")),
     ],
     targets: [
         // A local build of the framework wins (development); otherwise the
