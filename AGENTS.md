@@ -141,6 +141,20 @@ API surface.
   which on a machine with Command Line Tools installed means no tvOS/xrOS SDK
   and a build that dies partway through. Patch `Utility.launch` to propagate it.
 
+- **FFmpeg's `configure` refuses a source path containing whitespace**
+  ("Out of tree builds are impossible with whitespace in source path"), and
+  MPVKit always builds out of tree. A volume named `T5 500GB` cannot host the
+  build directly; a sparse bundle on it, mounted at a space-free path
+  (`hdiutil attach -mountpoint /Volumes/mpvbuild …`), can.
+- **Where the shipped build comes from.** `Package.swift` resolves
+  `Wenzlik/MPVKit`: MPVKit's tag with one commit on its build scripts (the
+  `eac3` encoder, `yadif_videotoolbox`, `DEVELOPER_DIR`, a `VERSION` stamp so
+  `av_version_info()` names the build) and one on its `Package.swift` (the
+  seven FFmpeg binary targets point at the fork's release). Rebuild with
+  `make build version=<tag>` from that checkout; libmpv stays upstream's, so
+  FFmpeg's source tag and configure line must stay the ones upstream's libmpv
+  was built against.
+
 ### Muxing to fMP4 (`FMP4SegmentWriter`, `HLSRemuxer`)
 
 - **movenc defaults HEVC to `hev1`, not `hvc1`.** Apple's HLS rules want
