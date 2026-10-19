@@ -40,8 +40,9 @@ struct SourceOptions: Sendable {
     var budget: Duration?
     var display = DisplayCapabilities(isHDRReady: true, isDolbyVisionCapable: true)
     var bridgedAudio = BridgedAudioFormat.compressed
-    /// `--heights`: render TrueHD Atmos heights as if the host allowed Atmos output.
-    var heights = false
+    /// `--heights`: render TrueHD Atmos heights as if the host allowed Atmos output;
+    /// `--heights-from-bed`: the same rendition, heights split from the 7.1 bed.
+    var heights: ObjectAudioRendering = .off
     /// Everything after a bare `--`, verbatim (validate passes it on).
     var passthrough: [String] = []
 }
@@ -92,7 +93,9 @@ struct ArgumentReader {
                 }
                 options.bridgedAudio = format
             case "--heights":
-                options.heights = true
+                options.heights = .heights
+            case "--heights-from-bed":
+                options.heights = .heightsFromBed
             default:
                 if try extra(argument, &self) { continue }
                 if argument.hasPrefix("-"), argument.count > 1 {

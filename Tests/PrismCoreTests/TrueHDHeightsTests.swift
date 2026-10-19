@@ -5,6 +5,9 @@ import Libavcodec
 import Libavformat
 import Libavutil
 @testable import PrismCore
+#if canImport(TrueHDObjects)
+import TrueHDObjects
+#endif
 
 /// TrueHD Atmos with its heights (`ObjectAudioRendering.heights`): off unless asked for, routed
 /// only where every condition holds, served as a real `apac` track, and placed channel by
@@ -38,6 +41,12 @@ struct TrueHDHeightsTests {
         if ObjectAudioRendering.isAvailable {
             #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: false).contains("did not allow"))
             #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true) == "heights")
+            if ObjectAudioRendering.heightsFromBedIsBuilt {
+                #expect(PrismCoreSession.describe(.heightsFromBed, allowsAtmosOutput: true) == "heightsFromBed")
+                #expect(PrismCoreSession.describe(.heightsFromBed, allowsAtmosOutput: false).contains("did not allow"))
+            } else {
+                #expect(PrismCoreSession.describe(.heightsFromBed, allowsAtmosOutput: true).contains("PRISMCORE_HEIGHTS_FROM_BED"))
+            }
         } else {
             #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true).contains("unavailable"))
         }
@@ -56,6 +65,9 @@ struct TrueHDHeightsTests {
             )
         }
         #expect(renders())
+        #expect(renders(rendering: .heightsFromBed) == ObjectAudioRendering.heightsFromBedIsBuilt,
+                "the same rendition, split from the bed, in a build that has it")
+        #expect(!renders(rendering: .heightsFromBed, allows: false))
         #expect(!renders(rendering: .off))
         #expect(!renders(allows: false))
         #expect(!renders(available: false))
@@ -383,9 +395,10 @@ struct TrueHDHeightsTests {
     /// A real Atmos stream (one of the truehd crate's public test streams, which are not
     /// redistributable here) muxed under a test picture and served by a whole session.
     /// `PRISMCORE_TRUEHD_VECTORS` = the crate's `truehd/tests/assets` in Cargo's checkout.
-    @Test("Real Atmos (opt-in): a session serves apac and reports rendered heights")
-    func realAtmosVector() async throws {
-        guard ObjectAudioRendering.isAvailable,
+    @Test("Real Atmos (opt-in): a session serves apac and reports rendered heights",
+          arguments: [ObjectAudioRendering.heights, .heightsFromBed])
+    func realAtmosVector(rendering: ObjectAudioRendering) async throws {
+        guard ObjectAudioRendering.isAvailable, rendering.rendersInThisBuild,
               let vectors = ProcessInfo.processInfo.environment["PRISMCORE_TRUEHD_VECTORS"] else { return }
         let parent = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: parent) }
@@ -407,7 +420,7 @@ struct TrueHDHeightsTests {
         }
         let session = try PrismCoreSession(
             url: source, display: .init(isHDRReady: false, isDolbyVisionCapable: false),
-            objectAudioRendering: .heights, allowsAtmosOutput: true
+            objectAudioRendering: rendering, allowsAtmosOutput: true
         )
         let playlist = try await session.start()
         let master = try String(contentsOf: playlist, encoding: .utf8)
@@ -436,39 +449,124 @@ struct TrueHDHeightsTests {
             context.pointee.streams[$0]!.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
         })
         let stream = context.pointee.streams[index]!
-        let bridge = try HeightsBridge(codecpar: stream.pointee.codecpar, timeBase: stream.pointee.time_base)
-        var delivery: ObjectAudioDelivery?
-        bridge.onObjectAudio = { delivery = $0; _ = $1 }
+        for fromBed in [false, true] where !fromBed || ObjectAudioRendering.heightsFromBedIsBuilt {
+            avformat_seek_file(context, -1, .min, 0, 0, 0)
+            let bridge = try HeightsBridge(codecpar: stream.pointee.codecpar, timeBase: stream.pointee.time_base, fromBed: fromBed)
+            var delivery: ObjectAudioDelivery?
+            bridge.onObjectAudio = { delivery = $0; _ = $1 }
+            var packet = av_packet_alloc()
+            defer { av_packet_free(&packet) }
+            let pkt = try #require(packet)
+            var (fed, out, firstOutputAfter) = (0, 0, -1)
+            var bytes = 0
+            var cpuInFeed: UInt64 = 0
+            var worstFeed: UInt64 = 0
+            let wall = ContinuousClock.now
+            while av_read_frame(context, pkt) >= 0 {
+                defer { av_packet_unref(pkt) }
+                guard Int(pkt.pointee.stream_index) == index else { continue }
+                fed += 1
+                let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                try bridge.feed(pkt) { out += 1; bytes += Int($0.pointee.size) }
+                let spent = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before
+                cpuInFeed += spent
+                worstFeed = max(worstFeed, spent)
+                if out > 0, firstOutputAfter < 0 { firstOutputAfter = fed }
+            }
+            let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            try bridge.flush { out += 1; bytes += Int($0.pointee.size) }
+            cpuInFeed += clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before
+            let audio = Double(out * HeightsBridge.framesPerPacket) / 48_000
+            let cpu = Double(cpuInFeed) / 1e9
+            print(String(
+                format: "\(fromBed ? "heightsFromBed" : "heights") bench: %.1f s audio, %d packets in, %d APAC packets (%.0f kbit/s), %@; CPU %.2f s = %.1fx real time per core; wall %@; worst single feed %.1f ms; first APAC packet after %d input packets",
+                audio, fed, out, Double(bytes * 8) / audio / 1000, String(describing: delivery), cpu, audio / cpu,
+                String(describing: ContinuousClock.now - wall), Double(worstFeed) / 1e6, firstOutputAfter
+            ))
+            #expect(out > 0)
+        }
+    }
+
+    /// Both modes of one TrueHD Atmos source rendered to 12-channel 7.1.4 CAF files (Float32,
+    /// `kAudioChannelLayoutTag_Atmos_7_1_4`) for a listening comparison, and to APAC `.mp4`
+    /// with `afconvert` when this Mac has the encoder:
+    /// `PRISMCORE_HEIGHTS_EXPORT=/path/to/atmos.mkv [PRISMCORE_HEIGHTS_EXPORT_SECONDS=60]
+    /// swift test --filter heightsListeningExport`. Files land next to the source.
+    @Test("Heights listening export (opt-in)")
+    func heightsListeningExport() throws {
+        guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable,
+              let path = ProcessInfo.processInfo.environment["PRISMCORE_HEIGHTS_EXPORT"] else { return }
+        let limit = ProcessInfo.processInfo.environment["PRISMCORE_HEIGHTS_EXPORT_SECONDS"].flatMap(Double.init) ?? .infinity
+        let source = URL(fileURLWithPath: path)
+        for fromBed in [false, true] where !fromBed || ObjectAudioRendering.heightsFromBedIsBuilt {
+            let stem = source.deletingPathExtension().path + (fromBed ? ".heightsFromBed" : ".heights")
+            let caf = URL(fileURLWithPath: stem + ".caf")
+            try? FileManager.default.removeItem(at: caf)
+            let pcm = try exportPCM(source: source, fromBed: fromBed, seconds: limit)
+            let layout = try #require(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Atmos_7_1_4))
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: true, channelLayout: layout)
+            let file = try AVAudioFile(forWriting: caf, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: true)
+            let frames = pcm.count / 12
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)))
+            pcm.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: pcm.count) }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            try file.write(from: buffer)
+            // `mp4f`: afconvert refuses APAC in `m4af`.
+            let mp4 = stem + ".mp4"
+            try? FileManager.default.removeItem(atPath: mp4)
+            let afconvert = Process()
+            afconvert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+            afconvert.arguments = ["-f", "mp4f", "-d", "apac", "-b", "\(HeightsBridge.bitRate)", caf.path, mp4]
+            try afconvert.run()
+            afconvert.waitUntilExit()
+            print("heights export: \(caf.path) (\(Double(frames) / 48_000) s)\(afconvert.terminationStatus == 0 ? ", " + mp4 : "; afconvert failed")")
+        }
+    }
+
+    /// The renderer's interleaved 7.1.4 for a TrueHD track, through the C API the bridge uses,
+    /// from the first major sync on.
+    private func exportPCM(source: URL, fromBed: Bool, seconds: Double) throws -> [Float] {
+        #if canImport(TrueHDObjects)
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, source.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        let index = try #require((0..<Int(context.pointee.nb_streams)).first {
+            context.pointee.streams[$0]!.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
+        })
+        #if PRISMCORE_HEIGHTS_FROM_BED
+        let session = try #require(fromBed ? truehd_objects_open_from_bed() : truehd_objects_open())
+        #else
+        let session = try #require(truehd_objects_open())
+        #endif
+        defer { truehd_objects_close(session) }
+        final class Sink { var pcm: [Float] = [] }
+        let sink = Sink()
+        let context2 = Unmanaged.passUnretained(sink).toOpaque()
+        let callback: TrueHDObjectsPCM = { context, pcm, frames in
+            let sink = Unmanaged<Sink>.fromOpaque(context!).takeUnretainedValue()
+            sink.pcm.append(contentsOf: UnsafeBufferPointer(start: pcm, count: Int(frames) * 12))
+            return 0
+        }
         var packet = av_packet_alloc()
         defer { av_packet_free(&packet) }
         let pkt = try #require(packet)
-        var (fed, out, firstOutputAfter) = (0, 0, -1)
-        var bytes = 0
-        var cpuInFeed: UInt64 = 0
-        var worstFeed: UInt64 = 0
-        let wall = ContinuousClock.now
-        while av_read_frame(context, pkt) >= 0 {
+        var started = false
+        while av_read_frame(context, pkt) >= 0, Double(sink.pcm.count / 12) / 48_000 < seconds {
             defer { av_packet_unref(pkt) }
-            guard Int(pkt.pointee.stream_index) == index else { continue }
-            fed += 1
-            let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
-            try bridge.feed(pkt) { out += 1; bytes += Int($0.pointee.size) }
-            let spent = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before
-            cpuInFeed += spent
-            worstFeed = max(worstFeed, spent)
-            if out > 0, firstOutputAfter < 0 { firstOutputAfter = fed }
+            guard Int(pkt.pointee.stream_index) == index, let data = pkt.pointee.data else { continue }
+            let bytes = UnsafeBufferPointer(start: data, count: Int(pkt.pointee.size))
+            if !started { started = TrueHDMajorSync.startsWithMajorSync(bytes) }
+            guard started else { continue }
+            #expect(truehd_objects_push(session, bytes.baseAddress, bytes.count, 0, callback, context2) == 0)
         }
-        let before = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
-        try bridge.flush { out += 1; bytes += Int($0.pointee.size) }
-        cpuInFeed += clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - before
-        let audio = Double(out * HeightsBridge.framesPerPacket) / 48_000
-        let cpu = Double(cpuInFeed) / 1e9
-        print(String(
-            format: "heights bench: %.1f s audio, %d packets in, %d APAC packets (%.0f kbit/s), %@; CPU %.2f s = %.1fx real time per core; wall %@; worst single feed %.1f ms; first APAC packet after %d input packets",
-            audio, fed, out, Double(bytes * 8) / audio / 1000, String(describing: delivery), cpu, audio / cpu,
-            String(describing: ContinuousClock.now - wall), Double(worstFeed) / 1e6, firstOutputAfter
-        ))
-        #expect(out > 0)
+        #expect(truehd_objects_push(session, nil, 0, 1, callback, context2) == 0)
+        print("heights export: \(fromBed ? "heightsFromBed" : "heights") mode \(truehd_objects_mode(session))")
+        return sink.pcm
+        #else
+        return []
+        #endif
     }
 
     // MARK: - Helpers

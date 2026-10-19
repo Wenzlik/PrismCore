@@ -49,6 +49,8 @@ final class AudioRenditionWriter {
     /// of bridging its bed. Cleared when the renderer cannot be built — before the master is
     /// written, so the track is declared as what it will really be.
     private(set) var rendersHeights: Bool
+    /// With `rendersHeights`: split the 7.1 bed (`ObjectAudioRendering.heightsFromBed`).
+    let heightsFromBed: Bool
     /// The renderer's report of what is playing. Set by the remuxer.
     var onObjectAudio: ((ObjectAudioDelivery, String?) -> Void)?
     /// The APAC encoder's cookie, for the sample entry the init segment gets.
@@ -158,8 +160,10 @@ final class AudioRenditionWriter {
         lazy: Bool = false,
         suspendable: Bool = false,
         bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec,
-        rendersHeights: Bool = false
+        rendersHeights: Bool = false,
+        heightsFromBed: Bool = false
     ) {
+        self.heightsFromBed = heightsFromBed
         self.route = route
         self.rendersHeights = rendersHeights && route.mode == .bridge
         self.bridgeTarget = route.mode == .bridge ? bridgeTarget : AudioBridge.defaultTargetCodec
@@ -334,7 +338,9 @@ final class AudioRenditionWriter {
                 guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else {
                     throw HeightsUnavailable.operatingSystem
                 }
-                let heights = try HeightsBridge(codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base)
+                let heights = try HeightsBridge(
+                    codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base, fromBed: heightsFromBed
+                )
                 heightsCookie = heights.magicCookie
                 heights.onObjectAudio = { [weak self] delivery, why in self?.onObjectAudio?(delivery, why) }
                 return heights

@@ -15,6 +15,14 @@ let linksTrueHDObjects = FileManager.default.fileExists(
     atPath: Context.packageDirectory + "/" + trueHDObjectsPath
 )
 
+// Heights from the bed (`ObjectAudioRendering.heightsFromBed`, a prototype) needs a framework
+// built from this source: the released zip has no `truehd_objects_open_from_bed`. Off unless
+// asked for, and only with a local build:
+//   Rust/TrueHDObjects/build-xcframework.sh --mac
+//   PRISMCORE_HEIGHTS_FROM_BED=1 swift build --manifest-cache none
+let heightsFromBed: [SwiftSetting] = Context.environment["PRISMCORE_HEIGHTS_FROM_BED"] == "1" && linksTrueHDObjects
+    ? [.define("PRISMCORE_HEIGHTS_FROM_BED")] : []
+
 let package = Package(
     name: "PrismCore",
     platforms: [
@@ -59,7 +67,7 @@ let package = Package(
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.
                 .swiftLanguageMode(.v5),
-            ]
+            ] + heightsFromBed
         ),
         .executableTarget(
             name: "prismcore-fuzz",
@@ -88,7 +96,8 @@ let package = Package(
                 // (EAC3+JOC needs a real object-audio encode) and Dolby
                 // Vision (real RPUs) — stay manual smoke tests on real media.
                 .copy("Fixtures"),
-            ]
+            ],
+            swiftSettings: heightsFromBed
         ),
     ]
 )
