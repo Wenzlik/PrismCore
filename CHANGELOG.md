@@ -36,7 +36,7 @@ same rendition; source-compatible.
 - **Cost.** Higher than before: the Atmos presentation is decoded alongside
   the 7.1 and analysed per bin, about 55 ms of CPU per second of audio for
   decode and split on an M2 (about 20 ms before); the whole chain with the
-  APAC encoder runs about 7× real time per core. The first APAC packet comes
+  APAC encoder runs about 8× real time per core (a 3-minute film scene). The first APAC packet comes
   64 ms of audio after the first access unit (23 ms before).
 - **The previous object render** (TS 103 448 with size, snap, zones, trims,
   ramps) is built only for measurement: Cargo feature `exact-render`

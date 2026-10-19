@@ -367,7 +367,7 @@ DTS:X) is untouched.
 - **Cost.** The split decodes the Atmos presentation as well as the 7.1 and
   runs about 50 FFTs per 10.7 ms hop: decode and split take about 55 ms of
   CPU per second of audio on an M2 (the previous object render about 20 ms),
-  the whole chain with the APAC encoder about 7× real time per core. The
+  the whole chain with the APAC encoder about 8× real time per core (a 3-minute film scene). The
   first APAC packet comes 64 ms of audio after the first access unit (the
   split's 32 ms included), worst single feed 5 ms.
 - **When it does not happen.** `.off` (the default), `allowsAtmosOutput`
