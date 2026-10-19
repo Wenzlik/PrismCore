@@ -40,10 +40,10 @@ let package = Package(
         // `mpvkit` (the URL's last component) on purpose: a graph holds ONE
         // package per identity, so a host that also uses MPVKit for libmpv
         // still links one FFmpeg, and a host's local `MPVKit` checkout still
-        // overrides this the way it overrode upstream. A root package that
-        // names upstream's URL wins the identity and fails to resolve this
-        // floor (upstream has no 1.0.1) — loudly, instead of silently
-        // shipping the AAC build. See README *Requirements*.
+        // overrides this the way it overrode upstream. The URL, not the
+        // version, is what selects the fork: a root package that names
+        // upstream's URL wins the identity, and today fails this floor only
+        // because upstream has no 1.0.1 yet. See README *Requirements*.
         .package(url: "https://github.com/Wenzlik/MPVKit.git", .upToNextMinor(from: "1.0.1")),
     ],
     targets: [

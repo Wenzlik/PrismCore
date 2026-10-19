@@ -6,7 +6,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Wenzlik/MPVKit.git",
       "state" : {
-        "revision" : "2205c264a3c5ce88672b3625904ca46dc239e6b3",
+        "revision" : "fa0f4e20f1bea49a8cc35766ba8f4981e1d651c0",
         "version" : "1.0.1"
       }
     }

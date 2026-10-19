@@ -975,11 +975,16 @@ from its *directory name*, so the fork's directory has to be called `MPVKit` for
 to override the `mpvkit` identity PrismCore asks for. The fork keeps that identity
 for the same reason — SwiftPM holds one package per identity, so a host that also
 uses MPVKit for libmpv still links a single FFmpeg. Whichever URL the **root**
-package names for `mpvkit` wins: a host that depends on MPVKit directly should
-name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.1`); naming upstream's
-fails to resolve against PrismCore's `1.0.1` floor rather than quietly shipping
-the AAC build. Two non-root packages that disagree are settled by declaration
-order, so don't leave it to them.
+package names for `mpvkit` wins, so a host that depends on MPVKit directly should
+name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.1`). Naming upstream's
+fails to resolve against PrismCore's `1.0.1` floor only for as long as upstream
+has no 1.0.1 — the version is not what tells the two apart, the URL is. Two
+non-root packages that disagree are settled by declaration order, so don't
+leave it to them, and assert `FFmpegBuild.capabilities.hasEAC3Encoder` once at
+launch if the AAC fallback would matter. A committed `Package.resolved` pins
+`mpvkit` by location too: regenerate it (`swift package resolve`, or Xcode's
+*Resolve Package Versions*) when taking this version, or a resolve restricted
+to the lockfile keeps upstream's binaries.
 
 ### Which FFmpeg answered
 

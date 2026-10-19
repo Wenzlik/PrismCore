@@ -18,9 +18,13 @@ source-compatible.)
   dialogue boost and the GPU deinterlacer without a local MPVKit checkout;
   `FFmpegBuild.versionInfo` reads `n8.1.2-eac3-vt.1`. The fork keeps the
   package identity `mpvkit`, so a local `MPVKit` checkout still overrides it
-  exactly as it overrode upstream. **A host that depends on MPVKit directly**
-  must point that dependency at the fork (from `1.0.1`): the root's URL wins
-  the identity, and upstream's has no version that meets the floor.
+  exactly as it overrode upstream (and keeps whatever FFmpeg that checkout
+  has). **Migrating:** regenerate a committed `Package.resolved` — the
+  `mpvkit` pin moves to `https://github.com/Wenzlik/MPVKit.git` 1.0.1, and a
+  resolve restricted to the old lockfile keeps upstream's AAC build. A host
+  that depends on MPVKit directly must point that dependency at the fork:
+  the root's URL wins the identity, and the `1.0.1` floor only refuses
+  upstream's URL while upstream has no 1.0.1.
 
 ## [3.7.2] — 2026-10-18
 
