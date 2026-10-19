@@ -35,6 +35,14 @@ const OUTPUTS: [usize; 11] = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11];
 /// constant of about 25 ms, so a share follows a fly-over without stepping between hops.
 const SMOOTHING: f32 = 0.65;
 const TINY: f32 = 1e-20;
+/// A height bin whose coherent sum keeps less than this fraction of its shares' energy (−20 dB)
+/// is cancellation, not content: its shares stay on the floor.
+const CANCELLED: f32 = 0.01;
+/// The bed's bin power counts against the objects' only beyond this fraction (−3 dB): a single
+/// bin's power scatters around the objects' sum even when they explain it all, and comparing
+/// at par biased every share low (a synthetic scene went from 0.9 % to 7.8 % on the wrong
+/// speaker). Silent objects still hand their bins back within the smoothing.
+const UNEXPLAINED: f32 = 0.5;
 /// Level matching: the bed's channels are not always at the level the objects put into them (a
 /// TrueHD Atmos film measured its four surrounds 1.5 dB under the objects' own floor projection,
 /// steady across scenes). Per floor channel, the objects' predicted energy and the bed's own are
@@ -89,11 +97,13 @@ pub struct BedSplitter {
     re: Vec<f32>,
     im: Vec<f32>,
     /// Half spectra: two from one complex FFT (`forward2`), the bed's floor channels, and the
-    /// eleven split outputs (floor first, then heights) with the heights' share energies.
+    /// eleven split outputs (floor first, then heights).
     pair: [Vec<f32>; 4],
     bed_spec: Vec<f32>,
     out_spec: Vec<f32>,
-    up_energy: Vec<f32>,
+    /// Per bed channel, height and bin: this hop's share; and the bed's smoothed bin power.
+    share: Vec<f32>,
+    bed_power: Vec<f32>,
     power: Vec<f32>,
     /// Level matching per floor channel: averaged predicted and bed energy, applied gain.
     predicted: [f32; 7],
@@ -123,7 +133,8 @@ impl Default for BedSplitter {
             pair: std::array::from_fn(|_| vec![0.; BINS]),
             bed_spec: vec![0.; 2 * FLOOR.len() * BINS],
             out_spec: vec![0.; 2 * OUTPUTS.len() * BINS],
-            up_energy: vec![0.; HEIGHTS.len() * BINS],
+            share: vec![0.; FLOOR.len() * HEIGHTS.len() * BINS],
+            bed_power: vec![0.; FLOOR.len() * BINS],
             power: vec![0.; BINS],
             predicted: [0.; 7],
             bed_energy: [0.; 7],
@@ -264,47 +275,67 @@ impl BedSplitter {
             }
         }
         self.match_levels(guided, predicted);
-        // Each floor output is its own bed channel less what went up; each height sums the
-        // shares sent to it.
-        self.out_spec.fill(0.);
-        self.up_energy.fill(0.);
+        // Shares per bed channel, height and bin. The denominator is the larger of what the
+        // objects explain and (half) what the bed itself carries, both smoothed alike: energy no
+        // object accounts for stays on the floor, so when the objects fall silent their shares
+        // fade with the smoothing instead of holding while both sides decay together.
         let floors = FLOOR.len();
         for j in 0..floors {
             let x = 2 * j * BINS;
             for b in 0..BINS {
                 let (xr, xi) = (self.bed_spec[x + b], self.bed_spec[x + BINS + b]);
-                let den = self.den[j * BINS + b];
-                let mut floor = 1.;
-                if den > TINY {
-                    for t in 0..heights {
-                        let share = (self.top[(j * heights + t) * BINS + b] / den).clamp(0., 1.);
-                        if share > 0. {
-                            floor -= share;
-                            let g = share.sqrt();
-                            let o = 2 * (floors + t) * BINS;
-                            self.out_spec[o + b] += g * xr;
-                            self.out_spec[o + BINS + b] += g * xi;
-                            self.up_energy[t * BINS + b] += share * (xr * xr + xi * xi);
-                        }
-                    }
+                let power = &mut self.bed_power[j * BINS + b];
+                *power = SMOOTHING * *power + (1. - SMOOTHING) * (xr * xr + xi * xi);
+                let den = self.den[j * BINS + b].max(*power * UNEXPLAINED);
+                for t in 0..heights {
+                    let at = (j * heights + t) * BINS + b;
+                    self.share[at] = if den > TINY { (self.top[at] / den).clamp(0., 1.) } else { 0. };
                 }
-                let g = floor.max(0.).sqrt();
-                self.out_spec[x + b] = g * xr;
-                self.out_spec[x + BINS + b] = g * xi;
             }
         }
-        // A height fed by several bed channels sums them coherently; each bin is set to the
-        // energy of its shares, so the split stays energy preserving where they correlate.
+        // Each height sums the shares sent to it coherently, then each bin is set to the energy
+        // of its shares (energy preserving where the channels correlate). Where they cancel —
+        // anti-phase content in two channels feeding one height — no gain could restore that
+        // energy, so those shares stay on their floor channels instead.
+        self.out_spec.fill(0.);
         for t in 0..heights {
             let o = 2 * (floors + t) * BINS;
             for b in 0..BINS {
-                let (r, i) = (self.out_spec[o + b], self.out_spec[o + BINS + b]);
-                let got = r * r + i * i;
-                if got > TINY {
-                    let fix = (self.up_energy[t * BINS + b] / got).sqrt();
-                    self.out_spec[o + b] *= fix;
-                    self.out_spec[o + BINS + b] *= fix;
+                let (mut r, mut i, mut energy) = (0f32, 0f32, 0f32);
+                for j in 0..floors {
+                    let share = self.share[(j * heights + t) * BINS + b];
+                    if share > 0. {
+                        let x = 2 * j * BINS;
+                        let (xr, xi) = (self.bed_spec[x + b], self.bed_spec[x + BINS + b]);
+                        let g = share.sqrt();
+                        r += g * xr;
+                        i += g * xi;
+                        energy += share * (xr * xr + xi * xi);
+                    }
                 }
+                let got = r * r + i * i;
+                if energy <= TINY {
+                    continue;
+                }
+                if got < CANCELLED * energy {
+                    for j in 0..floors {
+                        self.share[(j * heights + t) * BINS + b] = 0.;
+                    }
+                    continue;
+                }
+                let fix = (energy / got).sqrt();
+                self.out_spec[o + b] = r * fix;
+                self.out_spec[o + BINS + b] = i * fix;
+            }
+        }
+        // Each floor output is its own bed channel less what went up.
+        for j in 0..floors {
+            let x = 2 * j * BINS;
+            for b in 0..BINS {
+                let up: f32 = (0..heights).map(|t| self.share[(j * heights + t) * BINS + b]).sum();
+                let g = (1. - up).max(0.).sqrt();
+                self.out_spec[x + b] = g * self.bed_spec[x + b];
+                self.out_spec[x + BINS + b] = g * self.bed_spec[x + BINS + b];
             }
         }
         for n in (0..OUTPUTS.len()).step_by(2) {
@@ -577,7 +608,46 @@ mod tests {
         }
     }
 
-    /// A licence-clean scene measured against the exact point render: eight objects of
+    #[test]
+    fn anti_phase_channels_keep_their_energy() {
+        // The same signal in L and, inverted, in R, each explained by an object that sends half
+        // up to each front height: the two would cancel in both heights, so their shares stay on
+        // the floor and nothing is lost.
+        let frames = 48_000 * 2;
+        let signal = noise(frames, 5);
+        let inverted: Vec<f32> = signal.iter().map(|x| -x).collect();
+        let mut bed = vec![vec![0.; frames]; CHANNELS];
+        bed[0] = signal.clone();
+        bed[1] = inverted.clone();
+        let up = [0.5, 0.5, 0., 0.];
+        let weights = vec![
+            Weight { ear: Weight::at([0., 0., 0.], 1.).ear, up },
+            Weight { ear: Weight::at([1., 0., 0.], 1.).ear, up },
+        ];
+        let out = run(&bed, &[signal, inverted], weights);
+        let range = FFT..frames - FFT;
+        let input = energy(&bed[0][range.clone()]) + energy(&bed[1][range.clone()]);
+        let total: f64 = out.iter().map(|p| energy(&p[range.clone()])).sum();
+        assert!((total / input - 1.).abs() < 0.02, "energy kept: {}", total / input);
+        let heights: f64 = HEIGHTS.iter().map(|&c| energy(&out[c][range.clone()])).sum();
+        assert!(heights / input < 0.01, "nothing went up to cancel: {}", heights / input);
+    }
+
+    #[test]
+    fn heights_return_to_the_floor_when_the_object_falls_silent() {
+        // One second of an overhead object in the bed's L, then the object goes silent while
+        // the bed carries on: within 0.1 s the heights are empty again.
+        let frames = 48_000 * 2;
+        let signal = noise(frames, 9);
+        let object: Vec<f32> = signal.iter().enumerate().map(|(n, x)| if n < 48_000 { *x } else { 0. }).collect();
+        let out = run(&bed_with(0, &signal), &[object], vec![Weight::at([0., 0., 1.], 1.)]);
+        let before = energy(&out[8][24_000..48_000]) / energy(&signal[24_000..48_000]);
+        let after = energy(&out[8][48_000 + 4_800..frames - FFT]) / energy(&signal[48_000 + 4_800..frames - FFT]);
+        assert!(before > 0.9, "up while it plays: {before}");
+        assert!(after < 0.01, "back on the floor 0.1 s after: {after}");
+    }
+
+    /// A synthetic scene measured against the exact point render: eight objects of
     /// overlapping coloured noise (static ones at ear level and overhead, a fly-over front to
     /// back, one circling half way up), their 7.1 fold made by panning each object's
     /// floor projection (an assumption about how the stream's own bed was made), and the split

@@ -31,10 +31,10 @@ use truehd::{
     utils::errors::ExtractError,
 };
 
-/// Audio held before the first object metadata: half a second at 48 kHz. Atmos repeats its
-/// metadata every few tens of milliseconds, and a stream entered at a later major sync carries
-/// its first block a few access units in.
-#[cfg(feature = "exact-render")]
+/// How long a session waits for the first object metadata: half a second at 48 kHz. Atmos
+/// repeats its metadata every few tens of milliseconds, and a stream entered at a later major
+/// sync carries its first block a few access units in. The exact render holds its audio that
+/// long; the split plays the plain 7.1 meanwhile and reports the bed after it.
 const MAX_HELD_FRAMES: usize = 24_000;
 /// FBA streams repeat their major sync at least every 128 access units.
 const MAX_SYNC_INTERVAL: usize = 128;
@@ -84,6 +84,10 @@ pub struct Session {
     #[cfg(feature = "exact-render")]
     exact: bool,
     split: Option<BedSplitter>,
+    /// Whether the split has had an object guide (readable metadata, or a channel-based
+    /// immersive presentation), and the frames it has played without one before that.
+    guided: bool,
+    unguided_frames: usize,
 }
 
 impl Default for Session {
@@ -110,6 +114,8 @@ impl Default for Session {
             #[cfg(feature = "exact-render")]
             exact: false,
             split: None,
+            guided: false,
+            unguided_frames: 0,
         }
     }
 }
@@ -171,7 +177,7 @@ impl Session {
                     continue;
                 }
             };
-            if self.mode != Mode::Bed
+            if (self.mode != Mode::Bed || self.split.is_some())
                 && let Some(sync) = &au.major_sync_info
                 && sync.substreams < 4
             {
@@ -183,7 +189,8 @@ impl Session {
                 // The widest channel presentation below the object one: 7.1 on Atmos.
                 self.bed_presentation = (sync.substreams as usize).clamp(1, 3) - 1;
             }
-            if !self.renders_objects() && self.mode != Mode::Bed {
+            // An unguided split reports the bed but keeps splitting (`note_guide`).
+            if !self.renders_objects() && (self.mode != Mode::Bed || self.split.is_some()) {
                 self.decode_from_bed(&au, restarting, output)?;
                 continue;
             }
@@ -233,7 +240,7 @@ impl Session {
         reason: &str,
         output: &mut impl FnMut(&[f32]) -> Result<(), String>,
     ) -> Result<(), String> {
-        if self.mode == Mode::Bed {
+        if self.mode == Mode::Bed && self.split.is_none() {
             return Ok(());
         }
         self.drain_split(output)?;
@@ -345,9 +352,11 @@ impl Session {
         // Metadata comes every few access units; the last one read stays in force until the
         // next. Anything this reading does not accept leaves no guide: the plain 7.1.
         let mut unreadable = false;
+        let mut guided = immersive;
         if let Some(metadata) = objects.oamd.last() {
             let weights = point_weights(metadata, object_pcm.len());
             unreadable = weights.is_none();
+            guided = !unreadable;
             split.set_weights(weights.unwrap_or_default());
         } else if immersive {
             split.set_weights(Vec::new());
@@ -360,7 +369,7 @@ impl Session {
         self.rendered.clear();
         split.push(&routed, &object_pcm, frames, &mut self.rendered);
         self.unit_frames = Some(frames);
-        self.mode = Mode::Objects;
+        self.note_guide(guided, frames);
         self.limit_and_flush(output)?;
         if unreadable {
             // This unit already played unsplit; from the next major sync on, the plain bed, and
@@ -368,6 +377,25 @@ impl Session {
             self.fall_back("object metadata the split does not read (ISF, several beds or a count mismatch)", output)?;
         }
         Ok(())
+    }
+
+    /// Heights are reported only once the split has something to go by: until the first object
+    /// metadata the mode stays pending (the plain 7.1 plays), and after half a second without
+    /// any it reports the bed, until metadata does come.
+    fn note_guide(&mut self, guided: bool, frames: usize) {
+        if guided || self.guided {
+            if !self.guided {
+                self.fallback_reason = None;
+            }
+            self.guided = true;
+            self.mode = Mode::Objects;
+            return;
+        }
+        self.unguided_frames += frames;
+        if self.unguided_frames > MAX_HELD_FRAMES && self.mode != Mode::Bed {
+            self.mode = Mode::Bed;
+            self.fallback_reason = Some("no object metadata within 0.5 s; the 7.1 plays without heights".into());
+        }
     }
 
     /// Whatever the splitter still holds, out; the session continues without it.
@@ -846,6 +874,26 @@ mod tests {
         session.limiter.finish(&mut session.limited);
         session.flush(&mut sink).unwrap();
         assert_eq!(frames, 601 * 40);
+    }
+
+    #[test]
+    fn heights_are_reported_only_with_a_guide() {
+        let mut session = Session::default();
+        session.split = Some(BedSplitter::default());
+        // Object audio without metadata: pending, then the bed after half a second.
+        for _ in 0..600 {
+            session.note_guide(false, 40);
+        }
+        assert_eq!(session.mode(), Mode::Pending);
+        session.note_guide(false, 40);
+        assert_eq!(session.mode(), Mode::Bed);
+        assert!(session.fallback_reason.as_deref().unwrap().contains("no object metadata"));
+        // Metadata after all: heights, for good.
+        session.note_guide(true, 40);
+        assert_eq!(session.mode(), Mode::Objects);
+        assert!(session.fallback_reason.is_none());
+        session.note_guide(false, 40);
+        assert_eq!(session.mode(), Mode::Objects);
     }
 
     #[test]
