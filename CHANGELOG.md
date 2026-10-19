@@ -8,6 +8,20 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- **FFmpeg comes from `Wenzlik/MPVKit` 1.0.1**, a fork of MPVKit 1.0.0 that
+  rebuilds FFmpeg alone — the same n8.1.2 source and configure line, plus the
+  `eac3` encoder and `yadif_videotoolbox` — and keeps every other binary
+  (libmpv included) upstream's. A host now gets the audio bridge's EAC3 5.1
+  (`FFmpegBuild.capabilities.audioBridgeEncoder == "eac3"`, AAC before),
+  dialogue boost and the GPU deinterlacer without a local MPVKit checkout;
+  `FFmpegBuild.versionInfo` reads `n8.1.2-eac3-vt.1`. The fork keeps the
+  package identity `mpvkit`, so a local `MPVKit` checkout still overrides it
+  exactly as it overrode upstream. **A host that depends on MPVKit directly**
+  must point that dependency at the fork (from `1.0.1`): the root's URL wins
+  the identity, and upstream's has no version that meets the floor.
+
 ## [3.7.2] — 2026-10-18
 
 TrueHD Atmos height rendering is part of the package again, as in 3.7.0;

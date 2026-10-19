@@ -164,8 +164,9 @@ public enum FFmpegBuild {
     /// media may never reach. Loud, not fatal.
     public static var isABIMatched: Bool { mismatchedLibraries.isEmpty }
 
-    /// FFmpeg's own build identity — `n8.0.1-eac3-vt.1` for the fork we ship
-    /// against, a bare `8.0.1` for a stock tarball. This is the string that
+    /// FFmpeg's own build identity — `n8.1.2-eac3-vt.1` for the MPVKit fork
+    /// this package resolves, `n8.1.2` for stock MPVKit 1.0.0, a bare `8.1.2`
+    /// for a stock tarball. This is the string that
     /// names *which* FFmpeg answered, where the version triples only describe
     /// its shape.
     public static var versionInfo: String { String(cString: av_version_info()) }

@@ -47,7 +47,7 @@ FFmpeg's version.
 | | licence | how it is used |
 |---|---|---|
 | [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ | libavformat / libavcodec / libavutil / libswresample / libswscale, for demuxing, muxing and the software decode path |
-| [MPVKit](https://github.com/mpvkit/MPVKit) | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries) |
+| [MPVKit](https://github.com/mpvkit/MPVKit), through the [Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) fork | LGPL-3.0 | supplies the above as prebuilt xcframeworks (static libraries); the fork rebuilds FFmpeg with the `eac3` encoder and `yadif_videotoolbox`, everything else is upstream's |
 | [libdovi](https://github.com/quietvoid/dovi_tool) | MIT | Dolby Vision RPU parsing and the Profile 7 → 8.1 conversion |
 | `Rust/TrueHDObjects` ([truehdd](https://github.com/truehdd/truehdd)'s `truehd` + `oamd`, a port of [SpatialAudioBridge](https://github.com/kristofferR/SpatialAudioBridge)'s renderer, a few MIT/Apache crates) | Apache-2.0 (the crate); the linked crates' terms in its `THIRD-PARTY-NOTICES.md` | TrueHD Atmos heights; part of the default package (statically linked), used only when a host turns height rendering on (off by default) |
 
@@ -66,7 +66,11 @@ acknowledgements. It decodes Dolby TrueHD with an independent implementation,
 and the feature is off unless a host turns it on.
 
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
-through MPVKit, which is where their corresponding sources and build recipes live.
+through the Wenzlik/MPVKit fork of MPVKit, which is where their corresponding
+sources and build recipes live: its build scripts, the FFmpeg tag they check out
+(`n8.1.2`) and the configure line, which every library also carries
+(`avcodec_configuration()`, `FFmpegBuild.configuration`). No GPL or nonfree
+component is enabled.
 How FFmpeg is linked depends on the build a host uses: MPVKit's prebuilt
 xcframeworks are static libraries, so FFmpeg is linked statically into the app;
 a host that supplies dynamic FFmpeg frameworks links it dynamically. Which of the

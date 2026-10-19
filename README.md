@@ -953,8 +953,13 @@ Deliberate omissions, so you don't have to read the source to find them:
 | visionOS | 1.0 |
 | Swift | 6.0 |
 
-FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s prebuilt
-xcframeworks — no FFmpeg source is redistributed here and nothing needs building.
+FFmpeg arrives as prebuilt xcframeworks through
+[Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) 1.0.1, a fork of
+[MPVKit](https://github.com/mpvkit/MPVKit) 1.0.0 that rebuilds FFmpeg alone —
+the same n8.1.2 source and configure line, plus the **`eac3` encoder** (the
+audio bridge's EAC3 5.1, and dialogue boost; stock MPVKit falls back to AAC)
+and `yadif_videotoolbox`. libmpv and every other library are upstream's 1.0.0
+binaries. No FFmpeg source is redistributed here and nothing needs building.
 Those xcframeworks are static libraries, so FFmpeg ends up linked statically into
 the app; a host that supplies dynamic FFmpeg frameworks instead links it
 dynamically.
@@ -967,7 +972,14 @@ heights*), built here from pinned Rust source and attached to the release; it is
 used only when a host turns height rendering on. One gotcha
 if that host vendors its own MPVKit fork: SPM derives a path dependency's identity
 from its *directory name*, so the fork's directory has to be called `MPVKit` for it
-to override the `mpvkit` identity PrismCore asks for.
+to override the `mpvkit` identity PrismCore asks for. The fork keeps that identity
+for the same reason — SwiftPM holds one package per identity, so a host that also
+uses MPVKit for libmpv still links a single FFmpeg. Whichever URL the **root**
+package names for `mpvkit` wins: a host that depends on MPVKit directly should
+name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.1`); naming upstream's
+fails to resolve against PrismCore's `1.0.1` floor rather than quietly shipping
+the AAC build. Two non-root packages that disagree are settled by declaration
+order, so don't leave it to them.
 
 ### Which FFmpeg answered
 
