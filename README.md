@@ -201,6 +201,13 @@ the remux path a switch also costs a rendition fetch.
   changes. A preferred track this build can neither copy nor bridge is passed
   over, because a rendition AVPlayer cannot play is worse than the wrong
   language.
+- **Picking a track, not a language.** Two English tracks — TrueHD Atmos and
+  EAC3-JOC, or a full and an SDH subtitle — cannot be told apart by language.
+  A host that already chose one passes its source stream index
+  (`preferredAudioStreamIndex:` / `preferredSubtitleStreamIndex:`, the
+  `streamIndex` of `SourceInfo`'s track); it outranks the language, and an
+  index that names nothing this build can serve falls back to the language,
+  then to the source's own order.
 
 ### How much of the cue tap a session remembers
 
@@ -580,8 +587,13 @@ Source URL ──► libavformat demux ───┼─► audio 0 ─► audio0/
 
 The segmentation is ours. MPVKit's libavformat is built without the `hls` muxer,
 so `FMP4SegmentWriter` drives the `mp4` muxer with `frag_custom` and cuts where we
-say (video keyframes at or after each 6 s boundary), and `MediaPlaylistWriter`
-turns those fragments into a playlist. Two production modes exist:
+say (video keyframes at or after each 6 s boundary — `segmentTargetDuration:`
+moves it, 1–10 s), and `MediaPlaylistWriter` turns those fragments into a
+playlist. A planned session publishes its segmentation as
+`PrismCoreSession.segmentTimeline` (each segment's start and `EXTINF` on the
+playlist timeline, and the `TARGETDURATION`), so a host that proxies the
+segments can map one back to a position instead of assuming a fixed stride.
+Two production modes exist:
 
 - **Planned (demand-driven)** — the default for seekable VOD. `SegmentPlan` maps
   every segment upfront from the demuxer's keyframe index (trusted only past two
@@ -975,8 +987,13 @@ Deliberate omissions, so you don't have to read the source to find them:
 | visionOS | 1.0 |
 | Swift | 6.0 |
 
-FFmpeg arrives through [MPVKit](https://github.com/mpvkit/MPVKit)'s prebuilt
-xcframeworks — no FFmpeg source is redistributed here and nothing needs building.
+FFmpeg arrives as prebuilt xcframeworks through
+[Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) 1.0.1, a fork of
+[MPVKit](https://github.com/mpvkit/MPVKit) 1.0.0 that rebuilds FFmpeg alone —
+the same n8.1.2 source and configure line, plus the **`eac3` encoder** (the
+audio bridge's EAC3 5.1, and dialogue boost; stock MPVKit falls back to AAC)
+and `yadif_videotoolbox`. libmpv and every other library are upstream's 1.0.0
+binaries. No FFmpeg source is redistributed here and nothing needs building.
 Those xcframeworks are static libraries, so FFmpeg ends up linked statically into
 the app; a host that supplies dynamic FFmpeg frameworks instead links it
 dynamically.
@@ -989,27 +1006,41 @@ heights*), built here from pinned Rust source and attached to the release; it is
 used only when a host turns height rendering on. One gotcha
 if that host vendors its own MPVKit fork: SPM derives a path dependency's identity
 from its *directory name*, so the fork's directory has to be called `MPVKit` for it
-to override the `mpvkit` identity PrismCore asks for.
+to override the `mpvkit` identity PrismCore asks for. The fork keeps that identity
+for the same reason — SwiftPM holds one package per identity, so a host that also
+uses MPVKit for libmpv still links a single FFmpeg. Whichever URL the **root**
+package names for `mpvkit` wins, so a host that depends on MPVKit directly should
+name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.1`). Naming upstream's
+fails to resolve against PrismCore's `1.0.1` floor only for as long as upstream
+has no 1.0.1 — the version is not what tells the two apart, the URL is. Two
+non-root packages that disagree are settled by declaration order, so don't
+leave it to them, and assert `FFmpegBuild.capabilities.hasEAC3Encoder` once at
+launch if the AAC fallback would matter. A committed `Package.resolved` pins
+`mpvkit` by location too: regenerate it (`swift package resolve`, or Xcode's
+*Resolve Package Versions*) when taking this version: a resolve restricted to
+the old lockfile (upstream's 1.0.0 pin) fails against the `1.0.1` floor.
 
 ### Which FFmpeg answered
 
 `FFmpegBuild` reports the build that is actually loaded — a line per linked
 library with the header version beside it whenever the two disagree, FFmpeg's own
 version string, and the capability answers that change what this engine does with
-a source: the `eac3` encoder (without it the audio bridge cannot run), the AV1
+a source: the `eac3` encoder (without it the audio bridge encodes AAC 5.1, which
+keeps the remux but cannot be passed through to a receiver), the AV1
 decoder and whether this device has hardware for it, dialogue boost, and the GPU
 deinterlacer:
 
 ```swift
 print(FFmpegBuild.summary)
-// FFmpeg n8.1.2
+// FFmpeg n8.1.2-eac3-vt.1
 //   libavutil 60.26.102
 //   libavcodec 62.28.102
 //   …
-//   eac3 encoder: NO — audio bridge disabled
+//   eac3 encoder: yes
+//   audio bridge: eac3
 //   av1 decoder: libdav1d (hardware: no)
-//   dialogue boost: no
-//   gpu deinterlacer: none — CPU route
+//   dialogue boost: yes
+//   gpu deinterlacer: yadif_videotoolbox
 ```
 
 Worth a line in a host's launch log and worth attaching to a bug report: half of
@@ -1088,10 +1119,13 @@ applies. Two things are asked of you in return:
    source lives. Aether's About screen is a worked example.
 
 **FFmpeg is a separate obligation, and it is not new.** The exception covers
-PrismCore's own code only. FFmpeg stays under plain LGPL-2.1-or-later — the same
-terms every FFmpeg-based app already ships under. Whether it is linked statically
-(MPVKit's prebuilt xcframeworks) or dynamically depends on the FFmpeg build your
-app uses, and how LGPL section 6 is met depends on that choice; see
+PrismCore's own code only. FFmpeg stays under its own plain LGPL — version 3 or
+later for MPVKit's builds, which are configured `--enable-version3` (this package's
+fork included), 2.1-or-later for a build without that flag — the same terms every
+FFmpeg-based app already ships under. Whether it is linked statically (MPVKit's
+prebuilt xcframeworks) or dynamically depends on the FFmpeg build your app uses,
+and how the LGPL's combined-work section (3.0 §4, 2.1 §6) is met depends on that
+choice; see
 [`NOTICE.md`](NOTICE.md).
 
 Why LGPL rather than something permissive: `Sources/PrismCore/Remux/EAC3Syncframe.swift`

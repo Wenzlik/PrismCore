@@ -335,6 +335,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     func prepare(
         input: UnsafeMutablePointer<AVFormatContext>,
         preferredLanguage: String? = nil,
+        preferredStreamIndex: Int32? = nil,
         closedCaptions: ClosedCaptionScout.Finding? = nil,
         closedCaptionLanguage: String? = nil
     ) throws -> Set<Int32> {
@@ -480,7 +481,13 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             hostOnly: hostOnly,
             renditions: Self.applyingPreferredDefault(
                 Self.withUniqueNames(descriptions),
-                preferredLanguage: preferredLanguage
+                preferredLanguage: preferredLanguage,
+                // `built` and `descriptions` are appended in step, so a
+                // track's position is its rendition's. A bitmap track kept
+                // host-only has no rendition, and names none here.
+                preferredPosition: preferredStreamIndex.flatMap { index in
+                    built.firstIndex { $0.inputIndex == index }
+                }
             )
         )
         return Set(built.compactMap(\.inputIndex)).union(hostOnly.keys)
@@ -636,11 +643,17 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     ///   a viewer who asked for Czech subtitles and got the foreign-dialogue
     ///   track would see almost nothing and conclude the preference did not
     ///   work. A forced rendition can still take it when it is the only match.
+    ///
+    /// `preferredPosition` — the rendition the host named by source stream
+    /// index — wins over the language outright: it is how a host picks one
+    /// of two same-language tracks (a full and an SDH English, say).
     static func applyingPreferredDefault(
         _ descriptions: [MasterPlaylistBuilder.SubtitleRendition],
-        preferredLanguage: String?
+        preferredLanguage: String?,
+        preferredPosition: Int? = nil
     ) -> [MasterPlaylistBuilder.SubtitleRendition] {
-        guard let index = LanguageMatch.bestIndex(
+        guard let index = preferredPosition.flatMap({ descriptions.indices.contains($0) ? $0 : nil })
+            ?? LanguageMatch.bestIndex(
             in: descriptions,
             preferred: preferredLanguage,
             language: \.language,

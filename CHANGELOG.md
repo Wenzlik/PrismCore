@@ -8,7 +8,7 @@ source-compatible.)
 
 ## [Unreleased]
 
-## [3.7.3] — 2026-10-19
+## [3.8.0] — 2026-10-19
 
 TrueHD Atmos heights are now derived from the stream's own 7.1 presentation,
 guided by the object positions. Same option (`objectAudioRendering: .heights`),
@@ -43,7 +43,7 @@ same rendition; source-compatible.
   (`truehd_objects_open_exact`), `TRUEHD_OBJECTS_FEATURES=exact-render` for a
   measurement framework and `PRISMCORE_EXACT_HEIGHTS=1` for the tests that
   use it. The released `TrueHDObjects.xcframework` does not contain it.
-- `Package.swift` resolves `TrueHDObjects.xcframework` from the 3.7.3
+- `Package.swift` resolves `TrueHDObjects.xcframework` from the 3.8.0
   release asset.
 
 ### Added
@@ -53,6 +53,92 @@ same rendition; source-compatible.
   measurement build, for listening. `cargo run --release --example
   splitbench` times the split; `TRUEHD_OBJECTS_COMPARE` compares the two
   renders on raw TrueHD in `cargo test --features exact-render`.
+
+## [3.7.3] — 2026-10-19
+
+FFmpeg with the `eac3` encoder, from the `Wenzlik/MPVKit` fork: the audio
+bridge serves EAC3 5.1 without a local MPVKit checkout. And, for a
+server-side host (one process remuxing for several clients and proxying the
+loopback server): pick tracks by stream index, byte ranges, the segmentation
+read back, and the declared field order. Source-compatible; every new
+parameter defaults to today's behaviour. A host that commits a
+`Package.resolved` must regenerate it (see Changed).
+
+### Added
+
+- **`preferredAudioStreamIndex:` / `preferredSubtitleStreamIndex:`** on every
+  `PrismCoreSession` initializer and in `Options` (carried by
+  `makeSession(changing:)`). The named source stream is the master's
+  `DEFAULT`, ahead of `preferredAudioLanguage` / `preferredSubtitleLanguage`
+  — a language cannot tell two English tracks apart (TrueHD Atmos and
+  EAC3-JOC; a full and a forced SRT). An index that names no carriable
+  track, or a subtitle stream that got no rendition, falls back to the
+  language, then to the source's order; nothing is dropped. The diagnostic
+  report's `options` records both.
+- **HTTP `Range` on `LoopbackHTTPServer`.** One range (`bytes=a-b`, `a-`,
+  `-n`) is a `206` with `Content-Range`; a range that starts past the end
+  is a `416` with `Content-Range: bytes */length`; `Accept-Ranges: bytes`
+  replaces `none`. Multi-range, malformed ranges and any `If-Range` (the
+  server issues no validators) get the whole body as a `200`, as RFC 9110
+  allows. A payload still being produced when the slow-serve threshold
+  (2 s) passes is also a whole-body `200`, chunked: its headers have to go
+  before AVPlayer's watchdog fires, and a `206` cannot be framed without
+  the length. A range on a payload that lands inside the threshold is
+  honoured. HEAD ignores `Range` (RFC 9110 defines ranges for GET only).
+- **`segmentTargetDuration:`** (whole seconds, default 6, clamped to
+  1...10) on every initializer and in `Options`. Cuts still land on the
+  first keyframe at or after each multiple, the first segment stays the
+  short one `start()` waits for, and `EXT-X-TARGETDURATION` stays the
+  ceiling of the longest `EXTINF`. The keyframe-index witnesses (coverage,
+  end) keep measuring in the 6 s they were calibrated at
+  (`SegmentPlan.witnessSeconds`): scaled with the target, a 10 s target
+  would have refused a short title's complete index and a 2 s one a 4 s-GOP
+  source's late index, turning a request for other segments into no plan.
+- **`PrismCoreSession.segmentTimeline`** (`SegmentTimeline`): a planned
+  session's segments — start and `EXTINF` on the playlist timeline, entry
+  for entry with every media playlist — plus the `TARGETDURATION`. `nil`
+  before `start()` and on a sequential session, which has no plan.
+- **`VideoTrackInfo.codedFieldOrder`** (`CodedFieldOrder`: `progressive`,
+  `tt`, `bb`, `tb`, `bt`, `unknown` — ffprobe's spellings): the field order
+  the stream declares, unverified and with the mixed orders kept apart.
+  `fieldOrder` stays the verified answer routing uses.
+
+### Changed
+
+- **FFmpeg comes from `Wenzlik/MPVKit` 1.0.1**, a fork of MPVKit 1.0.0 that
+  rebuilds FFmpeg alone — the same n8.1.2 source and configure line, plus the
+  `eac3` encoder and `yadif_videotoolbox` — and keeps every other binary
+  (libmpv included) upstream's. A host now gets the audio bridge's EAC3 5.1
+  (`FFmpegBuild.capabilities.audioBridgeEncoder == "eac3"`, AAC before),
+  dialogue boost and the GPU deinterlacer without a local MPVKit checkout;
+  `FFmpegBuild.versionInfo` reads `n8.1.2-eac3-vt.1`. The fork keeps the
+  package identity `mpvkit`, so a local `MPVKit` checkout still overrides it
+  exactly as it overrode upstream (and keeps whatever FFmpeg that checkout
+  has). **Migrating:** regenerate a committed `Package.resolved` — the
+  `mpvkit` pin moves to `https://github.com/Wenzlik/MPVKit.git` 1.0.1, and a
+  resolve restricted to the old lockfile (upstream's 1.0.0 pin) fails against
+  the floor. A host
+  that depends on MPVKit directly must point that dependency at the fork:
+  the root's URL wins the identity, and the `1.0.1` floor only refuses
+  upstream's URL while upstream has no 1.0.1.
+- NOTICE / README: MPVKit's FFmpeg (stock and this fork) is configured
+  `--enable-version3`, so the shipped libraries are LGPL-3.0-or-later; the
+  combined-work section is 3.0 §4 (2.1 §6 before). LICENSE is unchanged.
+
+### Fixed
+
+- **A slow-served HEAD no longer writes a chunk terminator.** Past the
+  slow-serve threshold a HEAD got the chunked headers *and* `0\r\n\r\n`;
+  a HEAD response has no body (RFC 9112 §6.1), so a keep-alive client read
+  those five bytes as the start of its next response. AVPlayer never sends
+  HEAD; a proxying host does.
+
+### Tests
+
+- **`ConcurrentSessionsStressTests`**: six sessions over copied, bridged
+  (TrueHD, DTS), multi-rendition and subtitled fixtures start, serve every
+  segment and stop at once in one process. Clean under Thread Sanitizer
+  (`swift test --sanitize=thread --filter ConcurrentSessionsStressTests`).
 
 ## [3.7.2] — 2026-10-18
 
@@ -3383,7 +3469,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...HEAD
+[3.8.0]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...3.8.0
 [3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3
 [3.7.2]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...3.7.2
 [3.7.1]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...3.7.1

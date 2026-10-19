@@ -321,6 +321,11 @@ final class HLSRemuxer: @unchecked Sendable {
     /// or bridge decision changes, and every track is still offered.
     private let preferredAudioLanguage: String?
     private let preferredSubtitleLanguage: String?
+    /// The host's pick by source stream index, ahead of the language: the
+    /// only way to tell two tracks of one language apart (TrueHD Atmos and
+    /// EAC3-JOC, both `eng`). Same contract as the languages otherwise.
+    private let preferredAudioStreamIndex: Int?
+    private let preferredSubtitleStreamIndex: Int?
     /// Declare the scouted caption services as in-band `CLOSED-CAPTIONS` too,
     /// instead of `NONE`. See `PrismCoreSession.Options.inBandClosedCaptions`.
     private let inBandClosedCaptions: Bool
@@ -687,6 +692,8 @@ final class HLSRemuxer: @unchecked Sendable {
         dialogueBoost: [DialogueBoostLevel] = [],
         preferredAudioLanguage: String? = nil,
         preferredSubtitleLanguage: String? = nil,
+        preferredAudioStreamIndex: Int? = nil,
+        preferredSubtitleStreamIndex: Int? = nil,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
         objectAudioRendering: ObjectAudioRendering = .off,
@@ -723,6 +730,8 @@ final class HLSRemuxer: @unchecked Sendable {
         self.dialogueBoost = dialogueBoost
         self.preferredAudioLanguage = preferredAudioLanguage
         self.preferredSubtitleLanguage = preferredSubtitleLanguage
+        self.preferredAudioStreamIndex = preferredAudioStreamIndex
+        self.preferredSubtitleStreamIndex = preferredSubtitleStreamIndex
         self.inBandClosedCaptions = inBandClosedCaptions
         self.bridgedAudio = bridgedAudio
         self.objectAudioRendering = objectAudioRendering
@@ -1024,6 +1033,7 @@ final class HLSRemuxer: @unchecked Sendable {
         let subtitleStreams = try subtitles.prepare(
             input: input,
             preferredLanguage: preferredSubtitleLanguage,
+            preferredStreamIndex: preferredSubtitleStreamIndex.flatMap { Int32(exactly: $0) },
             closedCaptions: closedCaptions,
             closedCaptionLanguage: closedCaptionLanguage
         )
@@ -1052,7 +1062,8 @@ final class HLSRemuxer: @unchecked Sendable {
         let routes = Self.routeAll(
             candidates: candidates,
             best: bestAudio >= 0 ? bestAudio : nil,
-            preferredLanguage: preferredAudioLanguage
+            preferredLanguage: preferredAudioLanguage,
+            preferredStreamIndex: preferredAudioStreamIndex.flatMap { Int32(exactly: $0) }
         )
 
         // Can this source be honestly wrapped in a master playlist at all? The
@@ -1100,7 +1111,8 @@ final class HLSRemuxer: @unchecked Sendable {
             : .muxed(Self.chooseAudio(
                 candidates: candidates,
                 best: bestAudio >= 0 ? bestAudio : nil,
-                preferredLanguage: preferredAudioLanguage
+                preferredLanguage: preferredAudioLanguage,
+                preferredStreamIndex: preferredAudioStreamIndex.flatMap { Int32(exactly: $0) }
             ))
 
         // Demand-driven mode needs a trustworthy upfront segmentation. Only a
@@ -1235,7 +1247,7 @@ final class HLSRemuxer: @unchecked Sendable {
                    lastKeyframePTS: last,
                    tickSeconds: av_q2d(stream.pointee.time_base),
                    durationSeconds: durationSeconds,
-                   targetSeconds: segmentSeconds
+                   targetSeconds: SegmentPlan.witnessSeconds
                ) {
                 let timeBase = stream.pointee.time_base
                 keyframeCache.store(.init(
@@ -2617,6 +2629,7 @@ final class HLSRemuxer: @unchecked Sendable {
         candidates: [AudioCandidate],
         best: Int32?,
         preferredLanguage: String? = nil,
+        preferredStreamIndex: Int32? = nil,
         canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
     ) -> [AudioRoute] {
         let viable: [AudioRoute] = candidates.compactMap { candidate in
@@ -2632,6 +2645,7 @@ final class HLSRemuxer: @unchecked Sendable {
                   candidates: candidates,
                   best: best,
                   preferredLanguage: preferredLanguage,
+                  preferredStreamIndex: preferredStreamIndex,
                   canBridge: canBridge
               ),
               let position = viable.firstIndex(where: { $0.index == preferred.index })
@@ -2754,6 +2768,12 @@ final class HLSRemuxer: @unchecked Sendable {
     ///
     /// Order of preference, and the reasoning:
     ///
+    /// -2. The track the host named by source stream index
+    ///    (`preferredAudioStreamIndex`), when it can be carried. A language
+    ///    cannot tell two `eng` tracks apart — TrueHD Atmos beside EAC3-JOC is
+    ///    the common case — and a host that already chose one by index has
+    ///    said more than any rung below can infer. An index that names no
+    ///    carriable track falls through to -1, the same no-op rule.
     /// -1. A track whose language matches the host's `preferredAudioLanguage`,
     ///    when there is one. Above *everything* below, including the original
     ///    soundtrack: the rungs below are the engine guessing what the viewer
@@ -2802,6 +2822,7 @@ final class HLSRemuxer: @unchecked Sendable {
         candidates: [AudioCandidate],
         best: Int32?,
         preferredLanguage: String? = nil,
+        preferredStreamIndex: Int32? = nil,
         canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
     ) -> AudioRoute? {
         /// How this track would be carried, or `nil` when it cannot be.
@@ -2820,6 +2841,12 @@ final class HLSRemuxer: @unchecked Sendable {
         // back nothing and skip the remaining rungs entirely, turning a
         // preference into silence.
         let carriable = candidates.filter { route($0) != nil }
+        // Rung -2, under the same carriable rule.
+        if let preferredStreamIndex,
+           let named = carriable.first(where: { $0.index == preferredStreamIndex }),
+           let route = route(named) {
+            return route
+        }
         if let index = LanguageMatch.bestIndex(
             in: carriable,
             preferred: preferredLanguage,

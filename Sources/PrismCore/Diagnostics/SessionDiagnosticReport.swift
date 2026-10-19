@@ -221,6 +221,12 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
         /// (`heights (unavailable: …)`); which tracks rendered them is each
         /// track's `objectAudio`.
         public var objectAudioRendering: String? = nil
+        /// The host's picks by source stream index, which outrank the
+        /// languages above — without them a report would name a language
+        /// the DEFAULT track may not have been chosen by.
+        public var preferredAudioStreamIndex: Int? = nil
+        public var preferredSubtitleStreamIndex: Int? = nil
+        public var segmentTargetDuration: Int? = nil
 
         public struct Display: Sendable, Equatable, Codable {
             public var isHDRReady: Bool

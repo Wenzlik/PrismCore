@@ -313,6 +313,37 @@ public struct VideoTrackInfo: Sendable, Equatable {
         }
     }
 
+    /// The field order as the stream *declares* it (`AVCodecParameters
+    /// .field_order`), unverified and unfolded — the value ffprobe prints as
+    /// `field_order`, with its spelling. `tb` and `bt` are coded in one field
+    /// order and displayed in the other; `FieldOrder` folds them into the
+    /// coded one, which is what a deinterlacer's parity wants.
+    ///
+    /// Routing never reads this: a broadcast H.264 stream flagged `tt` is
+    /// usually progressive pictures in interlaced carriage, which is why
+    /// `fieldOrder` is verified against decoded frames. It is here for a host
+    /// that keeps its own ffprobe-shaped record and should not need ffprobe
+    /// to fill it.
+    public enum CodedFieldOrder: String, Sendable, Equatable {
+        case progressive
+        case tt
+        case bb
+        case tb
+        case bt
+        case unknown
+
+        init(_ order: AVFieldOrder) {
+            switch order {
+            case AV_FIELD_PROGRESSIVE: self = .progressive
+            case AV_FIELD_TT: self = .tt
+            case AV_FIELD_BB: self = .bb
+            case AV_FIELD_TB: self = .tb
+            case AV_FIELD_BT: self = .bt
+            default: self = .unknown
+            }
+        }
+    }
+
     /// A pixel (sample) aspect ratio, kept rational — `64/45` is exact where
     /// `1.4222…` is not.
     public struct AspectRatio: Sendable, Equatable {
@@ -353,6 +384,8 @@ public struct VideoTrackInfo: Sendable, Equatable {
     /// native path honestly — AVPlayer does not deinterlace, so a stream-copy
     /// would play with combing — which is why `copyability` reflects this.
     public let fieldOrder: FieldOrder
+    /// The declared field order, before verification; see `CodedFieldOrder`.
+    public let codedFieldOrder: CodedFieldOrder
     public let hevcConfiguration: HEVCConfigurationRecord?
     /// The `avcC` bytes, for H.264 sources (`nil` for anything else).
     public let avcConfiguration: AVCConfigurationRecord?
@@ -397,7 +430,8 @@ public struct VideoTrackInfo: Sendable, Equatable {
         nalUnitLengthSize: Int?,
         dolbyVision: DolbyVisionConfiguration?,
         dynamicRange: DynamicRange,
-        copyability: StreamCopyability
+        copyability: StreamCopyability,
+        codedFieldOrder: CodedFieldOrder = .unknown
     ) {
         self.streamIndex = streamIndex
         self.codecName = codecName
@@ -416,6 +450,7 @@ public struct VideoTrackInfo: Sendable, Equatable {
         self.frameRateSource = frameRateSource
         self.bitRate = bitRate
         self.fieldOrder = fieldOrder
+        self.codedFieldOrder = codedFieldOrder
         self.hevcConfiguration = hevcConfiguration
         self.avcConfiguration = avcConfiguration
         self.av1Configuration = av1Configuration
@@ -1261,7 +1296,8 @@ public enum SourceProbe {
             dolbyVision: dolbyVision,
             dynamicRange: dynamicRange,
             copyability: isVideoStreamCopyable(par.codec_id) && !interlacedVerdict
-                ? .streamCopy : .unsupported
+                ? .streamCopy : .unsupported,
+            codedFieldOrder: VideoTrackInfo.CodedFieldOrder(par.field_order)
         )
     }
 
