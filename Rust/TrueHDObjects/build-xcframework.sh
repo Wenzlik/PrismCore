@@ -4,6 +4,7 @@
 #
 #   Rust/TrueHDObjects/build-xcframework.sh           # all slices
 #   Rust/TrueHDObjects/build-xcframework.sh --mac     # this Mac's slice only (fast, for tests)
+#   TRUEHD_OBJECTS_FEATURES=exact-render …  --mac     # measurement build with the exact render
 #
 # Output: Rust/TrueHDObjects/build/ (git-ignored). Package.swift links the framework when it is
 # there; without it PrismCore builds as before and TrueHD keeps its 7.1 bridge.
@@ -57,7 +58,8 @@ prelink() {
 
 for target in "${TARGETS[@]}"; do
     # Only the staticlib: next to the rlib that `cargo test` uses, Cargo would skip LTO.
-    cargo rustc --release --locked --manifest-path "$CRATE/Cargo.toml" --target "$target" --lib --crate-type staticlib
+    cargo rustc --release --locked --manifest-path "$CRATE/Cargo.toml" --target "$target" --lib --crate-type staticlib \
+        ${TRUEHD_OBJECTS_FEATURES:+--features "$TRUEHD_OBJECTS_FEATURES"}
     prelink "$target"
 done
 

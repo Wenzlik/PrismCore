@@ -27,9 +27,10 @@ protocol RenditionEncoder: AnyObject {
 
 extension AudioBridge: RenditionEncoder {}
 
-/// TrueHD Atmos with its heights: the object presentation decoded and rendered to 7.1.4 by the
-/// Rust `TrueHDObjects` library (truehdd's decoder, an ETSI TS 103 448 renderer), encoded to
-/// Apple Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
+/// TrueHD Atmos with its heights: 7.1.4 derived from the stream's own 7.1 presentation by the
+/// Rust `TrueHDObjects` library (truehdd's decoder; each 7.1 channel split per frequency bin
+/// between ear level and the heights by where the objects' energy lies), encoded to Apple
+/// Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
 ///
 /// ## Why APAC
 ///
@@ -55,13 +56,14 @@ extension AudioBridge: RenditionEncoder {}
 ///   AVAssetWriter stamps its own APAC fragments — the first at the source time minus 2048
 ///   frames — so the first source sample plays at its own time; the muxer's edit list trims
 ///   the head as it does for AAC's priming.
-/// - **256 kbps per channel** (3.07 Mbit/s for 7.1.4), as SpatialAudioBridge chose. CPU: about
+/// - **256 kbps per channel** (3.07 Mbit/s for 7.1.4). CPU: about
 ///   14× real time per core for the encoder on an M2 (synthetic 7.1.4).
 ///
 /// ## Timing
 ///
 /// The renderer's output is contiguous from the first sample of the first access unit it is
-/// given — audio held for metadata, concealed and fallback audio all keep their length — so the
+/// given — concealed and fallback audio keep their length, and the split's own 32 ms delay is
+/// hidden inside the library — so the
 /// clock is one anchor, the PTS of the first fed packet, plus a sample count. Decoding has to
 /// start at a major sync, so after a start or a seek packets are skipped until one (at most 128
 /// access units, 107 ms). A jump in the source's timestamps re-anchors like a seek.
@@ -69,8 +71,8 @@ extension AudioBridge: RenditionEncoder {}
 /// ## Failure never interrupts playback
 ///
 /// The rendition's codec is promised in the master before the first packet, so nothing after
-/// that may change it. A stream the renderer cannot place (no objects, ISF, several beds, …)
-/// plays its own channel presentation, routed into 7.1.4 with silent heights, and reports
+/// that may change it. A stream the split has nothing to go by for (no objects, ISF, several
+/// beds, …) plays its own channel presentation, routed into 7.1.4 with silent heights, and reports
 /// `ObjectAudioDelivery.notPreserved`. A stream the decoder cannot decode at all plays as
 /// silence up to each packet's end on the source clock and says so in the log. An encoder
 /// failure restarts the encoder at the next major sync. Nothing here throws but the muxer.

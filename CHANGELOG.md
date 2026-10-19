@@ -8,6 +8,52 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-10-19
+
+TrueHD Atmos heights are now derived from the stream's own 7.1 presentation,
+guided by the object positions. Same option (`objectAudioRendering: .heights`),
+same rendition; source-compatible.
+
+### Changed
+
+- **How `.heights` builds 7.1.4.** Every output is a share of the stream's
+  7.1 presentation (the bed `.lossless` plays). Per STFT bin, each ear-level
+  channel is split between itself and the four heights by how much of that
+  bin's energy comes from objects above ear level; object positions are read
+  as points, and no object signal reaches an output. Each floor channel's
+  level is matched to what the objects put into it (about 4 s, within ±3 dB).
+  A height bin whose shares would cancel (anti-phase channels) keeps them on
+  the floor, and shares fade back to the floor within the smoothing when the
+  objects fall silent. A channel-based immersive presentation plays as its
+  own feeds; a stream without objects, with metadata the split does not
+  read, or without object metadata for half a second (the 7.1 plays
+  meanwhile) plays its 7.1 with silent heights and reports `.notPreserved`,
+  as before (`Rust/TrueHDObjects/src/split.rs`).
+- **Measured against the previous object render** on two scenes of a TrueHD
+  Atmos film (0.25 s windows with height content): 1.0 % of the energy on
+  another speaker (median; p90 2.4 % / 1.8 %), heights within 0.1 dB
+  (median), floor channels within 0.3 dB over each clip.
+- **Cost.** Higher than before: the Atmos presentation is decoded alongside
+  the 7.1 and analysed per bin, about 55 ms of CPU per second of audio for
+  decode and split on an M2 (about 20 ms before); the whole chain with the
+  APAC encoder runs about 8× real time per core (a 3-minute film scene). The first APAC packet comes
+  64 ms of audio after the first access unit (23 ms before).
+- **The previous object render** (TS 103 448 with size, snap, zones, trims,
+  ramps) is built only for measurement: Cargo feature `exact-render`
+  (`truehd_objects_open_exact`), `TRUEHD_OBJECTS_FEATURES=exact-render` for a
+  measurement framework and `PRISMCORE_EXACT_HEIGHTS=1` for the tests that
+  use it. The released `TrueHDObjects.xcframework` does not contain it.
+- `Package.swift` resolves `TrueHDObjects.xcframework` from the 3.8.0
+  release asset.
+
+### Added
+
+- `heightsListeningExport` (opt-in, `PRISMCORE_HEIGHTS_EXPORT`): a file's
+  heights as 7.1.4 CAF and APAC `.mp4`, plus the exact render in a
+  measurement build, for listening. `cargo run --release --example
+  splitbench` times the split; `TRUEHD_OBJECTS_COMPARE` compares the two
+  renders on raw TrueHD in `cargo test --features exact-render`.
+
 ## [3.7.3] — 2026-10-19
 
 FFmpeg with the `eac3` encoder, from the `Wenzlik/MPVKit` fork: the audio
@@ -3423,7 +3469,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...HEAD
+[3.8.0]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...3.8.0
 [3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3
 [3.7.2]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...3.7.2
 [3.7.1]: https://github.com/Wenzlik/PrismCore/compare/3.7.0...3.7.1

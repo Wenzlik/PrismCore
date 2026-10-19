@@ -11,8 +11,13 @@
 
 use crate::{
     limit::Limiter,
-    render::{self, CHANNELS, Event, Gains, Object, Renderer, Speaker},
+    render::{self, CHANNELS, Renderer, Speaker},
+    split::{BedSplitter, Weight},
 };
+#[cfg(feature = "exact-render")]
+use crate::render::{Event, Gains, Object};
+#[cfg(feature = "exact-render")]
+use truehd::structs::oamd::TrimElement;
 use truehd::{
     process::{
         decode::{DecodedAccessUnit, Decoder},
@@ -21,14 +26,15 @@ use truehd::{
     },
     structs::{
         channel::ChannelLabel,
-        oamd::{ObjectAudioMetadataPayload, TrimElement},
+        oamd::ObjectAudioMetadataPayload,
     },
     utils::errors::ExtractError,
 };
 
-/// Audio held before the first object metadata: half a second at 48 kHz. Atmos repeats its
-/// metadata every few tens of milliseconds, and a stream entered at a later major sync carries
-/// its first block a few access units in.
+/// How long a session waits for the first object metadata: half a second at 48 kHz. Atmos
+/// repeats its metadata every few tens of milliseconds, and a stream entered at a later major
+/// sync carries its first block a few access units in. The exact render holds its audio that
+/// long; the split plays the plain 7.1 meanwhile and reports the bed after it.
 const MAX_HELD_FRAMES: usize = 24_000;
 /// FBA streams repeat their major sync at least every 128 access units.
 const MAX_SYNC_INTERVAL: usize = 128;
@@ -73,6 +79,15 @@ pub struct Session {
     unit_frames: Option<usize>,
     rendered: Vec<f32>,
     limited: Vec<f32>,
+    /// The exact object render (measurement builds only); otherwise the 7.1 presentation is
+    /// split per bin, guided by where the objects' energy lies (`split`).
+    #[cfg(feature = "exact-render")]
+    exact: bool,
+    split: Option<BedSplitter>,
+    /// Whether the split has had an object guide (readable metadata, or a channel-based
+    /// immersive presentation), and the frames it has played without one before that.
+    guided: bool,
+    unguided_frames: usize,
 }
 
 impl Default for Session {
@@ -96,11 +111,29 @@ impl Default for Session {
             unit_frames: None,
             rendered: Vec::new(),
             limited: Vec::new(),
+            #[cfg(feature = "exact-render")]
+            exact: false,
+            split: None,
+            guided: false,
+            unguided_frames: 0,
         }
     }
 }
 
 impl Session {
+    /// The exact object render the heights split is measured against (measurement builds).
+    #[cfg(feature = "exact-render")]
+    pub fn exact() -> Self {
+        Self { exact: true, ..Self::default() }
+    }
+
+    fn renders_objects(&self) -> bool {
+        #[cfg(feature = "exact-render")]
+        return self.exact;
+        #[cfg(not(feature = "exact-render"))]
+        false
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -144,7 +177,7 @@ impl Session {
                     continue;
                 }
             };
-            if self.mode != Mode::Bed
+            if (self.mode != Mode::Bed || self.split.is_some())
                 && let Some(sync) = &au.major_sync_info
                 && sync.substreams < 4
             {
@@ -155,6 +188,11 @@ impl Session {
             if let Some(sync) = &au.major_sync_info {
                 // The widest channel presentation below the object one: 7.1 on Atmos.
                 self.bed_presentation = (sync.substreams as usize).clamp(1, 3) - 1;
+            }
+            // An unguided split reports the bed but keeps splitting (`note_guide`).
+            if !self.renders_objects() && (self.mode != Mode::Bed || self.split.is_some()) {
+                self.decode_from_bed(&au, restarting, output)?;
+                continue;
             }
             let presentation = if self.mode == Mode::Bed { self.bed_presentation } else { ATMOS_PRESENTATION };
             if let Err(e) = self.decoder.decode_presentation_into(&au, presentation, &mut self.decoded) {
@@ -188,6 +226,7 @@ impl Session {
             if self.held_frames > 0 {
                 self.fall_back("the stream ended before its first object metadata", output)?;
             }
+            self.drain_split(output)?;
             self.limiter.finish(&mut self.limited);
             self.flush(output)?;
         }
@@ -201,9 +240,10 @@ impl Session {
         reason: &str,
         output: &mut impl FnMut(&[f32]) -> Result<(), String>,
     ) -> Result<(), String> {
-        if self.mode == Mode::Bed {
+        if self.mode == Mode::Bed && self.split.is_none() {
             return Ok(());
         }
+        self.drain_split(output)?;
         self.fallback_reason = Some(reason.into());
         self.mode = Mode::Bed;
         self.switching = true;
@@ -256,7 +296,113 @@ impl Session {
     fn silence(&mut self, frames: usize, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
         self.renderer.sample += frames as u64;
         self.rendered.clear();
-        self.rendered.resize(frames * CHANNELS, 0.);
+        if let Some(split) = self.split.as_mut() {
+            // Through the splitter, which delays what it holds: silence takes its turn.
+            split.push(&vec![0.; frames * CHANNELS], &[], frames, &mut self.rendered);
+        } else {
+            self.rendered.resize(frames * CHANNELS, 0.);
+        }
+        self.limit_and_flush(output)
+    }
+
+    /// One access unit of heights from the bed: the bed and object presentations decoded
+    /// together (the objects only to learn where their energy lies), the bed routed by its labels
+    /// and split.
+    fn decode_from_bed(
+        &mut self,
+        au: &truehd::structs::access_unit::AccessUnit,
+        restarting: Option<String>,
+        output: &mut impl FnMut(&[f32]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut wanted = [false; 4];
+        wanted[self.bed_presentation] = true;
+        wanted[ATMOS_PRESENTATION] = true;
+        let decoded = match self.decoder.decode_presentations(au, &wanted) {
+            Ok(d) => d,
+            Err(e) => return self.lose(restarting, format!("TrueHD decoding: {e}"), output),
+        };
+        let (Some(bed), Some(objects)) = (&decoded[self.bed_presentation], &decoded[ATMOS_PRESENTATION]) else {
+            return self.lose(restarting, "TrueHD decoding: a presentation is missing".into(), output);
+        };
+        if bed.is_duplicate {
+            return Ok(());
+        }
+        if bed.sampling_frequency != 48_000 {
+            return Err("only 48 kHz TrueHD is rendered".into());
+        }
+        let frames = bed.sample_length;
+        let planar = |d: &DecodedAccessUnit| -> Vec<Vec<f32>> {
+            (0..d.channel_count).map(|ch| (0..frames).map(|s| d.pcm_data[s][ch] as f32 / 8_388_608.).collect()).collect()
+        };
+        let (mut bed_pcm, mut object_pcm) = (planar(bed), planar(objects));
+        let mut labels: Vec<Speaker> = if bed.channel_labels.len() == bed_pcm.len() {
+            bed.channel_labels.iter().map(|l| speaker(*l)).collect()
+        } else {
+            default_speakers(bed_pcm.len())
+        };
+        // A channel-based immersive presentation (every channel labelled, 7.1.4-style, no
+        // object metadata) is already speaker feeds: it plays as itself, through the splitter
+        // without a guide so the timeline is the same, and nothing is split.
+        let immersive = objects.channel_labels.len() == object_pcm.len() && objects.oamd.is_empty();
+        if immersive {
+            labels = objects.channel_labels.iter().map(|l| speaker(*l)).collect();
+            bed_pcm = std::mem::take(&mut object_pcm);
+        }
+        let split = self.split.get_or_insert_with(BedSplitter::default);
+        // Metadata comes every few access units; the last one read stays in force until the
+        // next. Anything this reading does not accept leaves no guide: the plain 7.1.
+        let mut unreadable = false;
+        let mut guided = immersive;
+        if let Some(metadata) = objects.oamd.last() {
+            let weights = point_weights(metadata, object_pcm.len());
+            unreadable = weights.is_none();
+            guided = !unreadable;
+            split.set_weights(weights.unwrap_or_default());
+        } else if immersive {
+            split.set_weights(Vec::new());
+        }
+        for (channel, speaker) in labels.into_iter().enumerate() {
+            self.renderer.route(channel, render::bed(speaker));
+        }
+        let mut routed = Vec::with_capacity(frames * CHANNELS);
+        self.renderer.render(&bed_pcm, frames, &mut routed);
+        self.rendered.clear();
+        split.push(&routed, &object_pcm, frames, &mut self.rendered);
+        self.unit_frames = Some(frames);
+        self.note_guide(guided, frames);
+        self.limit_and_flush(output)?;
+        if unreadable {
+            // This unit already played unsplit; from the next major sync on, the plain bed, and
+            // the host is told the heights are gone.
+            self.fall_back("object metadata the split does not read (ISF, several beds or a count mismatch)", output)?;
+        }
+        Ok(())
+    }
+
+    /// Heights are reported only once the split has something to go by: until the first object
+    /// metadata the mode stays pending (the plain 7.1 plays), and after half a second without
+    /// any it reports the bed, until metadata does come.
+    fn note_guide(&mut self, guided: bool, frames: usize) {
+        if guided || self.guided {
+            if !self.guided {
+                self.fallback_reason = None;
+            }
+            self.guided = true;
+            self.mode = Mode::Objects;
+            return;
+        }
+        self.unguided_frames += frames;
+        if self.unguided_frames > MAX_HELD_FRAMES && self.mode != Mode::Bed {
+            self.mode = Mode::Bed;
+            self.fallback_reason = Some("no object metadata within 0.5 s; the 7.1 plays without heights".into());
+        }
+    }
+
+    /// Whatever the splitter still holds, out; the session continues without it.
+    fn drain_split(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+        let Some(mut split) = self.split.take() else { return Ok(()) };
+        self.rendered.clear();
+        split.finish(&mut self.rendered);
         self.limit_and_flush(output)
     }
 
@@ -286,20 +432,27 @@ impl Session {
             self.renderer.render(&input, frames, &mut self.rendered);
             return self.limit_and_flush(output);
         }
-        let oamd = std::mem::take(&mut self.decoded.oamd);
-        let result = self.emit_objects(input, frames, &oamd, output);
-        self.decoded.oamd = oamd;
-        match result {
-            Err(Unsupported(reason)) => {
-                // Nothing of this unit was rendered; it plays as silence and the bed takes
-                // over at the next major sync.
-                self.fall_back(&reason, output)?;
-                self.silence(frames, output)
+        #[cfg(feature = "exact-render")]
+        {
+            let oamd = std::mem::take(&mut self.decoded.oamd);
+            let result = self.emit_objects(input, frames, &oamd, output);
+            self.decoded.oamd = oamd;
+            match result {
+                Err(Unsupported(reason)) => {
+                    // Nothing of this unit was rendered; it plays as silence and the bed takes
+                    // over at the next major sync.
+                    self.fall_back(&reason, output)?;
+                    self.silence(frames, output)
+                }
+                Ok(r) => r,
             }
-            Ok(r) => r,
         }
+        // Only the bed reaches here without the exact render (`push` splits everything else).
+        #[cfg(not(feature = "exact-render"))]
+        unreachable!("object presentation without the exact render")
     }
 
+#[cfg(feature = "exact-render")]
     fn emit_objects(
         &mut self,
         input: Vec<Vec<f32>>,
@@ -373,9 +526,11 @@ impl Session {
     }
 }
 
+#[cfg(feature = "exact-render")]
 /// Metadata the renderer does not place; the session falls back to the bed.
 pub struct Unsupported(pub String);
 
+#[cfg(feature = "exact-render")]
 impl From<&str> for Unsupported {
     fn from(reason: &str) -> Self {
         Self(reason.into())
@@ -420,6 +575,7 @@ fn speaker(label: ChannelLabel) -> Speaker {
     }
 }
 
+#[cfg(feature = "exact-render")]
 struct BlockEvent {
     block: usize,
     channel: usize,
@@ -427,6 +583,7 @@ struct BlockEvent {
     event: Event,
 }
 
+#[cfg(feature = "exact-render")]
 /// Validates one OAMD payload and yields the target gains of every channel in every update
 /// block, scheduled from `sample` (the renderer's position at the start of this unit).
 fn for_each_block(
@@ -529,6 +686,68 @@ fn for_each_block(
     Ok(())
 }
 
+/// Where each object of one OAMD payload sits at its last update block, as a point: no size,
+/// snap, zones, screen anchoring, elevation switch or ramps (the split only needs to know where
+/// energy lies). `None` for metadata this reading does not take; the caller then plays the 7.1.
+fn point_weights(metadata: &ObjectAudioMetadataPayload, channels: usize) -> Option<Vec<Weight>> {
+    let program = &metadata.program_assignment;
+    if program.num_isf_objects != 0 || program.bed_assignment.len() > 1 {
+        return None;
+    }
+    let element = metadata.object_element.as_ref()?;
+    if metadata.object_count != channels || element.object_data.len() != channels {
+        return None;
+    }
+    let beds = program.bed_assignment.first().map(|b| b.to_index_vec()).unwrap_or_default();
+    let positions = metadata.get_damf_pos();
+    // Room positions of the OAMD bed channel indices (TS 103 420); the LFEs carry no place.
+    const BED: [Option<[f32; 3]>; 17] = [
+        Some([0., 0., 0.]),
+        Some([1., 0., 0.]),
+        Some([0.5, 0., 0.]),
+        None,
+        Some([0., 0.5, 0.]),
+        Some([1., 0.5, 0.]),
+        Some([0., 1., 0.]),
+        Some([1., 1., 0.]),
+        Some([0.25, 0.25, 1.]),
+        Some([0.75, 0.25, 1.]),
+        Some([0.25, 0.5, 1.]),
+        Some([0.75, 0.5, 1.]),
+        Some([0.25, 0.75, 1.]),
+        Some([0.75, 0.75, 1.]),
+        Some([0., 0.2929, 0.]),
+        Some([1., 0.2929, 0.]),
+        None,
+    ];
+    (0..channels)
+        .map(|channel| {
+            let blocks = &element.object_data[channel];
+            let last = blocks.len().checked_sub(1)?;
+            let block = &blocks[last];
+            if block.b_object_not_active || block.object_basic_info.object_gain == -128 {
+                return Some(Weight::default());
+            }
+            let gain = 10f32.powf(block.object_basic_info.object_gain as f32 / 20.);
+            let position = if block.b_object_in_bed_or_isf {
+                match BED.get(*beds.get(channel)?)? {
+                    Some(p) => *p,
+                    None => return Some(Weight::default()),
+                }
+            } else {
+                let [x, y, z] = *positions.get(channel)?.get(last)?;
+                if ![x, y, z].iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                // DAMF coordinates to TS 103 448 room coordinates.
+                [x / 2. + 0.5, 0.5 - y / 2., z].map(|v| v as f32)
+            };
+            Some(Weight::at(position, gain))
+        })
+        .collect()
+}
+
+#[cfg(feature = "exact-render")]
 /// Trim gain at a preprocessed position (TS 103 448 clause 5.3). Without trim metadata the
 /// default trim applies; balance metadata has no TS 103 448 equivalent and is ignored.
 fn trim_gain(trim: Option<&TrimElement>, object: usize, layout: render::TrimLayout, position: [f32; 3]) -> f32 {
@@ -555,10 +774,12 @@ fn trim_gain(trim: Option<&TrimElement>, object: usize, layout: render::TrimLayo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "exact-render")]
     use truehd::structs::oamd::{
         BlockUpdateInfo, MDUpdateInfo, ObjectBasicInfo, ObjectElement, ObjectInfoBlock, ObjectRenderInfo, Trim,
     };
 
+    #[cfg(feature = "exact-render")]
     fn point(pos3d: [f64; 3]) -> ObjectAudioMetadataPayload {
         ObjectAudioMetadataPayload {
             object_count: 1,
@@ -579,6 +800,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "exact-render")]
     fn gains(metadata: &ObjectAudioMetadataPayload) -> Result<Gains, Unsupported> {
         let mut out = None;
         for_each_block(0, metadata, 1, |e| out = Some(e.gains))?;
@@ -586,6 +808,7 @@ mod tests {
     }
 
     // DAMF (x −1…1 left→right, y 1…−1 front→back, z 0…1) lands on the TS 103 448 targets.
+    #[cfg(feature = "exact-render")]
     #[test]
     fn damf_positions_reach_the_expected_speakers() {
         let ceiling_front_left = gains(&point([0., 0., 1.])).ok().unwrap();
@@ -598,6 +821,7 @@ mod tests {
         assert_eq!(g[8..].iter().sum::<f32>(), 0.);
     }
 
+    #[cfg(feature = "exact-render")]
     #[test]
     fn custom_trim_attenuates_surround_and_height_positions() {
         let mut metadata = point([0., 1., 1.]);
@@ -608,6 +832,7 @@ mod tests {
         assert!((peak - 10f32.powf(-9. / 20.)).abs() < 1e-6);
     }
 
+    #[cfg(feature = "exact-render")]
     #[test]
     fn unsupported_metadata_is_reported_not_rendered() {
         let mut isf = point([0., 0., 0.]);
@@ -631,6 +856,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "exact-render")]
     #[test]
     fn metadata_timeout_keeps_every_sample_exactly_once() {
         // 601 object units of 40 samples with no OAMD: 600 are held (24 000, the limit), the
@@ -648,6 +874,36 @@ mod tests {
         session.limiter.finish(&mut session.limited);
         session.flush(&mut sink).unwrap();
         assert_eq!(frames, 601 * 40);
+    }
+
+    #[test]
+    fn heights_are_reported_only_with_a_guide() {
+        let mut session = Session::default();
+        session.split = Some(BedSplitter::default());
+        // Object audio without metadata: pending, then the bed after half a second.
+        for _ in 0..600 {
+            session.note_guide(false, 40);
+        }
+        assert_eq!(session.mode(), Mode::Pending);
+        session.note_guide(false, 40);
+        assert_eq!(session.mode(), Mode::Bed);
+        assert!(session.fallback_reason.as_deref().unwrap().contains("no object metadata"));
+        // Metadata after all: heights, for good.
+        session.note_guide(true, 40);
+        assert_eq!(session.mode(), Mode::Objects);
+        assert!(session.fallback_reason.is_none());
+        session.note_guide(false, 40);
+        assert_eq!(session.mode(), Mode::Objects);
+    }
+
+    #[test]
+    fn metadata_the_split_does_not_read_gives_no_guide() {
+        let mut isf = ObjectAudioMetadataPayload { object_count: 1, ..Default::default() };
+        isf.program_assignment.num_isf_objects = 1;
+        assert!(point_weights(&isf, 1).is_none());
+        // No object element at all: nothing to place either.
+        let empty = ObjectAudioMetadataPayload { object_count: 1, ..Default::default() };
+        assert!(point_weights(&empty, 1).is_none());
     }
 
     #[test]

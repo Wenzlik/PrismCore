@@ -774,8 +774,9 @@ public actor PrismCoreSession {
     ///   (`AVAudioSession.maximumOutputNumberOfChannels >= 8`).
     ///   Dialogue-boost renditions stay EAC3 either way, and
     ///   `makeMuxedFallbackSession()` goes back to `.compressed`.
-    /// - Parameter objectAudioRendering: `.heights` renders a TrueHD Atmos
-    ///   track's object presentation to 7.1.4 and serves it as Apple
+    /// - Parameter objectAudioRendering: `.heights` turns a TrueHD Atmos
+    ///   track into 7.1.4 — its own 7.1 presentation, split between ear level
+    ///   and the heights by where its objects lie — and serves it as Apple
     ///   Positional Audio (`apac`, 12 channels), so the heights reach an Atmos
     ///   receiver, a soundbar or AirPods; `audioTrackDeliveries[…].objectAudio`
     ///   reads `.renderedHeights` once objects play. `.off` (the default) keeps

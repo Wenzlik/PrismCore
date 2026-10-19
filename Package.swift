@@ -15,6 +15,14 @@ let linksTrueHDObjects = FileManager.default.fileExists(
     atPath: Context.packageDirectory + "/" + trueHDObjectsPath
 )
 
+// Measurement builds only: the exact object render the heights split is compared against
+// (`heightsListeningExport` writes `.exact` files with it). Needs a framework built with it:
+//   TRUEHD_OBJECTS_FEATURES=exact-render Rust/TrueHDObjects/build-xcframework.sh --mac
+//   PRISMCORE_EXACT_HEIGHTS=1 swift test --manifest-cache none --filter heightsListeningExport
+// Tests only; the library never calls it.
+let exactHeights: [SwiftSetting] = Context.environment["PRISMCORE_EXACT_HEIGHTS"] == "1" && linksTrueHDObjects
+    ? [.define("PRISMCORE_EXACT_HEIGHTS")] : []
+
 let package = Package(
     name: "PrismCore",
     platforms: [
@@ -53,8 +61,8 @@ let package = Package(
             ? .binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)
             : .binaryTarget(
                 name: "TrueHDObjects",
-                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.7.2/TrueHDObjects.xcframework.zip",
-                checksum: "efdf2a0aac0205afa3b62a0af7462afd952bb2722d520a18619082b01567e9fa"
+                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.8.0/TrueHDObjects.xcframework.zip",
+                checksum: "0549e89d51ae8b8dcfc400002150e41f9eb0ce207ff1bbb63b53783bcf4c0d39"
             ),
     ] + [
         .target(
@@ -96,7 +104,8 @@ let package = Package(
                 // (EAC3+JOC needs a real object-audio encode) and Dolby
                 // Vision (real RPUs) — stay manual smoke tests on real media.
                 .copy("Fixtures"),
-            ]
+            ],
+            swiftSettings: exactHeights
         ),
     ]
 )

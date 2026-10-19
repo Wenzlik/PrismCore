@@ -34,8 +34,8 @@ public struct AudioTrackDelivery: Sendable, Equatable {
 /// Whether a track's Dolby Atmos objects reach the player.
 ///
 /// Two forms of Atmos survive this engine. E-AC-3 + JOC is stream-copied with
-/// its `dec3` extension (`.preserved`). TrueHD Atmos is rendered — only when the
-/// host opts in (`ObjectAudioRendering.heights`) — to 7.1.4 speaker feeds served
+/// its `dec3` extension (`.preserved`). TrueHD Atmos is turned — only when the
+/// host opts in (`ObjectAudioRendering.heights`) — into 7.1.4 speaker feeds served
 /// as Apple Positional Audio (`.renderedHeights`): the heights play, the objects
 /// as objects do not. Otherwise TrueHD Atmos and DTS:X are bridged, and the
 /// bridge keeps at most the channel bed: FFmpeg decodes TrueHD only up to its
@@ -49,9 +49,9 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
     case preserved
     /// The source carries objects; the served rendition is their channel bed.
     case notPreserved
-    /// TrueHD Atmos rendered to 7.1.4 and served as APAC: heights included,
-    /// the object metadata consumed by the renderer. Lossy where the bed
-    /// bridge can be lossless — the trade the host opted into.
+    /// TrueHD Atmos as 7.1.4, served as APAC: heights included, derived from
+    /// the stream's 7.1 presentation by where its objects lie. Lossy where the
+    /// bed bridge can be lossless — the trade the host opted into.
     case renderedHeights
 
     /// Evidence first — the bitstream (`ObjectAudioFinding`, the TrueHD major
@@ -71,8 +71,12 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 /// system's Dolby Atmos setting): a route that cannot play it would get a lossy
 /// 7.1.4 folded back down, where `.lossless` delivers the 7.1 bed intact.
 ///
-/// `.heights` decodes the Atmos presentation with truehdd's decoder, renders it
-/// to 7.1.4 with an ETSI TS 103 448 panner and encodes Apple Positional Audio
+/// `.heights` builds 7.1.4 out of the stream's own 7.1 presentation (the bed
+/// `.lossless` plays): truehdd's decoder decodes it and the Atmos presentation,
+/// each 7.1 channel is split per frequency bin between ear level and the
+/// heights by where the objects' energy lies (positions read as points; no
+/// object signal reaches an output), each channel's level is matched to what the
+/// objects put into it, and the result is encoded as Apple Positional Audio
 /// (OS 26). TrueHD only — DTS:X is not rendered. Whatever stops it before the
 /// master is written (an older OS, a build without the `TrueHDObjects` library,
 /// a track whose bitstream — read before the master — is not Atmos, a rate

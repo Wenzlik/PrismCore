@@ -25,6 +25,15 @@ pub extern "C" fn truehd_objects_open() -> *mut Handle {
         .unwrap_or(ptr::null_mut())
 }
 
+/// The exact object render the heights split is measured against: measurement builds only
+/// (`exact-render`), never a release.
+#[cfg(feature = "exact-render")]
+#[unsafe(no_mangle)]
+pub extern "C" fn truehd_objects_open_exact() -> *mut Handle {
+    catch_unwind(|| Box::into_raw(Box::new(Handle { session: Session::exact(), error: String::new(), ended: false })))
+        .unwrap_or(ptr::null_mut())
+}
+
 /// # Safety
 /// `handle` is live; `data` references `length` bytes; the callback must not reenter.
 #[unsafe(no_mangle)]
@@ -145,6 +154,17 @@ mod tests {
             assert_eq!(frames, 0);
             truehd_objects_close(handle);
             truehd_objects_close(ptr::null_mut());
+
+            #[cfg(feature = "exact-render")]
+            {
+                // The same contract for the measurement render.
+                let handle = truehd_objects_open_exact();
+                assert!(!handle.is_null());
+                assert_eq!(truehd_objects_push(handle, ptr::null(), 0, 1, Some(count), context), 0);
+                assert_eq!(frames, 0);
+                assert_eq!(truehd_objects_mode(handle), 0);
+                truehd_objects_close(handle);
+            }
             assert_eq!(truehd_objects_mode(ptr::null()), 0);
         }
     }

@@ -215,6 +215,16 @@ API surface.
 - **The TrueHD profile is not evidence for heights either.** Gate on the
   bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
   note above says for E-AC-3.
+- **The exact object render is measurement-only.** `.heights` is the bed split
+  (`split.rs`); the TS 103 448 object render it is measured against builds only
+  with the Cargo feature `exact-render` (`truehd_objects_open_exact`), and the
+  Swift tests reach it only under `PRISMCORE_EXACT_HEIGHTS` with a framework
+  built that way. A release framework must not contain it: build it without
+  `TRUEHD_OBJECTS_FEATURES`.
+- **The bed's levels are not the objects'.** A film's 7.1 measured its four
+  surrounds 1.5 dB under the objects' floor projection; the split matches each
+  channel's level adaptively (±3 dB). Without that, ~4 % of the energy
+  landed on the wrong speaker against the exact render; with it, ~1 %.
 - **Do not rebuild the decoder after a seek from the middle of a stream.**
   It can only start at a major sync, and the renderer's output is anchored
   on the first access unit fed; packets before the first restart unit are
@@ -372,6 +382,10 @@ runs shorter. It does not replace them.
     (the truehd crate's test streams in Cargo's checkout, not redistributable
     here); `TRUEHD_OBJECTS_VECTORS` is the same for `cargo test`
   - `PRISMCORE_HEIGHTS_BENCH` — heights chain throughput on a TrueHD Atmos file
+  - `PRISMCORE_HEIGHTS_EXPORT` — a file's heights to 7.1.4 CAF and APAC `.mp4`
+    for listening (`heightsListeningExport`; `.exact.*` too with
+    `PRISMCORE_EXACT_HEIGHTS=1`); `TRUEHD_OBJECTS_COMPARE` compares the split
+    with the exact render on raw `.thd` in `cargo test --features exact-render`
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
   and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
   pipeline, never the premium claims — Atmos and Dolby Vision need real media
