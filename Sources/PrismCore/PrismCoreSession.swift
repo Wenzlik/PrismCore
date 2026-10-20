@@ -358,6 +358,40 @@ public actor PrismCoreSession {
         get async { await server.serviceAddress }
     }
 
+    /// Whether this session's server is still accepting connections.
+    ///
+    /// Turns `false` when the system takes the listening socket away while
+    /// the session is meant to be serving — on iOS, an app suspended with a
+    /// paused player (the screen auto-locks) can come back to a server
+    /// nothing can connect to, and AVPlayer reports `-1004`. Check it when
+    /// the app returns to the foreground; `ensureListening()` repairs it.
+    public var isListening: Bool {
+        get async { await server.isListening }
+    }
+
+    /// Bring the server back if the system took its socket away, and return
+    /// the playlist URL to play — the same value `start()` returned when the
+    /// original port could be bound again, a new one otherwise.
+    ///
+    /// Cheap: the producer, the segments on disk and every cache stay as
+    /// they are; only the listener is bound again. While `isListening` holds
+    /// it returns the current URL and changes nothing. A player item that
+    /// already failed against the dead server does not recover by itself:
+    /// when the URL is new, or the item reports an error, build a new
+    /// `AVPlayerItem` from the returned URL and seek it to where playback
+    /// was. Throws `LoopbackHTTPServer.FailedToStart` before a successful
+    /// `start()` or after `stop()`.
+    public func ensureListening() async throws -> URL {
+        guard let servedPlaylist, !stopped else { throw LoopbackHTTPServer.FailedToStart() }
+        return try await server.ensureListening().appendingPathComponent(servedPlaylist)
+    }
+
+    /// The playlist `start()` returned, relative to the server's base URL.
+    private var servedPlaylist: String?
+
+    /// Test seam: the system reclaiming the server's socket.
+    func simulateListenerLoss() async { await server.simulateListenerLoss() }
+
     /// What this session was built from — the starting point for
     /// `makeSession(changing:)`.
     ///
@@ -1711,6 +1745,7 @@ public actor PrismCoreSession {
                 in: workDirectory, lazyRenditions: remuxer.lazyRenditionPlaylistURIs
             ) {
                 let playlist = base.appendingPathComponent(ready)
+                servedPlaylist = ready
                 note(.playlistServable(playlist))
                 return playlist
             }
