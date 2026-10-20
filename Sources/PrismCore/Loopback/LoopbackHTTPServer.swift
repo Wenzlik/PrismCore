@@ -191,6 +191,83 @@ public actor LoopbackHTTPServer {
     /// prefix for free.
     @discardableResult
     public func start() async throws -> URL {
+        if case .localNetworkUnencryptedForAirPlay = reachability {
+            accessToken = .random()
+        }
+        let base = try await bind(port: .any)
+        if case .localNetwork = serviceAddress {
+            startWatchingForAddressLoss()
+        }
+        return base
+    }
+
+    /// Whether the listening socket is still accepting connections.
+    ///
+    /// `false` before `start()`, after `stop()`, and — the case this exists
+    /// for — after the system took the socket away while the server was
+    /// still meant to be serving. iOS reclaims a suspended app's listening
+    /// sockets (a paused film behind an auto-locked screen is enough); the
+    /// listener goes `.failed`/`.cancelled` and, before 3.8.1, nothing
+    /// noticed: `port` still read as bound and AVPlayer came back from the
+    /// background to `-1004 Could not connect to the server`. A host checks
+    /// this when it returns to the foreground and calls `ensureListening()`.
+    public private(set) var isListening = false
+
+    /// Make sure the server is accepting connections again, and return its
+    /// base URL.
+    ///
+    /// A no-op returning the current base URL while `isListening` holds.
+    /// Otherwise the listener is bound again — on the same port when the
+    /// system allows it, so the returned URL is the one already handed out,
+    /// else on a new one — keeping the access token and whatever the
+    /// provider holds. Compare the result with the URL you hold: a new port
+    /// means a new URL for the player. Throws `FailedToStart` after `stop()`
+    /// or when no port can be bound; `NoLocalNetworkInterface` in LAN mode
+    /// with no interface left.
+    @discardableResult
+    public func ensureListening() async throws -> URL {
+        guard !isStopped else { throw FailedToStart() }
+        // Actor re-entrancy: a second caller during a rebind waits for the
+        // first rather than cancelling its half-bound listener (which would
+        // strand the first caller's continuation).
+        if let rebinding { return try await rebinding.value }
+        if isListening { return baseURL }
+        guard port != 0 else { return try await start() }
+
+        let task = Task { try await rebind() }
+        rebinding = task
+        defer { rebinding = nil }
+        return try await task.value
+    }
+
+    private var rebinding: Task<URL, any Error>?
+
+    private func rebind() async throws -> URL {
+        if let dead = listener {
+            dead.stateUpdateHandler = nil
+            dead.cancel()
+        }
+        listener = nil
+        if let samePort = NWEndpoint.Port(rawValue: port),
+           let base = try? await bind(port: samePort) {
+            return base
+        }
+        guard !isStopped else { throw FailedToStart() }
+        return try await bind(port: .any)
+    }
+
+    private var baseURL: URL {
+        guard let token = accessToken else {
+            return URL(string: "http://127.0.0.1:\(port)/")!
+        }
+        // The trailing slash matters: the token is a directory in the served
+        // namespace, so `master.m3u8`'s own relative references
+        // (`video/index.m3u8`, `seg00001.m4s`) resolve under it without the
+        // playlist writer knowing the token exists.
+        return URL(string: "http://\(host):\(port)/\(token.value)/")!
+    }
+
+    private func bind(port requested: NWEndpoint.Port) async throws -> URL {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
 
@@ -210,11 +287,10 @@ public actor LoopbackHTTPServer {
             // be exposed on networks the user never had in mind. A local
             // AVPlayer reaches this address too, so one bind serves both the
             // on-device player and the receiver.
-            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(ipv4), port: .any)
-            accessToken = .random()
+            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(ipv4), port: requested)
         }
 
-        let listener = try NWListener(using: parameters, on: .any)
+        let listener = try NWListener(using: parameters, on: lanAddress == nil ? requested : .any)
         self.listener = listener
 
         listener.newConnectionHandler = { [weak self] connection in
@@ -222,39 +298,79 @@ public actor LoopbackHTTPServer {
             Task { await self.adopt(connection) }
         }
 
-        let bound: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            // Resume-once guard, lock-protected: the state handler runs on
-            // the listener queue and a `.failed` can chase a `.ready`.
-            let once = ResumeOnce()
-            listener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    once.run { continuation.resume(returning: listener.port?.rawValue ?? 0) }
-                case .failed(let error):
-                    once.run { continuation.resume(throwing: error) }
-                case .cancelled:
-                    once.run { continuation.resume(throwing: FailedToStart()) }
-                default:
-                    break
+        // A specific port that is still held parks the listener in `.waiting`
+        // rather than failing it; the caller falls back to any port.
+        let failsOnWaiting = requested != .any
+        let bound: UInt16
+        do {
+            bound = try await withCheckedThrowingContinuation { continuation in
+                // Resume-once guard, lock-protected: the state handler runs on
+                // the listener queue and a `.failed` can chase a `.ready`.
+                let once = ResumeOnce()
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        once.run { continuation.resume(returning: listener.port?.rawValue ?? 0) }
+                    case .failed(let error):
+                        once.run { continuation.resume(throwing: error) }
+                    case .waiting(let error) where failsOnWaiting:
+                        once.run { continuation.resume(throwing: error) }
+                    case .cancelled:
+                        once.run { continuation.resume(throwing: FailedToStart()) }
+                    default:
+                        break
+                    }
                 }
+                listener.start(queue: .global(qos: .userInitiated))
             }
-            listener.start(queue: .global(qos: .userInitiated))
+        } catch {
+            if failsOnWaiting { listener.cancel() }
+            throw error
         }
-        listener.stateUpdateHandler = nil
         guard bound != 0 else { throw FailedToStart() }
-        port = bound
 
-        guard let lanAddress, let token = accessToken else {
-            return URL(string: "http://127.0.0.1:\(bound)/")!
+        // Kept watching after `.ready`: the system can take the socket away
+        // later (see `isListening`), and this handler is the only place that
+        // hears about it.
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                Task { await self?.listenerStopped(listener) }
+            default:
+                break
+            }
         }
-        host = lanAddress
-        serviceAddress = .localNetwork(lanAddress)
-        startWatchingForAddressLoss()
-        // The trailing slash matters: the token is a directory in the served
-        // namespace, so `master.m3u8`'s own relative references
-        // (`video/index.m3u8`, `seg00001.m4s`) resolve under it without the
-        // playlist writer knowing the token exists.
-        return URL(string: "http://\(lanAddress):\(bound)/\(token.value)/")!
+        port = bound
+        isListening = true
+        switch listener.state {
+        case .failed, .cancelled: listenerStopped(listener)
+        default: break
+        }
+
+        if let lanAddress {
+            host = lanAddress
+            serviceAddress = .localNetwork(lanAddress)
+        }
+        return baseURL
+    }
+
+    /// The listener stopped without `stop()` asking it to.
+    private func listenerStopped(_ stopped: NWListener) {
+        // Only the current listener counts: one replaced by a rebind, or
+        // cancelled by `stop()`, reports its own end afterwards.
+        guard stopped === listener, isListening, !isStopped else { return }
+        isListening = false
+        PrismCoreLog.notice(
+            "loopback listener stopped (\(stopped.state)); the server is no longer "
+            + "accepting connections until ensureListening()"
+        )
+    }
+
+    /// Cancel the listener as the system does when it reclaims a suspended
+    /// app's socket. Test seam for the `isListening` / `ensureListening()`
+    /// path, which otherwise needs a device and a locked screen.
+    func simulateListenerLoss() {
+        listener?.cancel()
     }
 
     /// A path change is the only cheap signal that the address we published
@@ -302,6 +418,7 @@ public actor LoopbackHTTPServer {
     /// to the pending callback and the task unwinds.
     public func stop() {
         isStopped = true
+        isListening = false
         listener?.cancel()
         listener = nil
         pathMonitor?.cancel()

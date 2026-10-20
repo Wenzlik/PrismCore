@@ -812,6 +812,29 @@ Enable the mode for the duration of an AirPlay route on a network the user
 trusts, and stop the session when the route ends. Sessions that never AirPlay
 should never enable it — the default is unchanged and unreachable off-device.
 
+### App suspension: the listener can be taken away
+
+iOS reclaims a suspended app's listening sockets. A film paused behind an
+auto-locked screen is enough: the session's server stops accepting
+connections, and on resume AVPlayer reports `-1004 Could not connect to the
+server`. Since 3.8.1 the session says so and can repair it — check on return
+to the foreground:
+
+```swift
+if await !session.isListening {
+    let url = try await session.ensureListening()   // same port when it can
+    // The old item already failed against the dead server: rebuild it.
+    let item = AVPlayerItem(url: url)
+    player.replaceCurrentItem(with: item)
+    await player.seek(to: resumeTime)
+}
+```
+
+`ensureListening()` binds the listener again — the same port when the system
+allows it, so the URL is unchanged, otherwise a new one — and leaves the
+producer, the segments and every cache as they are. While the server is
+listening it is a no-op that returns the current URL.
+
 ### Design notes
 
 The things that were expensive to learn, kept here so the next person doesn't pay

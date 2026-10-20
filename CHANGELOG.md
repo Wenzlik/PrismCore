@@ -8,6 +8,37 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-10-20
+
+The loopback server notices when the system takes its listening socket
+away, and can bind it again. Source-compatible.
+
+### Fixed
+
+- **A dead listener was invisible.** iOS reclaims a suspended app's
+  listening sockets (a paused film behind an auto-locked screen); the
+  listener went `.failed`/`.cancelled`, but its state handler was removed
+  once it reached `.ready`, so `port` still read as bound, the session still
+  looked started, and AVPlayer came back to `-1004 Could not connect to the
+  server` with no API to detect or repair it. The listener is now watched
+  for its whole life; when it stops without `stop()`, the server marks
+  itself not listening and logs one notice.
+
+### Added
+
+- `isListening` on `LoopbackHTTPServer` and `PrismCoreSession`.
+- `ensureListening()` on both: binds the listener again (same port when
+  possible, else a new one) and returns the base URL (server) or the
+  playlist URL (session). The producer, the segments and the caches are
+  kept, so the repair costs a bind. A no-op while listening; throws
+  `LoopbackHTTPServer.FailedToStart` before `start()` or after `stop()`.
+  Hosts check `isListening` on return to the foreground and rebuild their
+  `AVPlayerItem` from the returned URL at the same position (README,
+  *App suspension*).
+- `Package.swift` keeps resolving `TrueHDObjects.xcframework` from the 3.8.0
+  release asset: nothing in `Rust/` changed, so the binary and its checksum
+  are the same.
+
 ## [3.8.0] — 2026-10-19
 
 TrueHD Atmos heights are now derived from the stream's own 7.1 presentation,
@@ -3469,7 +3500,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.1...HEAD
+[3.8.1]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...3.8.1
 [3.8.0]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...3.8.0
 [3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3
 [3.7.2]: https://github.com/Wenzlik/PrismCore/compare/3.7.1...3.7.2
