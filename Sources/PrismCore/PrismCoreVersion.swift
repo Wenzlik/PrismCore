@@ -6,5 +6,5 @@
 /// `CHANGELOG.md`, so a release that forgets it fails the suite instead of
 /// shipping field reports that name the previous version.
 public enum PrismCoreVersion {
-    public static let current = "3.8.3"
+    public static let current = "3.8.4"
 }

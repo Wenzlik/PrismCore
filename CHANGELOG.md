@@ -8,6 +8,18 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.4] — 2026-10-24
+
+Tests only: nothing in `Sources/` changed apart from the version string.
+Source-compatible.
+
+### Added
+
+- **Profile 7 → 8.1 parity test.** A new test pins that a two-byte-length
+  Profile 7 packet loses its enhancement layer in conversion and that the
+  master playlist for the converted stream declares a PQ base with 8.1
+  (`dvh1.08.06/db1p`), the same signalling a native 8.1 title gets.
+
 ## [3.8.3] — 2026-10-23
 
 ### Fixed
@@ -3525,6 +3537,7 @@ HTTP server, with:
   AVPlayer cannot decode at all.
 
 [Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...HEAD
+[3.8.4]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...3.8.4
 [3.8.3]: https://github.com/Wenzlik/PrismCore/compare/3.8.2...3.8.3
 [3.8.2]: https://github.com/Wenzlik/PrismCore/compare/3.8.1...3.8.2
 [3.8.1]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...3.8.1
