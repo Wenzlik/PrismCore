@@ -63,7 +63,7 @@ public struct SoftwareDecoderAvailability: Sendable, Equatable {
     private static let audioCodecs: [AVCodecID] = [
         AV_CODEC_ID_VORBIS, AV_CODEC_ID_OPUS,
         AV_CODEC_ID_MP3, AV_CODEC_ID_MP2,
-        AV_CODEC_ID_AAC, AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3,
+        AV_CODEC_ID_AAC, AV_CODEC_ID_AAC_LATM, AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3,
         AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC,
         AV_CODEC_ID_DTS, AV_CODEC_ID_TRUEHD,
         AV_CODEC_ID_PCM_S16LE, AV_CODEC_ID_WMAV2,
