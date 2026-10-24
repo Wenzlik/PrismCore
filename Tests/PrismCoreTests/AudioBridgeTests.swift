@@ -165,6 +165,27 @@ struct AudioRoutingTests {
         #expect(route == HLSRemuxer.AudioRoute(index: 1, mode: .streamCopy))
     }
 
+    @Test("AAC-LATM needs the bridge; ordinary AAC still stream-copies")
+    func latmRequiresBridge() {
+        let candidates = [
+            HLSRemuxer.AudioCandidate(index: 1, codecID: AV_CODEC_ID_AAC_LATM),
+            HLSRemuxer.AudioCandidate(index: 2, codecID: AV_CODEC_ID_AAC),
+        ]
+        #expect(AudioBridge.bridgeableAudio.contains(AV_CODEC_ID_AAC_LATM))
+        #expect(
+            HLSRemuxer.chooseAudio(candidates: candidates, best: 1, canBridge: bridgeEverything)
+                == HLSRemuxer.AudioRoute(index: 1, mode: .bridge)
+        )
+        #expect(HLSRemuxer.routeAll(candidates: candidates, best: 1, canBridge: bridgeEverything) == [
+            HLSRemuxer.AudioRoute(index: 1, mode: .bridge),
+            HLSRemuxer.AudioRoute(index: 2, mode: .streamCopy),
+        ])
+        #expect(HLSRemuxer.routeAll(
+            candidates: [candidates[0]], best: 1, canBridge: bridgeNothing
+        ).isEmpty)
+        #expect(MasterPlaylistBuilder.audioCodecString(forCodecName: "aac_latm") == nil)
+    }
+
     @Test("A DTS-HD MA main track now wins over an AC3 compatibility track")
     func bridgesBestInsteadOfDowngrading() {
         // The v0 regression this phase fixes: index 1 is the 7.1 main track,
@@ -329,9 +350,9 @@ struct AudioRoutingTests {
 
     @Test("The codecs this phase targets all have decoders in the linked FFmpeg")
     func decodersPresent() {
-        for codec in [AV_CODEC_ID_TRUEHD, AV_CODEC_ID_DTS, AV_CODEC_ID_MP3, AV_CODEC_ID_MP2,
-                      AV_CODEC_ID_OPUS, AV_CODEC_ID_VORBIS, AV_CODEC_ID_PCM_S16LE,
-                      AV_CODEC_ID_PCM_S24LE, AV_CODEC_ID_PCM_BLURAY] {
+        for codec in [AV_CODEC_ID_AAC_LATM, AV_CODEC_ID_TRUEHD, AV_CODEC_ID_DTS,
+                      AV_CODEC_ID_MP3, AV_CODEC_ID_MP2, AV_CODEC_ID_OPUS, AV_CODEC_ID_VORBIS,
+                      AV_CODEC_ID_PCM_S16LE, AV_CODEC_ID_PCM_S24LE, AV_CODEC_ID_PCM_BLURAY] {
             let name = avcodec_get_name(codec).map { String(cString: $0) } ?? "?"
             #expect(avcodec_find_decoder(codec) != nil, "no decoder for \(name)")
         }
