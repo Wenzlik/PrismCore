@@ -8,6 +8,15 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.2] — 2026-10-23
+
+### Fixed
+
+- **AAC-LATM audio uses the bridge.** DVB/IPTV transport streams carrying
+  LATM/LOAS-framed AAC were classified as unroutable because the bridgeable
+  codec set omitted it. They now decode through `aac_latm` and re-encode with
+  the existing bridge; LATM is never stream-copied into fMP4 as ordinary AAC.
+
 ## [3.8.1] — 2026-10-20
 
 The loopback server notices when the system takes its listening socket
@@ -3500,7 +3509,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.1...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.2...HEAD
+[3.8.2]: https://github.com/Wenzlik/PrismCore/compare/3.8.1...3.8.2
 [3.8.1]: https://github.com/Wenzlik/PrismCore/compare/3.8.0...3.8.1
 [3.8.0]: https://github.com/Wenzlik/PrismCore/compare/3.7.3...3.8.0
 [3.7.3]: https://github.com/Wenzlik/PrismCore/compare/3.7.2...3.7.3

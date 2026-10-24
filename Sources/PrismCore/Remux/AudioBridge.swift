@@ -9,10 +9,10 @@ import Libswresample
 ///
 /// `HLSRemuxer` copies AAC/AC3/EAC3/FLAC/ALAC bit-for-bit — that path must never
 /// change, because it's the one that keeps Atmos objects alive. Everything else
-/// (TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM) is either illegal
-/// in ISOBMFF/HLS or something AVPlayer won't decode, so v0 either dropped it or
-/// fell back to a lesser compatibility track. This bridge gives those sources a
-/// track AVPlayer *does* take, in surround.
+/// (AAC-LATM, TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM) is either
+/// illegal in ISOBMFF/HLS or something AVPlayer won't decode, so v0 either
+/// dropped it or fell back to a lesser compatibility track. This bridge gives
+/// those sources a track AVPlayer *does* take, in surround.
 ///
 /// Target codec is **EAC3 at 128 kbps per channel** (256 stereo, 768 for 5.1).
 /// The reasoning is about the sink, not the file: AVPlayer hands an encoded
@@ -107,6 +107,8 @@ final class AudioBridge {
     /// this build lacks) is diagnosed as unroutable instead of failing halfway
     /// through a session.
     static let bridgeableAudio: Set<AVCodecID> = [
+        // LATM/LOAS framing cannot be stream-copied into AVPlayer's fMP4 path.
+        AV_CODEC_ID_AAC_LATM,
         AV_CODEC_ID_TRUEHD, AV_CODEC_ID_MLP,
         AV_CODEC_ID_DTS,
         AV_CODEC_ID_MP3, AV_CODEC_ID_MP2,
