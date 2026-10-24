@@ -16,6 +16,7 @@ private func dolbyVision(profile: UInt8, compat: UInt8) -> DolbyVisionConfigurat
 }
 
 private let p5 = dolbyVision(profile: 5, compat: 0)
+private let p7 = dolbyVision(profile: 7, compat: 6)
 private let p81 = dolbyVision(profile: 8, compat: 1)
 private let p82 = dolbyVision(profile: 8, compat: 2)
 private let p84 = dolbyVision(profile: 8, compat: 4)
@@ -42,6 +43,43 @@ struct DisplayCriteriaChoiceTests {
             )
             #expect(choice.target == .dolbyVision)
             #expect(choice.refreshRate == Float(23.976))
+        }
+    }
+
+    @Test("Unconverted Profile 7 keeps its HDR10 base range on a DV-capable display")
+    func unconvertedProfile7GetsHDR10() {
+        let choice = DisplayCriteriaChoice.forSource(
+            dynamicRange: .pq, declaredDolbyVision: p7,
+            display: display(hdr: true, dv: true), frameRate: 23.976
+        )
+        #expect(choice.target == .hdr10)
+        #expect(choice.refreshRate == Float(23.976))
+    }
+
+    @Test("Profile 7 converted to 8.1 asks for Dolby Vision on a DV-capable display")
+    func convertedProfile7GetsDolbyVision() {
+        let choice = DisplayCriteriaChoice.forSource(
+            dynamicRange: .pq, declaredDolbyVision: p7.convertedToProfile81,
+            display: display(hdr: true, dv: true), frameRate: 23.976
+        )
+        #expect(choice.target == .dolbyVision)
+        #expect(choice.refreshRate == Float(23.976))
+    }
+
+    @Test("Unrecognised DV configurations keep the base range on a DV-capable display")
+    func unknownConfigurationGetsBaseRange() {
+        for dv in [dolbyVision(profile: 9, compat: 1), dolbyVision(profile: 8, compat: 3)] {
+            for (range, target) in [
+                (DynamicRange.pq, DisplayCriteriaChoice.Target.hdr10),
+                (.hlg, .hlg), (.sdr, .sdr)
+            ] {
+                let choice = DisplayCriteriaChoice.forSource(
+                    dynamicRange: range, declaredDolbyVision: dv,
+                    display: display(hdr: true, dv: true), frameRate: 24
+                )
+                #expect(choice.target == target)
+                #expect(choice.refreshRate == 24)
+            }
         }
     }
 

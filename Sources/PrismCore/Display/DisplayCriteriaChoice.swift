@@ -56,9 +56,11 @@ public struct DisplayCriteriaChoice: Sendable, Equatable {
     ///   AVPlayer tone-maps it, so asking the panel to leave SDR would be
     ///   asking for the very mode mismatch the criteria exist to prevent.
     /// - Dolby Vision is asked for only when the *declared* configuration
-    ///   actually presents as DV on this display. Profile 8.2's Rec.709 base
-    ///   is signaled plain SDR (the same honesty rule the playlist follows),
-    ///   and a DV-incapable display gets the base layer's own range — HDR10
+    ///   passes `isPresentableAsDolbyVision` and the display is DV-capable,
+    ///   so the panel mode agrees with the manifest and sample entry.
+    ///   Profile 8.2's Rec.709 base is signaled plain SDR (the same honesty
+    ///   rule the playlist follows), and a DV-incapable display gets the base
+    ///   layer's own range — HDR10
     ///   for 8.1, HLG for 8.4, and for profile 5 (no base layer) the PQ its
     ///   bitstream carries, which AVPlayer tone-maps from the `dvh1` sample
     ///   entry on the media-direct route.
@@ -77,7 +79,7 @@ public struct DisplayCriteriaChoice: Sendable, Equatable {
             return DisplayCriteriaChoice(target: .sdr, refreshRate: rate)
         }
         if let dv = declaredDolbyVision,
-           !dv.hasSDRCompatibleBase,
+           dv.isPresentableAsDolbyVision,
            display.isDolbyVisionCapable {
             return DisplayCriteriaChoice(target: .dolbyVision, refreshRate: rate)
         }
