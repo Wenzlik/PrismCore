@@ -373,6 +373,41 @@ struct DolbyVisionConversionDeclarationTests {
         )
     }
 
+    @Test("two-byte P7 packets drop the EL while the master declares a PQ base and 8.1")
+    func packetAndMasterParity() throws {
+        guard DolbyVisionRPUConverter.isAvailable else { return }
+        let converter = try #require(DolbyVisionRPUConverter(lengthSize: 2))
+        let base = nal(type: 1, payload: 0x17)
+        let sei = nal(type: 39, payload: 0x52) + [0, 0, 3, 1]
+        let source = packet([base, nal(type: 63), sei], lengthSize: 2)
+        let rewritten = try #require(converter.convert(packet: source))
+        let units = try #require(HEVCNALUnits.units(in: rewritten, lengthSize: 2))
+        #expect(units.map(\.type) == [1, 39])
+        #expect(Array(units[0].bytes) == base)
+        #expect(Array(units[1].bytes) == sei)
+        #expect(converter.droppedEnhancementLayerNALs == 1)
+        #expect(converter.staleUnconvertedPackets == 0)
+
+        let record = try #require(HEVCConfigurationRecord.parse(
+            hvcC: hvcC(lengthSizeMinusOne: 1, arrays: [
+                (type: 32, complete: true, units: [vps]),
+                (type: 33, complete: true, units: [sps]),
+                (type: 34, complete: true, units: [pps]),
+            ])
+        ))
+        let master = try MasterPlaylistBuilder.build(.init(
+            bandwidth: 30_000_000,
+            frameRate: 23.976,
+            dynamicRange: .pq,
+            videoCodec: .hevc(record),
+            dolbyVision: profile7().convertedToProfile81,
+            displayIsDolbyVisionCapable: true
+        ))
+        #expect(master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08.06/db1p\""))
+        #expect(master.contains("VIDEO-RANGE=PQ"))
+        #expect(master.contains("CODECS=\"hvc1."))
+    }
+
     @Test("the primary codec stays the HEVC base — 8.1 is not profile 5")
     func primaryCodecIsBase() throws {
         let record = try #require(
