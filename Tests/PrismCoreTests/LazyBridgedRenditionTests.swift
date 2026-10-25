@@ -91,7 +91,7 @@ struct LazyBridgedRenditionTests {
         #expect(ces.contains("CHANNELS=\"1\""), "\(ces)")
         #expect(!ces.contains("DEFAULT=YES"), "\(ces)")
         // The track is carried, it is just not running yet.
-        let deliveries = await session.audioTrackDeliveries
+        let deliveries = session.audioTrackDeliveries
         #expect(deliveries.first { $0.streamIndex == 2 }?.delivery == .bridged)
 
         // (1) Production runs the whole file before any fetch: the DEFAULT
@@ -214,7 +214,7 @@ struct LazyBridgedRenditionTests {
         var alternateFed = false
         let deadline = ContinuousClock.now + .seconds(20)
         while !alternateFed, ContinuousClock.now < deadline {
-            alternateFed = await session.audioTrackDeliveries
+            alternateFed = session.audioTrackDeliveries
                 .first { $0.streamIndex == 2 }?.bridge.map { $0.inputPackets > 0 } ?? false
             if !alternateFed { try await Task.sleep(for: .milliseconds(50)) }
         }

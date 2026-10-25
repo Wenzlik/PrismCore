@@ -174,7 +174,7 @@ private func absentURL(_ name: String) -> URL {
 
 /// The same transport, conforming — the only difference between it and its
 /// superclass is the one the engine is allowed to detect.
-private final class CancellableMemoryInput: MemoryInput, CancellablePrismCoreInput {
+private final class CancellableMemoryInput: MemoryInput, CancellablePrismCoreInput, @unchecked Sendable {
     private let calls = NSLock()
     private var storedCancelCalls = 0
     private var storedIdleCancelCalls = 0

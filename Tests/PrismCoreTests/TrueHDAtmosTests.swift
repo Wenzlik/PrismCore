@@ -188,7 +188,7 @@ struct TrueHDAtmosTests {
         // Decode with a fresh flac decoder, configured from what the muxer
         // would be given.
         let output = avformat_alloc_context()!
-        defer { var output: UnsafeMutablePointer<AVFormatContext>? = output; avformat_free_context(output) }
+        defer { avformat_free_context(output) }
         let stream = avformat_new_stream(output, nil)!
         try bridge.configure(outputStream: stream)
         let decoder = avcodec_find_decoder(AV_CODEC_ID_FLAC)!
