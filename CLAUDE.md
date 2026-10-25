@@ -21,7 +21,8 @@ Then, as needed: [`README.md`](README.md) → [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Non-negotiables
 
-- Never copy code from AetherEngine; study the approach, write our own.
+- Never copy code from the referenční implementace; study the approach, write
+  our own.
 - Comments record *why* — especially the failure a line prevents.
 - A performance claim needs a measurement in the PR; a correctness claim needs
   a test or a named device run.
