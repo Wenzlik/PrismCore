@@ -68,7 +68,7 @@ table: the app's name, a link, and its platforms.
 | Video (native) | H.264, HEVC (incl. Main 10), AV1 **where the device has a hardware decoder** — asked with `VTIsHardwareDecodeSupported`, not inferred from a chip name |
 | Video (software) | VP9 / VP8, MPEG-2, MPEG-4 Part 2, VC-1 / WMV3, AV1 without hardware (libdav1d), interlaced H.264 with CPU `bwdif` deinterlace at field rate |
 | HDR | HDR10 (PQ) and HLG, signaled honestly in the master playlist and tone-mapped by the system |
-| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.x and converted Profile 7 play as their HDR10 base |
+| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.1 and converted Profile 7 play as their HDR10 base, 8.4 as its HLG base |
 | HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC (non-LATM), AC3, EAC3, FLAC, ALAC — bit-for-bit |
@@ -90,7 +90,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.5")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.4")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -1114,7 +1114,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.5")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.4")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
