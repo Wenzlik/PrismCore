@@ -277,49 +277,17 @@ public actor SeekPreviewService {
         guard !opened else { return }
         opened = true
 
-        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-        defer { av_dict_free(&openOptions) }
-
-        // The guard exists before the open (issue #39's rule) even though no
-        // index-load seek runs here: thumbnail seeks on a cue-less source can
-        // degenerate to the same linear scan, and `close()` mid-request must
-        // be able to abort a blocking read rather than wait it out.
+        // Keep the guard visible before allocation and the context owned by
+        // the service before analysis, including on an analysis failure.
         let interruptGuard = ReadInterruptGuard()
         self.interruptGuard = interruptGuard
-        var context = interruptGuard.makeContext()
-        // Host bytes win over the coordinated HTTP reader — both would claim
-        // `pb`, and only one of them is what the host asked for.
-        if let inputFactory, let context {
-            do { try interruptGuard.installCustomInput(on: context, factory: inputFactory) }
-            catch { avformat_free_context(context); throw error }
-        } else if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let context {
-            do { try interruptGuard.installHTTPInput(on: context, url: url, headers: httpHeaders) }
-            catch { avformat_free_context(context); throw error }
-        }
-        interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
         defer { interruptGuard.disarm() }
-        let sourceSpec = url.isFileURL ? url.path : url.absoluteString
-        do {
-            try FFmpegError.check(
-                avformat_open_input(&context, sourceSpec, nil, &openOptions),
-                "avformat_open_input(preview)"
-            )
-        } catch {
-            throw interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error
-        }
-        guard let context else { throw Failure.undecodable("open failed") }
-        input = context
-        do {
-            try FFmpegError.check(
-                avformat_find_stream_info(context, nil), "avformat_find_stream_info(preview)"
-            )
-        } catch {
-            // The analysis reads too, and a host or origin that dies here dies
-            // exactly as it would have during the open — same order, same
-            // answer: whoever supplied the bytes knows more than the errno
-            // they were reduced to.
-            throw interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error
-        }
+        guard let context = try SourceOpener.open(
+            url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
+            inputFactory: inputFactory, interruptGuard: interruptGuard,
+            budget: SourceOpenTuning.probeBudget, policy: .preview,
+            opened: { self.input = $0 }
+        ) else { throw Failure.undecodable("open failed") }
 
         let best = av_find_best_stream(context, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
         guard best >= 0, let stream = context.pointee.streams[Int(best)] else {
