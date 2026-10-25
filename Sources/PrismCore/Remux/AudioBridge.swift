@@ -56,17 +56,21 @@ import Libswresample
 ///   fragments whose video carries real source PTS is the classic way to make
 ///   AVPlayer accept a playlist and then play nothing.
 ///
-/// Availability: this needs FFmpeg's `eac3` encoder, which stock MPVKit does
-/// **not** compile in (it ships the ac3/eac3 *decoders* only).
-/// `isEncoderAvailable` reports that honestly and `HLSRemuxer` keeps its v0
-/// fallback when the answer is no — see the notes on that property.
+/// Availability: EAC3 needs FFmpeg's `eac3` encoder. The package's own MPVKit
+/// dependency (the Wenzlik/MPVKit 1.0.1 fork) compiles it in; stock MPVKit does
+/// **not** (it ships the ac3/eac3 *decoders* only), and with it the bridge
+/// targets AAC 5.1 instead — see `defaultTargetCodec`. `isEncoderAvailable`
+/// reports whether either target exists; when neither does, `HLSRemuxer` falls
+/// back to a copyable track (or skips the bridgeable ones) instead of failing
+/// the session.
 final class AudioBridge {
     private(set) var progress = AudioBridgeProgress()
     var onProgress: ((AudioBridgeProgress) -> Void)?
 
     enum Failure: Error, CustomStringConvertible {
-        /// FFmpeg was built without the `eac3` encoder (stock MPVKit). Nothing
-        /// the host can do at runtime; the build has to enable it.
+        /// FFmpeg was built without the bridge's target encoder. Nothing the
+        /// host can do at runtime; the build has to enable it (the package's
+        /// own MPVKit fork ships `eac3`; stock MPVKit still has `aac`).
         case encoderUnavailable
         /// No decoder for the source codec in this FFmpeg build.
         case decoderUnavailable(String)
@@ -123,15 +127,17 @@ final class AudioBridge {
     /// entry is needed above — libavcodec's `dca` decoder handles the core plus
     /// the XLL extension substream, and what reaches the encoder is the bed.
 
-    /// Whether FFmpeg in *this* build can encode the bridge's target codec.
+    /// Whether FFmpeg in *this* build can encode the bridge's target codec
+    /// (`defaultTargetCodec`: EAC3, or AAC without the `eac3` encoder).
     ///
-    /// Stock MPVKit answers `false`: its FFmpeg is configured for a player, so
-    /// audio encoders are limited to aac/alac/flac/pcm. The bridge is written
-    /// against `eac3` anyway because that's the codec the surround story needs,
-    /// and enabling it is a one-line configure change in the MPVKit fork Aether
-    /// already vendors (`--enable-encoder=eac3`; it's native FFmpeg code, no
-    /// external library, no licensing change). Until then this gate keeps the
-    /// v0 behaviour intact instead of turning a playable source into a failed
+    /// Stock MPVKit's FFmpeg is configured for a player, so its audio encoders
+    /// are limited to aac/alac/flac/pcm. The bridge is written against `eac3`
+    /// because that's the codec the surround story needs, and the package's own
+    /// MPVKit dependency, the Wenzlik/MPVKit 1.0.1 fork, enables it
+    /// (`--enable-encoder=eac3`; native FFmpeg code, no external library, no
+    /// licensing change). With stock MPVKit the target is AAC 5.1. The gate
+    /// matters for a build with neither encoder: there it keeps the remux on
+    /// a copyable track instead of turning a playable source into a failed
     /// session.
     static var isEncoderAvailable: Bool {
         findEncoder(defaultTargetCodec) != nil

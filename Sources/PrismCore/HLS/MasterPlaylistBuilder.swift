@@ -54,7 +54,7 @@ public enum MasterPlaylistBuilder {
         /// advertised — hence a String, not an Int.
         public var channels: String?
         /// `nil` means the audio is muxed into the variant's own segments
-        /// (v0's shape: one fMP4 with both tracks). HLS reads a URI-less
+        /// (the muxed shape: one fMP4 with both tracks). HLS reads a URI-less
         /// `EXT-X-MEDIA` exactly that way, so the rendition still shows up as
         /// a selectable `AVMediaSelectionOption`.
         public var uri: String?
@@ -90,7 +90,7 @@ public enum MasterPlaylistBuilder {
         }
     }
 
-    /// One WebVTT subtitle rendition (phase 6).
+    /// One WebVTT subtitle rendition.
     ///
     /// `DEFAULT=NO,AUTOSELECT=NO` unless the caller says otherwise, and that
     /// default is load-bearing: with either set to `YES` AVKit engages the
@@ -180,7 +180,7 @@ public enum MasterPlaylistBuilder {
         /// Empty for a silent source (no `EXT-X-MEDIA`, no `AUDIO` attribute).
         public var audioRenditions: [AudioRendition]
         /// WebVTT subtitle renditions, in declaration order. Empty means the
-        /// manifest says nothing about subtitles — the pre-phase-6 shape.
+        /// manifest says nothing about subtitles.
         public var subtitles: [SubtitleRendition]
         /// In-band caption services to declare. Empty — the default — prints
         /// `CLOSED-CAPTIONS=NONE`, which hides them from AVPlayer.
@@ -566,8 +566,8 @@ public enum MasterPlaylistBuilder {
         )
     }
 
-    /// RFC 6381 tags for the audio codecs the v0 remuxer stream-copies.
-    /// `nil` for anything the phase-3 bridge would have to touch — by then the
+    /// RFC 6381 tags for the audio codecs the remuxer stream-copies.
+    /// `nil` for anything the audio bridge would have to touch — by then the
     /// caller declares the *bridged* codec (`ec-3`), not the source's.
     public static func audioCodecString(forCodecName name: String, profileName: String? = nil) -> String? {
         switch name {

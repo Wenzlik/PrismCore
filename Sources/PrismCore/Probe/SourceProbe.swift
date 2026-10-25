@@ -285,9 +285,10 @@ public struct DolbyVisionConfiguration: Sendable, Equatable {
 public enum StreamCopyability: String, Sendable, Equatable {
     /// Rides the fMP4 pipeline untouched.
     case streamCopy
-    /// Needs the phase-3 audio bridge (TrueHD / DTS family → EAC3).
+    /// Needs the audio bridge (TrueHD / DTS family and the rest of its set →
+    /// EAC3 5.1, or AAC 5.1 without the `eac3` encoder).
     case requiresAudioBridge
-    /// Neither: this source has to keep going to Prism/libmpv for now.
+    /// Neither: the host has to route this stream to another engine.
     case unsupported
 }
 
@@ -582,9 +583,9 @@ public struct ChapterInfo: Sendable, Equatable {
     }
 }
 
-/// Everything Aether's engine routing needs to decide PrismCore vs Prism, and
-/// everything `MasterPlaylistBuilder` needs to sign the manifest — read in one
-/// libavformat open.
+/// Everything a host's engine routing needs to decide PrismCore vs another
+/// engine, and everything `MasterPlaylistBuilder` needs to sign the manifest —
+/// read in one libavformat open.
 public struct SourceInfo: Sendable, Equatable {
     public let formatName: String
     /// Source duration in seconds; `nil` when the container doesn't know
@@ -663,8 +664,8 @@ public struct SourceInfo: Sendable, Equatable {
         return .unsupported
     }
 
-    /// The first stream-copyable audio track, i.e. the one the v0 remuxer
-    /// would pick (an AC3 compat track beats a DTS main track).
+    /// The first stream-copyable audio track (an AC3 compat track beats a DTS
+    /// main track).
     public var preferredCopyableAudioTrack: AudioTrackInfo? {
         audioTracks.first { $0.copyability == .streamCopy }
     }
@@ -708,17 +709,17 @@ public enum SourceProbe {
         AV_CODEC_ID_AAC, AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3,
         AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC,
     ]
-    /// Audio the fMP4 pipeline can't carry but the phase-3 bridge can re-encode
-    /// to EAC3.
+    /// Audio the fMP4 pipeline can't carry but the audio bridge can re-encode
+    /// (EAC3, or AAC without the `eac3` encoder).
     ///
     /// Deliberately `AudioBridge`'s own set rather than a copy of it. It used to
     /// be a copy, and the copy drifted: the bridge grew MP3/MP2/Opus/Vorbis/PCM
     /// while this list stayed at the three lossless codecs, so the probe reported
     /// an MP3-audio MKV as `.unsupported` — a verdict the remuxer disagreed with,
-    /// since its own routing asks `AudioBridge.canBridge`. The drift was invisible
-    /// only because the EAC3 encoder is absent from stock MPVKit, which makes
-    /// *everything* unbridgeable; it would have surfaced the day the fork enables
-    /// the encoder. One set, no synchronizing.
+    /// since its own routing asks `AudioBridge.canBridge`. The drift stayed
+    /// invisible while builds without the EAC3 encoder made *everything*
+    /// unbridgeable; with a bridge that runs (EAC3 in the package's MPVKit
+    /// fork, AAC otherwise) it would surface. One set, no synchronizing.
     private static func isBridgeable(_ codecID: AVCodecID) -> Bool {
         // A decoder has to exist too — a codec in the bridgeable class that this
         // build can't decode is not bridgeable, it is unsupported. The *encoder*

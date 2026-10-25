@@ -82,7 +82,7 @@ public struct DisplayCapabilities: Sendable, Equatable {
     }
 
     /// Everything off — what a session gets when nobody asked and nothing could
-    /// be read. Keeps v0's media-direct shape for HDR sources.
+    /// be read. Keeps the media-direct shape for HDR sources.
     public static let conservative = DisplayCapabilities(
         isHDRReady: false, isDolbyVisionCapable: false, source: .unavailable
     )
