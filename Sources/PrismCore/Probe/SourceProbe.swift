@@ -842,98 +842,20 @@ public enum SourceProbe {
         hints: SourceOpenHints? = nil,
         hdr10Plus hdr10PlusScan: HDR10PlusScan = .off
     ) throws -> ProbedSource {
-        // The interrupt guard has to exist BEFORE the open — the blocking
-        // reads check the URLContext's copy of the callback, taken at
-        // creation — and this open is the one that decides whether the
-        // adopting producer can ever bound a read: the remuxer usually
-        // inherits this very context (see `ReadInterruptGuard`).
+        // The same context and its permanent guard travel to ProbedSource;
+        // stream-info analysis fills fields the adopting muxer needs too.
         let interruptGuard = ReadInterruptGuard()
-        var input: UnsafeMutablePointer<AVFormatContext>? = interruptGuard.makeContext()
-        // A host-supplied input wins over the coordinated HTTP reader: the
-        // host asked to provide the bytes itself, and the two would otherwise
-        // both claim `pb`.
-        if let inputFactory, let input {
-            do { try interruptGuard.installCustomInput(on: input, factory: inputFactory) }
-            catch { avformat_free_context(input); throw error }
-        } else if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let input {
-            // The only place a sizing hint can still change anything: the
-            // reader has to be built with it, because the first read happens
-            // inside `avformat_open_input` below.
-            do { try interruptGuard.installHTTPInput(on: input, url: url, headers: httpHeaders, hints: hints) }
-            catch { avformat_free_context(input); throw error }
-        }
-
-        // Armed across the whole probe, disarmed on every way out — the
-        // adopting producer wants the permanent-but-disarmed resting state.
-        interruptGuard.arm(budget: budget)
         defer { interruptGuard.disarm() }
         let clock = ContinuousClock()
-        let probeStart = clock.now
-
-        // Same open pattern as HLSRemuxer: the caller's headers (Plex token,
-        // WebDAV authorization) travel on the probe connection too, otherwise
-        // a server source would 401 here and get mis-routed as unplayable —
-        // and the same read caps, because over a network this open IS the
-        // wait the user sees (see `SourceOpenTuning`).
-        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-        defer { av_dict_free(&openOptions) }
-
-        let sourceSpec = url.isFileURL ? url.path : url.absoluteString
-        do {
-            try FFmpegError.check(
-                avformat_open_input(&input, sourceSpec, nil, &openOptions),
-                "avformat_open_input"
-            )
-        } catch {
-            // `originFailure` first: over the coordinated reader the libav*
-            // code is always `-EIO`, and wrapping that is how a 403 used to
-            // reach a host as "Input/output error".
-            throw Failure.openFailed(interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error)
-        }
-        guard let input else { throw Failure.noStreams }
-        let openedAt = clock.now
-        // From here the context is owned by the `ProbedSource` we return; on
-        // the throwing paths below it has no owner yet, so close it by hand.
-        func closeAndThrow(_ failure: any Error) -> any Error {
-            // The close can itself read (a tail request being torn down), and
-            // the callback holds an unretained pointer — keep the guard alive
-            // through it even if the optimizer thinks it is done.
-            withExtendedLifetime(interruptGuard) {
-                var closing: UnsafeMutablePointer<AVFormatContext>? = input
-                avformat_close_input(&closing)
-            }
-            return failure
-        }
-
-        // Needed for pixel format, color properties and the DV side data —
-        // several of them are only filled in after the codec parser has seen
-        // real packets. It is also what fills the fields the MUXER later needs,
-        // which is why a context that skipped it cannot be produced from.
-        do {
-            try FFmpegError.check(
-                avformat_find_stream_info(input, nil), "avformat_find_stream_info"
-            )
-        } catch {
-            throw closeAndThrow(interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error)
-        }
-        // `find_stream_info` swallows aborted reads: cut off mid-analysis it
-        // returns success with half-filled parameters, and a half-analysed
-        // context handed onward is 1.1.2's muxing failure wearing a verdict.
-        // The clock is the honest witness — still-armed and expired means the
-        // analysis cannot be trusted, whatever it returned.
-        if interruptGuard.shouldInterrupt {
-            // A transport that spent the whole budget failing gets named as
-            // the failure it was: the expiry is the symptom, the host's own
-            // error or the origin's 429 is the reason, and only the reason
-            // tells a host what to do next. Most specific first — the host's
-            // thrown error outranks the origin's classification, which
-            // outranks the expiry — as on every other exit from this open.
-            throw closeAndThrow(Failure.openFailed(
-                interruptGuard.customInputFailure
-                    ?? interruptGuard.originFailure
-                    ?? FFmpegError(code: swift_AVERROR_EXIT(), operation: "probe budget exhausted")
-            ))
-        }
+        var probeStart = clock.now
+        var openedAt = probeStart
+        guard let input = try SourceOpener.open(
+            url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
+            inputFactory: inputFactory, hints: hints, interruptGuard: interruptGuard,
+            budget: budget, policy: .probe,
+            armed: { probeStart = clock.now },
+            opened: { _ in openedAt = clock.now }
+        ) else { throw Failure.noStreams }
         let analyzedAt = clock.now
 
         // The interlace verification consumes packets, which is why it was
