@@ -21,10 +21,17 @@ PrismCore turns media `AVPlayer` cannot open into media it can. The **remux
 path** (the main one) demuxes with libavformat, stream-copies video and audio
 into HLS-fMP4 on disk, and serves it from a loopback HTTP server — so the host
 plays a plain `AVPlayer` and keeps hardware decode, PiP, AirPlay, native track
-selection and the tvOS display handshake. Nothing is re-encoded, so Atmos stays
-object audio and Dolby Vision stays Dolby Vision (Profile 7 is converted to 8.1
-in flight). The **software path** is a real player for what AVPlayer cannot
-decode at all (VP9, MPEG-2, VC-1, verified-interlaced H.264): libavcodec into an
+selection and the tvOS display handshake. Video is never re-encoded. Audio
+AVPlayer takes is stream-copied — EAC3+JOC Atmos included, with its `dec3`
+extension re-applied so it stays object audio — and the rest is bridged, i.e.
+re-encoded: EAC3 5.1 by default (AAC 5.1 without the `eac3` encoder), FLAC up
+to 7.1 with `.lossless`, APAC 7.1.4 from TrueHD with `.heights` (OS 26).
+TrueHD and DTS:X object metadata does not survive the bridge. Dolby Vision
+Profiles 5, 8.1 and 8.4 stay Dolby Vision; Profile 7 is converted to
+single-layer 8.1 in flight, which drops the enhancement layer. DV is signalled
+only to a display whose `DisplayCapabilities.isDolbyVisionCapable` is true,
+which `current()` never reports on macOS. The **software path** is a real
+player for what AVPlayer cannot decode at all (VP9, MPEG-2, VC-1, verified-interlaced H.264): libavcodec into an
 `AVSampleBufferDisplayLayer` with its own clock. `PrismCoreEngine.decide` picks
 between them; a host that has no surface for the software path can decline it
 and route elsewhere.
@@ -33,10 +40,11 @@ and route elsewhere.
 
 ## House rules
 
-- **Never copy code from AetherEngine.** It is prior art we study for
-  *approach* only (LGPL-3.0 vs our LGPL-2.1+, and it is someone else's work).
-  Read it, describe the mechanism in your own words, then design ours. Saying
-  "convergent with AetherEngine" in a PR is good; lifting a function is not.
+- **Never copy code from the referenční implementace.** It is prior art we
+  study for *approach* only (LGPL-3.0 vs our LGPL-2.1+, and it is someone else's
+  work). Read it, describe the mechanism in your own words, then design ours.
+  Saying "convergent with the referenční implementace" in a PR is good;
+  lifting a function is not.
 - **Comments explain *why*, never *what*.** A comment that restates the line
   above it is noise. A comment that records the failure a line prevents is the
   most valuable thing in this repo — most of the notes below started as one.
@@ -440,11 +448,20 @@ PRISMCORE_FUZZ_TARGET=<target> .build/debug/prismcore-fuzz corpus/
 3. `gh release create X.Y.Z` with notes that say what changed and why. Since
    1.0.0 this project follows full semver: breaking → major, feature → minor,
    fix → patch.
-4. **Bump the host pin in two places or not at all.** Aether pins PrismCore
-   exactly, in `project.yml` (`exactVersion:`) *and*
-   `ci_scripts/Package.resolved.pinned`. Bumping one silently gives devices and
-   TestFlight different engines — that happened (local 0.1.11, cloud 0.1.6) and
-   is why the pin is exact.
+4. **`TrueHDObjects.xcframework.zip` only when it was rebuilt.** A release
+   that changes `Rust/TrueHDObjects` builds it with
+   `Rust/TrueHDObjects/build-xcframework.sh`, attaches the zip to the GitHub
+   release, and points the `.binaryTarget(url:checksum:)` in `Package.swift` at
+   that release with the new checksum (the script writes it next to the zip).
+   A release that leaves the Rust sources alone keeps the URL of the last
+   release that attached one and uploads nothing.
+5. **Bump each host pin in all of its places or not at all.** Aether pins
+   PrismCore exactly, in `project.yml` (`exactVersion:`) *and*
+   `ci_scripts/Package.resolved.pinned` (pin PR against `staging`). Bumping one
+   silently gives devices and TestFlight different engines — that happened
+   (local 0.1.11, cloud 0.1.6) and is why the pin is exact. Wellspring (Nexus)
+   pins it exactly too: `Package.swift` (`exact:`), `Package.resolved` and
+   `PrismProbeReport.pinnedVersion` together (pin PR against `main`).
 
 ---
 
@@ -461,11 +478,22 @@ Sources/PrismCore/
   Loopback/                  LoopbackHTTPServer + segment providers
   Subtitles/                 WebVTT renditions, bitmap decode + OCR
   Display/                   tvOS criteria + settle
+  DolbyVision/               DolbyVisionRPUConverter (P7 → 8.1 via libdovi),
+                             HEVC NAL framing
+  HLS/                       MasterPlaylistBuilder, MediaPlaylistWriter
+  Preview/                   SeekPreviewService, resident segment store,
+                             cached audio clips
+  Fuzz/                      FuzzTargets + seed corpus (package access)
   Software/                  the decode-and-render path
   Diagnostics/               SessionDiagnosticReport (public); package-only
                              StartupCheckpointRun, SegmentVerifier (shared by
                              the CLI and the tests)
 Sources/prismcore-cli/       macOS repro tool: probe, serve, validate, bench, segverify
+Sources/prismcore-fuzz/      fuzzer executable: hunt / run, libFuzzer entry
+Rust/TrueHDObjects/          TrueHD object renderer behind `.heights`, shipped
+                             as an xcframework (build-xcframework.sh)
+Scripts/                     proxy-model-server.py, the host-proxy origin for
+                             benchmarks
 Tests/PrismCoreTests/        Swift Testing, fixtures, opt-in harnesses
 ```
 

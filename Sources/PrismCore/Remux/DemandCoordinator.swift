@@ -210,15 +210,6 @@ final class DemandCoordinator: @unchecked Sendable {
         return Double(to - from) * nominalSegmentSeconds
     }
 
-    /// `parkWhileAhead` for the sequential shape, whose provider serves hits
-    /// (and reports them) but has no plan: the same cap, on the nominal
-    /// stride, so a fast source no longer demuxes and writes the whole film
-    /// while the viewer is on minute two. Same contract — producer's thread
-    /// only. Never parks before the first fetch.
-    func parkWhileAheadSequential(producing: Int, isCancelled: () -> Bool) {
-        parkWhileAhead(producing: producing, isCancelled: isCancelled)
-    }
-
     /// The newest demanded index, or `nil` before the first fetch — what
     /// sequential retention must never evict ahead of.
     var playheadIndex: Int? {

@@ -90,9 +90,6 @@ final class SoftwareAudioDecoder {
     private var clock: AudioClock
     private var formatDescription: CMAudioFormatDescription?
 
-    /// The clock's state, for diagnostics and tests.
-    var clockState: AudioClock { clock }
-
     var routeDescription: String {
         "\(codecName) → LPCM f32 \(outputFormat.channelCount)ch @ \(outputFormat.sampleRate) Hz"
     }

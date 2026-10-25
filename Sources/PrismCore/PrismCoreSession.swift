@@ -3,7 +3,7 @@ import CoreGraphics
 
 /// One playback session: remux `sourceURL` into HLS-fMP4 on disk and serve it
 /// from the loopback. The host plays the returned playlist URL with its own
-/// `AVPlayer` — PrismCore v0 is a service, not a player (see README).
+/// `AVPlayer` — PrismCore is a service, not a player (see README).
 ///
 /// ```swift
 /// let session = try PrismCoreSession(url: mkvURL)
@@ -292,8 +292,8 @@ public actor PrismCoreSession {
         /// playlists — `.event` unless the host opted in. A planned session
         /// ignores it.
         public var sequentialPlaylist: SequentialPlaylist
-        /// Mux the one best audio track into the variant (v0 shape) instead of
-        /// serving a master with renditions.
+        /// Mux the one best audio track into the variant (the muxed shape)
+        /// instead of serving a master with renditions.
         public var forceMuxedShape: Bool
         public var keyframeIndexCacheDirectory: URL?
         /// The host's name for the source in that cache. Not settable through
@@ -616,10 +616,11 @@ public actor PrismCoreSession {
     ///     (or will switch into) the source's own dynamic range. Only a host
     ///     knows this, and getting it wrong is expensive: an HDR variant offered
     ///     to an SDR-parked panel is rejected outright rather than tone-mapped,
-    ///     so the default is `false` and an HDR source then keeps v0's
+    ///     so the default is `false` and an HDR source then keeps the
     ///     media-playlist shape — which means its audio stays muxed and
-    ///     unswitchable until the host opts in. Phase 4 is where this becomes a
-    ///     read instead of a parameter.
+    ///     unswitchable until the host opts in. The `DisplayCapabilities`
+    ///     initializer takes this as a read (`DisplayCapabilities.current()`)
+    ///     instead of a parameter.
     ///   - displayIsDolbyVisionCapable: whether that display can present Dolby
     ///     Vision. Same reasoning; `false` simply omits the DV claims.
     ///   - segmentCacheBytes: disk budget for produced segments. Only
@@ -633,7 +634,7 @@ public actor PrismCoreSession {
     ///     segment the budget already deleted. Ignored by a planned session.
     ///     See `SequentialPlaylist`.
     ///   - forceMuxedShape: skip the master/renditions shape and mux the one
-    ///     best audio track into the variant (v0 shape). This is the host's
+    ///     best audio track into the variant (the muxed shape). This is the host's
     ///     fallback when AVPlayer refuses a served master (-11868 / -11848 /
     ///     -1002): make a NEW session with this set — the rejected master's
     ///     variant alone would be silent video, renditions live only in
@@ -715,10 +716,10 @@ public actor PrismCoreSession {
     /// The same session, taking the display's capabilities as one value.
     ///
     /// Prefer this over the two booleans: `DisplayCapabilities.current()` reads
-    /// them from the display the host is actually playing to, which is what phase
-    /// 4 set out to replace the caller-supplied guess with. The booleans stay for
-    /// callers that genuinely know better than the read — a host mirroring to an
-    /// external panel, or a test pinning a shape.
+    /// them from the display the host is actually playing to instead of a
+    /// caller-supplied guess. The booleans stay for callers that genuinely know
+    /// better than the read — a host mirroring to an external panel, or a test
+    /// pinning a shape.
     ///
     /// - Parameter dialogueBoost: extra **Dialogue Boost** renditions to derive
     ///   from the default audio track — the engine-side answer to a feature
