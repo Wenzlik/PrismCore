@@ -566,9 +566,10 @@ public enum MasterPlaylistBuilder {
         )
     }
 
-    /// RFC 6381 tags for the audio codecs the remuxer stream-copies.
-    /// `nil` for anything the audio bridge would have to touch — by then the
-    /// caller declares the *bridged* codec (`ec-3`), not the source's.
+    /// RFC 6381 tags for source audio codecs, by FFmpeg codec name; `nil` for
+    /// a codec with no tag here. A bridged track is declared with the
+    /// *bridged* codec (`ec-3`, or AAC without the `eac3` encoder), not the
+    /// source's.
     public static func audioCodecString(forCodecName name: String, profileName: String? = nil) -> String? {
         switch name {
         case "aac":

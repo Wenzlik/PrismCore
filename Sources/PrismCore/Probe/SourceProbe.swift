@@ -288,7 +288,9 @@ public enum StreamCopyability: String, Sendable, Equatable {
     /// Needs the audio bridge (TrueHD / DTS family and the rest of its set →
     /// EAC3 5.1, or AAC 5.1 without the `eac3` encoder).
     case requiresAudioBridge
-    /// Neither: the host has to route this stream to another engine.
+    /// Neither: the remux path cannot carry this stream. A source whose
+    /// `nativeReadiness` is `.unsupported` goes to the software path when this
+    /// build can decode its video (`PrismCoreEngine.decide`).
     case unsupported
 }
 
