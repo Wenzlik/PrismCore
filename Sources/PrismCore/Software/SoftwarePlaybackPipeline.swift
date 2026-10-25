@@ -918,36 +918,16 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// analysis runs under the shared read caps (`SourceOpenTuning`) — over a
     /// network this open IS the wait the user sees.
     private func openInput(url: URL, httpHeaders: [String: String], coordinatedHTTP: Bool = false) throws {
-        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-        defer { av_dict_free(&openOptions) }
-
-        // The guard has to exist before the open — the blocking reads check
-        // the URLContext's copy of the callback, taken at creation — and it
-        // is armed across open + analysis so a starving server produces an
-        // error instead of a caller parked forever (`stop()` trips it too).
+        // Publish before allocation, as on the original software path; stop()
+        // reaches the permanent callback throughout open and analysis.
         let readGuard = ReadInterruptGuard()
         stateLock.withLock { interruptGuard = readGuard }
-        var context = readGuard.makeContext()
-        if coordinatedHTTP, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let context {
-            do { try readGuard.installHTTPInput(on: context, url: url, headers: httpHeaders) }
-            catch { avformat_free_context(context); throw error }
-        }
-        readGuard.arm(budget: SourceOpenTuning.probeBudget)
         defer { readGuard.disarm() }
-
-        let sourceSpec = url.isFileURL ? url.path : url.absoluteString
-        try FFmpegError.check(
-            avformat_open_input(&context, sourceSpec, nil, &openOptions),
-            "avformat_open_input"
+        _ = try SourceOpener.open(
+            url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
+            interruptGuard: readGuard, budget: SourceOpenTuning.probeBudget, policy: .software,
+            opened: { self.input = $0 }
         )
-        input = context
-        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
-        // `find_stream_info` swallows aborted reads — cut off mid-analysis it
-        // returns success with half-filled parameters. The clock is the honest
-        // witness (see `SourceProbe.open`).
-        if readGuard.shouldInterrupt {
-            throw FFmpegError(code: swift_AVERROR_EXIT(), operation: "open budget exhausted")
-        }
         try describeInput()
     }
 
