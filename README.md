@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>A playback engine core for Apple platforms.</b><br>
-  FFmpeg demuxes. Apple plays. Dolby Atmos and Dolby Vision survive the trip.<br>
+  FFmpeg demuxes. Apple plays. Video is never re-encoded; Dolby Vision and EAC3 Atmos survive the trip.<br>
   No view, no controls, no state — you keep your AVPlayer and your UI.
 </p>
 
@@ -21,8 +21,13 @@
 
 Any container libavformat can read (MKV, MPEG-TS, AVI, …) is remuxed on the fly
 into **HLS-fMP4**, served from a loopback HTTP server on `127.0.0.1`, and handed
-to a plain `AVPlayer` as a playlist URL. Not a single frame is re-encoded. Apple's
-stack then does what only it can do on its own platforms:
+to a plain `AVPlayer` as a playlist URL. Video is never re-encoded — not a single
+frame. Audio AVPlayer cannot take (TrueHD, DTS, …) is bridged, which does
+re-encode it: to EAC3 5.1 by default (AAC 5.1 in a build without the `eac3`
+encoder), FLAC up to 7.1 with `bridgedAudio: .lossless`, or APAC 7.1.4 with the
+TrueHD-only `objectAudioRendering: .heights` (OS 26). Only EAC3+JOC Atmos is
+stream-copied as object audio; TrueHD and DTS:X object metadata does not survive
+the bridge. Apple's stack then does what only it can do on its own platforms:
 
 - **hardware decode** (VideoToolbox),
 - **Dolby Atmos passthrough** — EAC3+JOC is stream-copied, never decoded to PCM,
@@ -63,7 +68,7 @@ table: the app's name, a link, and its platforms.
 | Video (native) | H.264, HEVC (incl. Main 10), AV1 **where the device has a hardware decoder** — asked with `VTIsHardwareDecodeSupported`, not inferred from a chip name |
 | Video (software) | VP9 / VP8, MPEG-2, MPEG-4 Part 2, VC-1 / WMV3, AV1 without hardware (libdav1d), interlaced H.264 with CPU `bwdif` deinterlace at field rate |
 | HDR | HDR10 (PQ) and HLG, signaled honestly in the master playlist and tone-mapped by the system |
-| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi; 8.2's Rec.709 base plays as plain SDR because that is what it is |
+| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.1 and converted Profile 7 play as their HDR10 base, 8.4 as its HLG base |
 | HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC (non-LATM), AC3, EAC3, FLAC, ALAC — bit-for-bit |
@@ -85,7 +90,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.0.0")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.4")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -1109,7 +1114,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.0.0")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.4")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
@@ -1160,10 +1165,11 @@ loud rather than hoping nobody looks.
 
 ## Status
 
-Shipping, and pre-1.0 for the reason the version number suggests: the API is still
-free to move, and two headline claims are proven by construction rather than by a lab.
+Shipping, and stable under semantic versioning since 1.0.0 (see *Stability and
+versioning*). Two headline claims are still proven by construction rather than by a
+lab.
 
-The test suite is 253 tests across 44 suites, hermetic apart from an opt-in
+The test suite is 853 tests across 121 suites, hermetic apart from an opt-in
 real-media harness. It exercises the playlists, the loopback server, the subtitle
 renditions and the audio bridge's decode → resample → FIFO → encode chain, plus
 end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces)
@@ -1178,9 +1184,13 @@ codec survives the round-trip), the rendition declares `CHANNELS="16/JOC"` (the 
 is unit-tested), and the served `dec3` declares complexity index 16 on Dolby's own
 demo file. Whether the objects reach a receiver over HDMI is a device question.
 **Dolby Vision**: the whole signaling path exists and every rule is pinned by a unit
-test, but a synthetic fixture cannot carry an RPU, so Profile 7 conversion is
-established only as far as "the library links and the code runs". Both want a device
-and real media, and that is what the Aether integration is currently buying.
+test. For Profile 7 → 8.1, a parity test (since 3.8.4) pins that the enhancement
+layer is dropped and that the converted stream's master declares a PQ base with
+`dvh1.08.06/db1p`, the same signalling a native 8.1 title gets; the RPU rewrite
+itself was checked offline on a real Profile 7 title with the shipped libdovi
+(3.8.3), because a synthetic fixture cannot carry a real RPU. Both claims still
+want a device and real media, and that is what the Aether integration is
+currently buying.
 
 The software path is exercised headless as far as it can be — the VP9 fixture decodes
 to `CVPixelBuffer`s of the right shape on a monotonic, source-anchored timeline, and
@@ -1257,11 +1267,6 @@ report counts each rendition's `suspensions` and `resumptions`;
 `cachedAudio` has nothing to return for a stopped rendition's time after it
 stopped.
 
-Audio delay is fixed at construction and carried by every clone. Changing it
-mid-title means a replacement session and a host-managed handover at the current
-position — see *Changing a setting mid-title* below. Both positive and negative
-offsets are bounded to two seconds; this does not add an AVPlayer transport
-controller to PrismCore.
 Audio delay can be changed while the title plays — it is a lip-sync control —
 and is preserved by fallback factories. Both positive and negative offsets are
 bounded to two seconds, and a non-finite value becomes zero. The two paths take

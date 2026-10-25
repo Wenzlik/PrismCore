@@ -3,7 +3,7 @@ import Foundation
 /// The one call that answers *"how do I play this?"* — and hands back something
 /// already started.
 ///
-/// PrismCore has two engines with genuinely different shapes, and phase 7 is
+/// PrismCore has two engines with genuinely different shapes, and this is
 /// where that stops being hideable. `PrismCoreSession` is a **service**: it
 /// remuxes into HLS-fMP4 and gives the host a playlist URL for its own
 /// `AVPlayer`, which keeps PiP, AirPlay, Atmos passthrough and the Dolby Vision
@@ -16,8 +16,8 @@ import Foundation
 ///
 /// ## Why not inside `PrismCoreSession`
 ///
-/// The roadmap's phase 7 line says "wire it into `PrismCoreSession`". That would
-/// be the worse design and it isn't what this does. A session is built around a
+/// The obvious place for routing is inside `PrismCoreSession`. That would be
+/// the worse design and it isn't what this does. A session is built around a
 /// work directory, a loopback server, a segmenting remuxer, demand coordination
 /// and a disk budget — the software path needs **none** of it. Folding the
 /// pipeline in would mean every software-decoded title allocates a temp
@@ -82,12 +82,14 @@ public enum PrismCoreEngine {
         public let reason: String
     }
 
-    /// Whether this build can re-encode non-streamable audio to EAC3.
+    /// Whether this build can re-encode non-streamable audio at all — to EAC3
+    /// 5.1 when FFmpeg has the `eac3` encoder, otherwise to AAC 5.1.
     ///
     /// Public because it changes what PrismCore can do, and a host that ships
-    /// its own FFmpeg build is the one that decides the answer: stock MPVKit has
-    /// the ac3/eac3 *decoders* only, so the bridge is unavailable until a fork
-    /// configures `--enable-encoder=eac3`.
+    /// its own FFmpeg build is the one that decides the answer. The package's
+    /// own MPVKit dependency (the Wenzlik/MPVKit 1.0.1 fork) has the `eac3`
+    /// encoder; stock MPVKit has the ac3/eac3 *decoders* only, so there the
+    /// bridge targets AAC. `FFmpegBuild.capabilities.hasEAC3Encoder` says which.
     public static var isAudioBridgeAvailable: Bool { AudioBridge.isEncoderAvailable }
 
     // MARK: - Routing

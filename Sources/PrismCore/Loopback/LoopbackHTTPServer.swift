@@ -153,7 +153,7 @@ public actor LoopbackHTTPServer {
         LocalNetworkInterface.assignedIPv4Addresses()
     }
 
-    /// Serve a directory from disk — the v0 shape, unchanged in behavior.
+    /// Serve a directory from disk (`DirectorySegmentProvider`).
     public init(root: URL, limits: Limits = Limits(), reachability: Reachability = .loopbackOnly) {
         self.init(
             provider: DirectorySegmentProvider(root: root),

@@ -48,8 +48,8 @@ public struct PendingResult: Sendable {
 /// The server's payload seam. `LoopbackHTTPServer` never touches the filesystem
 /// itself: it asks a provider for a path and frames whatever comes back.
 ///
-/// v0 ships `DirectorySegmentProvider` (serve what's on disk, instantly). The
-/// demand-driven producer of the seek phase plugs in here instead: it can
+/// `DirectorySegmentProvider` serves what's on disk, instantly. The
+/// demand-driven producer plugs in here instead: it can
 /// answer `.pending` for a segment it is about to cut, and the server keeps
 /// AVPlayer's watchdog fed on its behalf.
 public protocol SegmentProvider: Sendable {
@@ -59,8 +59,7 @@ public protocol SegmentProvider: Sendable {
     func data(forPath path: String) async -> ProviderResult
 }
 
-/// Serves one directory, whole files, from disk. The v0 behavior, now behind
-/// the seam.
+/// Serves one directory, whole files, from disk.
 public struct DirectorySegmentProvider: SegmentProvider {
 
     private let root: URL
