@@ -8,6 +8,25 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.5] — 2026-10-25
+
+Documentation only: nothing in `Sources/` changed apart from doc comments and
+the version string. Source-compatible.
+
+### Changed
+
+- **README, AGENTS.md and doc comments match the code.** Video is never
+  re-encoded, but bridged audio is (EAC3 5.1, AAC 5.1 without the `eac3`
+  encoder, FLAC with `.lossless`, APAC 7.1.4 with `.heights`), and TrueHD /
+  DTS:X objects do not survive the bridge. Profile 7 → 8.1 drops the
+  enhancement layer, and Dolby Vision is signalled only to a display that
+  reports `isDolbyVisionCapable`. The status section follows semver since
+  1.0.0 and the current test count; a stale audio-delay paragraph that
+  contradicted `setAudioDelaySeconds` is gone. `isAudioBridgeAvailable` is
+  documented as what it is: true with either target encoder.
+- **Release checklist.** AGENTS.md now covers the TrueHDObjects zip (only when
+  the Rust library is rebuilt) and the Wellspring pin next to Aether's.
+
 ## [3.8.4] — 2026-10-24
 
 Tests only: nothing in `Sources/` changed apart from the version string.
@@ -3536,7 +3555,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...HEAD
+[3.8.5]: https://github.com/Wenzlik/PrismCore/compare/3.8.4...3.8.5
 [3.8.4]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...3.8.4
 [3.8.3]: https://github.com/Wenzlik/PrismCore/compare/3.8.2...3.8.3
 [3.8.2]: https://github.com/Wenzlik/PrismCore/compare/3.8.1...3.8.2
