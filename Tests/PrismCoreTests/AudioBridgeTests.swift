@@ -606,7 +606,7 @@ struct AudioBridgePipelineTests {
     /// Program Config Element" — the form AVPlayer silently refuses.
     private func aacChannelConfiguration(of bridge: AudioBridge) throws -> Int {
         let format = try #require(avformat_alloc_context())
-        defer { var format: UnsafeMutablePointer<AVFormatContext>? = format; avformat_free_context(format) }
+        defer { avformat_free_context(format) }
         let stream = try #require(avformat_new_stream(format, nil))
         try bridge.configure(outputStream: stream)
         let par = stream.pointee.codecpar!

@@ -171,12 +171,13 @@ struct SessionDiagnosticReportTests {
         let url = try #require(URL(string: "https://origin.example/movie.mkv?X-Plex-Token=ORIG1234"))
         let redaction = Redaction(url: url, httpHeaders: [:])
         let cdn = "https://user:cdnpass9@cdn.example/file.mkv?old=ORIG1234&token=CDNSECRET99#frag77"
+        let cdnURL = try #require(URL(string: cdn))
         let underlying = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: [
             "NSErrorFailingURLStringKey": cdn,
-            NSURLErrorFailingURLErrorKey: try #require(URL(string: cdn)),
+            NSURLErrorFailingURLErrorKey: cdnURL,
         ])
         let failure = redaction.failure(PrismCoreError.originUnreachable(
-            status: nil, url: try #require(URL(string: cdn)), underlying: underlying))
+            status: nil, url: cdnURL, underlying: underlying))
         for secret in ["CDNSECRET99", "cdnpass9", "frag77", "ORIG1234"] {
             #expect(!failure.description.contains(secret), "\(secret) survived: \(failure.description)")
         }
