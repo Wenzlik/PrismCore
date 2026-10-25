@@ -20,10 +20,7 @@ enum SegmentPlanProbe {
 
         var options: OpaquePointer?
         defer { av_dict_free(&options) }
-        if !httpHeaders.isEmpty {
-            let blob = httpHeaders.map { "\($0.key): \($0.value)\r\n" }.joined()
-            av_dict_set(&options, "headers", blob, 0)
-        }
+        SourceOpenTuning.applyHTTPHeaders(httpHeaders, to: &options)
 
         let spec = url.isFileURL ? url.path : url.absoluteString
         guard avformat_open_input(&input, spec, nil, &options) >= 0, let input else { return nil }

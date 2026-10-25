@@ -48,10 +48,7 @@ public enum SourceOpenTuning {
     /// Returns an owned dictionary — the caller frees it with `av_dict_free`.
     static func makeOptions(httpHeaders: [String: String]) -> OpaquePointer? {
         var options: OpaquePointer?
-        if !httpHeaders.isEmpty {
-            let headerBlob = httpHeaders.map { "\($0.key): \($0.value)\r\n" }.joined()
-            av_dict_set(&options, "headers", headerBlob, 0)
-        }
+        applyHTTPHeaders(httpHeaders, to: &options)
         // Reconnect on dropped HTTP connections — the demuxer read side.
         av_dict_set(&options, "reconnect", "1", 0)
         av_dict_set(&options, "reconnect_streamed", "1", 0)
@@ -66,4 +63,12 @@ public enum SourceOpenTuning {
         av_dict_set(&options, "analyzeduration", String(analyzeDurationMicroseconds), 0)
         return options
     }
+
+    static func applyHTTPHeaders(_ httpHeaders: [String: String], to options: inout OpaquePointer?) {
+        if !httpHeaders.isEmpty {
+            let headerBlob = httpHeaders.map { "\($0.key): \($0.value)\r\n" }.joined()
+            av_dict_set(&options, "headers", headerBlob, 0)
+        }
+    }
+
 }
