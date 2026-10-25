@@ -776,80 +776,31 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Returns `nil` when a `cancel()` ended the open; the context is closed
     /// by then. On success the guard is published as `activeGuard`.
     private func openSourceContext() throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
-        // HTTP(S) inputs carry the caller's headers (a Plex token, a WebDAV
-        // authorization) on the demux connection itself, under the shared
-        // read caps (see `SourceOpenTuning`).
-        var openOptions = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
-        defer { av_dict_free(&openOptions) }
-
         let interruptGuard = ReadInterruptGuard()
-        var input = interruptGuard.makeContext()
-        // Host-supplied bytes take `pb`; the coordinated HTTP reader is
-        // the fallback for sources the host does NOT carry itself.
-        if let inputFactory, let input {
-            do { try interruptGuard.installCustomInput(on: input, factory: inputFactory) }
-            catch { avformat_free_context(input); throw error }
-        } else if coordinatedHTTP, ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? ""), let input {
-            do { try interruptGuard.installHTTPInput(on: input, url: sourceURL, headers: httpHeaders) }
-            catch { avformat_free_context(input); throw error }
-        }
-        // Published BEFORE the open, not after it. `cancel()` can only
-        // reach a guard it can see, and until 3.1.0 this one became
-        // visible only once the open had returned — so a `stop()` that
-        // landed during the open bounced off, and the thread kept the
-        // whole `probeBudget` (10 s) for itself no matter who asked it to
-        // come back. Measured on `ErrorTaxonomyTests.starvedStartupIsTheBudget`
-        // (an origin that withholds the first byte for 3 s): the teardown
-        // took 2.3 s before this line and 4 ms after it.
-        //
-        // This is also the only way the host-input hook can reach an open
-        // that parked inside `read` — `installCustomInput` ran a few lines
-        // up, but the guard nobody can see cancels nobody.
-        activeGuardLock.withLock {
-            activeGuard = interruptGuard
-            if cancelled.isSet { interruptGuard.cancel() }
-        }
-        // Bounded like the probe's open, and for the same reason: a
-        // server that accepts and then starves the reads would otherwise
-        // pin this producer forever — the session's startup timeout fires,
-        // but the blocked thread never comes back. On expiry the open
-        // throws and the session surfaces a startup error instead.
-        interruptGuard.arm(budget: SourceOpenTuning.probeBudget)
-        let sourceSpec = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
+        var prepared = false
+        let input: UnsafeMutablePointer<AVFormatContext>?
         do {
-            try FFmpegError.check(
-                avformat_open_input(&input, sourceSpec, nil, &openOptions),
-                "avformat_open_input"
+            input = try SourceOpener.open(
+                url: sourceURL, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
+                inputFactory: inputFactory, interruptGuard: interruptGuard,
+                budget: SourceOpenTuning.probeBudget, policy: .remux,
+                prepared: {
+                    prepared = true
+                    // Publish after input installation but before open: stop()
+                    // must reach a guard whose host read can already block.
+                    activeGuardLock.withLock {
+                        activeGuard = interruptGuard
+                        if cancelled.isSet { interruptGuard.cancel() }
+                    }
+                }
             )
-            guard let opened = input else { throw Failure.openProducedNoContext }
-            try FFmpegError.check(
-                avformat_find_stream_info(opened, nil), "avformat_find_stream_info"
-            )
-            // `find_stream_info` swallows an aborted read and returns
-            // success with half-filled parameters, so an expired budget is
-            // read off the guard, not the return code.
-            if interruptGuard.shouldInterrupt {
-                throw FFmpegError(code: swift_AVERROR_EXIT(), operation: "avformat_find_stream_info")
-            }
         } catch {
-            // Closed while its guard is still alive (the callback runs on
-            // the teardown reads), and unpublished: nothing owns this
-            // context any more, and a `cancel()` arriving later must not
-            // find a guard whose reads have already been closed.
-            avformat_close_input(&input)
+            // Installation failures preceded publication and historically
+            // bypassed cancellation suppression and transport error mapping.
+            guard prepared else { throw error }
             activeGuardLock.withLock { activeGuard = nil }
-            // A cancellation is not a source failure, wherever it lands.
-            // Now that the guard is visible during the open, a `stop()`
-            // can abort the open itself — and `run()` already returns
-            // normally for a cancel anywhere in the copy loop, so it
-            // returns normally for this one too. Reporting it as an
-            // unopenable source would turn every teardown-during-startup
-            // into a spurious error in the host's log.
             if cancelled.isSet { return nil }
-            // Over the coordinated reader every transport verdict reaches
-            // libavformat as an errno, so the guard holds the only copy of
-            // what the origin actually said (see `ReadInterruptGuard`).
-            throw interruptGuard.customInputFailure ?? interruptGuard.originFailure ?? error
+            throw error
         }
         interruptGuard.disarm()
         guard let input else { throw Failure.openProducedNoContext }
