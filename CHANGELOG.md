@@ -8,6 +8,27 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.6] — 2026-10-25
+
+Internal cleanup: no public API change and no behaviour change.
+Source-compatible.
+
+### Changed
+
+- **One internal path opens a source.** Remux fallback and recovery, software
+  playback, the probe and the seek preview now open their input through an
+  internal `SourceOpener` instead of four copies of the same FFmpeg setup. A
+  per-caller policy keeps what differed between them: which errors are
+  reported and how they are wrapped, which budget applies and where it is
+  checked, and who closes the input when a step fails.
+
+### Removed
+
+- **Dead code.** The uncalled internal
+  `DemandCoordinator.parkWhileAheadSequential` and
+  `SoftwareAudioDecoder.clockState` are gone, and the test target builds
+  without compiler warnings.
+
 ## [3.8.5] — 2026-10-25
 
 Documentation only: nothing in `Sources/` changed apart from doc comments and
@@ -3555,7 +3576,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...HEAD
+[3.8.6]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...3.8.6
 [3.8.5]: https://github.com/Wenzlik/PrismCore/compare/3.8.4...3.8.5
 [3.8.4]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...3.8.4
 [3.8.3]: https://github.com/Wenzlik/PrismCore/compare/3.8.2...3.8.3
