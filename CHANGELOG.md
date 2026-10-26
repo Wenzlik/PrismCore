@@ -22,14 +22,20 @@ source-compatible.)
 - **A bridged track that ends before the video plays silence to the end.**
   In the planned shape every audio slot after the track's last sample was
   listed in the playlist and answered 404 — at the end of a film whose
-  bridged track stops early, or across a gap a whole segment long. Such a
-  slot is now held instead of declared empty, and filled with silence by
-  the bridge once the next slot has passed without audio too (an interleave
-  never lags a whole segment), or at the end of the source, up to the
-  video's end; audio that resumes re-anchors the bridge's clock after it.
-  A slot followed by audio stays empty, as before. Stream-copied tracks are
-  unchanged (there is no encoder to make their silence) and still end
-  early; so do heights renditions and the sequential shape.
+  bridged track stops early, or across a gap two or more segments long.
+  Such a slot is now held instead of declared empty, and filled with silence
+  by the bridge once the next slot has passed without audio too (an
+  interleave never lags a whole segment), or at the end of the source, up to
+  the video's end. The silence opens on its slot's own boundary, and audio
+  that resumes after it keeps its own time: movenc used to close any gap
+  between two fragments of one muxer (a fragment's `tfdt` was the previous
+  fragments' summed durations), so audio after a gap played early by the
+  gap's length; such a fragment is now marked discontinuous. The slot right
+  before resumed audio stays empty, as before (it may hold that audio's late
+  interleave). Stream-copied tracks are unchanged (no encoder to make their
+  silence) and still end early, as do heights renditions and the sequential
+  shape. Files whose audio runs the whole length are served byte for byte as
+  before (three fixtures compared).
 - **An E-AC-3 / AC-3 init is never minted from a cut with no packets.** A
   lazy bridged alternate armed where its track had no audio (past its end)
   wrote a moov with a zero-size `stsd`, and every segment under that init

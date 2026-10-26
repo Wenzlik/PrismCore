@@ -643,13 +643,39 @@ final class AudioBridge {
     /// Not the drift `BridgeClock` avoids by re-anchoring: the silence ends on
     /// the slot's boundary, and audio that resumes later re-anchors the clock
     /// on its own timestamp, which lies past it.
+    ///
+    /// The silence continues the output when it stands within the clock's gap
+    /// tolerance of `start`. Further back, the slot before was already cut: the
+    /// silence opens a new fragment, so it starts at `start` — continued from
+    /// the old position instead, the fragment's `tfdt` would sit seconds before
+    /// its slot. What is still buffered of the old audio (a decoder's held
+    /// frame, less than one encoder frame in the FIFO: the very end of the
+    /// track) is dropped with the old timeline; it belongs to a slot already cut.
+    /// Mid-stream, a decoder's held frame is dropped either way: it would come
+    /// out after the silence when the audio resumes.
+    /// Whether `padSilence(from: start, …)` starts a new timeline (see there): the
+    /// muxer has to be told before the first packet (`FMP4SegmentWriter.markDiscontinuity`).
+    func padOpensNewTimeline(from start: Int64) -> Bool {
+        guard let fifo else { return false }
+        return clock.isAnchored && clock.nextPTS + Int64(av_audio_fifo_size(fifo)) < start - clock.gapTolerance
+    }
+
     func padSilence(from start: Int64, until end: Int64, final: Bool, emit: Emit) throws {
         guard !drained, let encoderCtx, let fifo else { return }
-        if final {
+        let gap = padOpensNewTimeline(from: start)
+        if final, !gap {
             try drainInput(emit: emit)
             if swrCtx != nil {
                 try convertIntoFIFO(frame: nil)
             }
+        } else {
+            if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
+            boostFilter?.reset()
+            // The end of the source either way: `flush` has nothing left to drain.
+            if final { inputDrained = true }
+        }
+        if gap {
+            try restartTimeline()
         }
         let depth = Int64(av_audio_fifo_size(fifo))
         let position = clock.isAnchored ? clock.nextPTS + depth : start
@@ -677,6 +703,18 @@ final class AudioBridge {
             remaining -= Int64(samples)
         }
         try encodeFromFIFO(final: false, emit: emit)
+    }
+
+    /// Forget the output timeline without touching the decoder: buffered samples,
+    /// the resampler's delay line, an encoder that holds frames, the clock.
+    private func restartTimeline() throws {
+        if let fifo { av_audio_fifo_reset(fifo) }
+        if swrCtx != nil { swr_free(&swrCtx) }
+        swrInFormat = AV_SAMPLE_FMT_NONE
+        swrInRate = 0
+        chunker.reset()
+        clock.reset()
+        try reopenEncoderIfItKeepsFrames()
     }
 
     private func drainDecoder(emit: Emit) throws {

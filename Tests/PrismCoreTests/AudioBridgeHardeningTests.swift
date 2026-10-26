@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import PrismCore
 import Libavcodec
+import Libavformat
 import Libavutil
 
 /// The audio bridge's edges: what the system refuses even when the codec is
@@ -153,8 +154,59 @@ struct AudioBridgeHardeningTests {
         #expect(!report.hasErrors && report.isComplete, "\(report.findings)")
         let main = try #require(report.playlists.first { $0.uri.hasPrefix("audio0/") })
         #expect(main.segmentsChecked == 3)
-        // 14 s of 1536-sample E-AC-3 frames is 437; without the silence, 4 s is 125.
-        #expect(main.audioFrames > 400, "\(main.audioFrames) frames")
+        // The last slot (8–14 s) is all silence and opens on its own boundary, not
+        // where the audio stopped (4 s): playback follows `tfdt`.
+        let work = await session.workDirectory.appendingPathComponent("audio0")
+        let initSegment = try Data(contentsOf: work.appendingPathComponent("init.mp4"))
+        let last = try Data(contentsOf: work.appendingPathComponent("seg00002.m4s"))
+        let opens = try Self.firstPacketSeconds(initSegment: initSegment, media: last)
+        #expect(abs(opens - 8) < 0.1, "the silent slot opens at \(opens) s")
+        // 8–14 s of 1536-sample E-AC-3 frames; without the silence there were none.
+        #expect(main.audioFrames > 300, "\(main.audioFrames) frames")
+    }
+
+    @Test("A gap of two slots in a bridged track: the first is silence on its boundary, the audio after keeps its time")
+    func gapInBridgedTrackKeepsTheTimeline() async throws {
+        // 26 s planned as 2 + 6 + 6 + 6 + 6; MP2 audio 0–4 s and 21–26 s. Before: the 8–14 s
+        // slot answered 404, and movenc closed the 17 s gap, so the resumed audio played at ~4 s.
+        let session = try PrismCoreSession(url: try fixture("h264_mp2gap_26s.mkv"))
+        defer { Task { await session.stop() } }
+        let report = try await verifyServed(session)
+        let work = await session.workDirectory.appendingPathComponent("audio0")
+        let initSegment = try Data(contentsOf: work.appendingPathComponent("init.mp4"))
+        func opens(_ index: Int) throws -> Double {
+            try Self.firstPacketSeconds(
+                initSegment: initSegment,
+                media: Data(contentsOf: work.appendingPathComponent(String(format: "seg%05d.m4s", index)))
+            )
+        }
+        #expect(abs(try opens(2) - 8) < 0.1, "the silent slot")
+        // The slot right before resumed audio stays empty (it may hold that audio's late
+        // interleave), as it always did; the resumed audio sits at its own time.
+        let resumed = try [3, 4].map { try? opens($0) }.compactMap { $0 }.min()
+        #expect((resumed ?? 0) > 20.9, "resumed audio opens at \(String(describing: resumed)) s")
+        #expect(!report.findings.contains { $0.severity == .error && $0.location.contains("seg00002") }, "\(report.findings)")
+    }
+
+    /// Opens init + one fragment as one file and returns the first packet's presentation time.
+    private static func firstPacketSeconds(initSegment: Data, media: Data) throws -> Double {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCoreHardening-\(UUID().uuidString).mp4")
+        try (initSegment + media).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, file.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try #require(packet)
+        try FFmpegError.check(av_read_frame(context, pkt), "av_read_frame")
+        defer { av_packet_unref(pkt) }
+        let timeBase = context.pointee.streams[Int(pkt.pointee.stream_index)]!.pointee.time_base
+        let pts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+        return Double(pts) * av_q2d(timeBase)
     }
 
     @Test("Silence pads from where the output stands, or from the given start when nothing was heard")
@@ -202,8 +254,10 @@ struct AudioBridgeHardeningTests {
         packet.pointee.pts = 0
         packet.pointee.duration = 48_000
         try heard.feed(packet, emit: collect)
-        try heard.padSilence(from: 999_999, until: 96_000, final: false, emit: collect)
-        try heard.padSilence(from: 999_999, until: 144_000, final: true, emit: collect)
+        // Continuing (the start is within tolerance of where the output stands)…
+        try heard.padSilence(from: 48_000, until: 96_000, final: false, emit: collect)
+        // …and across a gap: a new timeline at the start given.
+        try heard.padSilence(from: 120_000, until: 144_000, final: true, emit: collect)
         try heard.flush(emit: collect)
         let opening = try #require(stamps.first?.0)
         #expect(opening <= 0 && opening > -2_048, "starts at \(opening)")
@@ -211,5 +265,7 @@ struct AudioBridgeHardeningTests {
         #expect(pts == pts.sorted(), "monotonic")
         let last = stamps.map { $0.0 + $0.1 }.max() ?? 0
         #expect(last >= 144_000 && last < 144_000 + 2 * 1_536, "ends at \(last)")
+        // Nothing between the continued silence's end and the new timeline's start.
+        #expect(!stamps.contains { $0.0 >= 96_000 + 1_536 && $0.0 < 120_000 - 1_536 }, "\(stamps.map(\.0))")
     }
 }

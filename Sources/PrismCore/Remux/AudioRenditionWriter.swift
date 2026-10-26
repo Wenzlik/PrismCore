@@ -449,7 +449,9 @@ final class AudioRenditionWriter {
         }
         self.segmentIndex = segmentIndex
         pendingDuration = 0
-        releaseSilentSlots()
+        // A held slot is "silence is coming", not "never coming": dropped
+        // unmarked, a fetch of it re-anchors production onto it.
+        silentSlots.removeAll()
         lastBoundarySeconds = startSeconds
     }
 
@@ -493,10 +495,9 @@ final class AudioRenditionWriter {
         let tick = av_q2d(bridge.timeBase)
         let emit: AudioBridge.Emit = { try self.emit($0, from: bridge.timeBase) }
         for slot in slots {
-            try bridge.padSilence(
-                from: Int64((slot.start / tick).rounded()), until: Int64((slot.end / tick).rounded()),
-                final: final, emit: emit
-            )
+            let start = Int64((slot.start / tick).rounded())
+            if bridge.padOpensNewTimeline(from: start) { writer.markDiscontinuity() }
+            try bridge.padSilence(from: start, until: Int64((slot.end / tick).rounded()), final: final, emit: emit)
             let (initSegment, media) = try writer.cutSegment()
             if let initSegment, !initSegment.isEmpty {
                 try writeInitSegment(initSegment)
@@ -510,13 +511,11 @@ final class AudioRenditionWriter {
             )
             onPlannedSegment?(slot.index, true)
         }
+        // Audio that resumes after the silence is its own fragment at its own time:
+        // left continuous, movenc would close the gap between the two.
+        if !final { writer.markDiscontinuity() }
     }
 
-    /// Held slots that will not be filled are what they always were: empty.
-    private func releaseSilentSlots() {
-        for slot in silentSlots { onPlannedSegment?(slot.index, false) }
-        silentSlots.removeAll()
-    }
 
     /// The end of the source: the held slot gets its silence, and the time up to
     /// the video's end (`endSeconds`) joins the final segment — an audio track
@@ -525,15 +524,19 @@ final class AudioRenditionWriter {
     /// to make its silence, and the heights bridge pads its own timeline.
     /// Call before `flushBridge`.
     func fillTail(untilSeconds endSeconds: Double) throws {
-        guard plannedMode, isProducing, let bridge = bridge as? AudioBridge else { return releaseSilentSlots() }
+        // Not producing (left by the player): the hold is dropped unmarked, so a
+        // later fetch re-anchors onto the slot instead of meeting a 404.
+        guard plannedMode, isProducing, let bridge = bridge as? AudioBridge else { return silentSlots.removeAll() }
         let slots = silentSlots
         silentSlots.removeAll()
         try fillSilentSlots(slots, final: true)
-        guard let start = slots.last?.end ?? lastBoundarySeconds else { return }
+        guard let startSeconds = slots.last?.end ?? lastBoundarySeconds else { return }
         let tick = av_q2d(bridge.timeBase)
-        try bridge.padSilence(
-            from: Int64((start / tick).rounded()), until: Int64((endSeconds / tick).rounded()), final: true
-        ) { try self.emit($0, from: bridge.timeBase) }
+        let start = Int64((startSeconds / tick).rounded())
+        if bridge.padOpensNewTimeline(from: start) { writer.markDiscontinuity() }
+        try bridge.padSilence(from: start, until: Int64((endSeconds / tick).rounded()), final: true) {
+            try self.emit($0, from: bridge.timeBase)
+        }
     }
 
     /// Flush the bridge's encoder tail. Only meaningful on EOF — a cancelled
@@ -716,7 +719,8 @@ final class AudioRenditionWriter {
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
         // Audio came back within a slot: the one held before it may have been
         // that audio's late interleave, so it stays empty, as it always did.
-        releaseSilentSlots()
+        for slot in silentSlots { onPlannedSegment?(slot.index, false) }
+        silentSlots.removeAll()
         if plannedMode {
             onPlannedSegment?(segmentIndex, true)
         } else {

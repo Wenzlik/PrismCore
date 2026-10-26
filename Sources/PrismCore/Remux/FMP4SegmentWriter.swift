@@ -275,6 +275,16 @@ final class FMP4SegmentWriter {
     /// Whether any packet has reached movenc's interleave queue.
     private var muxedAny = false
 
+    /// The next fragment starts at its first packet's own time, not where the
+    /// previous one ended. movenc otherwise stamps a fragment's `tfdt` from the
+    /// track's summed durations, so a jump in time between two fragments of
+    /// one muxer would close up — what a fragment of silence after a gap
+    /// needs (`AudioRenditionWriter.fillSilentSlots`).
+    func markDiscontinuity() {
+        guard let output else { return }
+        av_opt_set(output.pointee.priv_data, "movflags", "+frag_discont", 0)
+    }
+
     /// Whether movenc builds a sample entry here only from delivered packets.
     private var needsPacketsForInit: Bool {
         guard let output else { return false }
