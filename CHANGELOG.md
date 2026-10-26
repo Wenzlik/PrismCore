@@ -65,9 +65,21 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
 
 ### Added
 
+- **`HeightsLayout`: TrueHD Atmos heights in 5.1.2, 5.1.4, 7.1.2 or 7.1.4**
+  (public API, additive): `PrismCoreSession.Options.heightsLayout` and a
+  `heightsLayout:` parameter on the initializers, default `.atmos7_1_4`
+  (today's behaviour). The objects are panned onto the chosen layout's own
+  loudspeakers (ETSI TS 103 448 tables A.5–A.8), bed channels routed by its
+  table 6, the split fallback routed into it by the same table; served as
+  APAC in the channel order of Apple's `kAudioChannelLayoutTag_Atmos_*`,
+  `CODECS` `apac.31.02` for 5.1.2 and `apac.31.03` for the others,
+  `CHANNELS` 8, 10, 10, 12. `HeightsLayout.isAvailable` says whether this OS
+  encodes the layout (macOS 27 encodes and decodes all four). 9.1.6 is not
+  offered: TS 103 448 defines no such layout. C API:
+  `truehd_objects_open_layout`, `TRUEHD_OBJECTS_LAYOUT_*`.
 - C API (`TrueHDObjects.h`): `truehd_objects_open_split`,
   `truehd_objects_request_bed`; `truehd_objects_open_exact` is in every
-  build. No Swift public API change.
+  build.
 
 ## [3.8.7] — 2026-10-26
 

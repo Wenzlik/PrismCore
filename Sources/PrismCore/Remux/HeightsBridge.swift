@@ -92,10 +92,13 @@ extension AudioBridge: RenditionEncoder {}
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
 final class HeightsBridge: RenditionEncoder {
 
-    static let channelCount = HeightsBridgeConstants.channelCount
     static let sampleRate = HeightsBridgeConstants.sampleRate
     static let framesPerPacket = 1024
-    static let bitRate = channelCount * 256_000
+    /// 256 kbps per channel.
+    static func bitRate(_ layout: HeightsLayout) -> Int { layout.channelCount * 256_000 }
+
+    let layout: HeightsLayout
+    let channelCount: Int
 
     var onProgress: ((AudioBridgeProgress) -> Void)?
     /// What the renderer is delivering, whenever that changes: `.renderedHeights` once objects
@@ -139,30 +142,33 @@ final class HeightsBridge: RenditionEncoder {
     /// producer's thread also demuxes and muxes the video.
     static let minimumRealTimeFactor = 2.0
 
-    /// Whether this OS has the 7.1.4 APAC encoder (asked once: building a converter is cheap,
-    /// but the answer cannot change).
-    static let encoderExists: Bool = (try? makeEncoder()) != nil
+    /// Whether this OS has the 7.1.4 APAC encoder.
+    static var encoderExists: Bool { encoderLayouts.contains(.atmos7_1_4) }
+
+    /// The layouts this OS's APAC encoder takes (asked once: building a converter is cheap,
+    /// but the answer cannot change). macOS 27.0.1 takes all four.
+    static let encoderLayouts: Set<HeightsLayout> = Set(HeightsLayout.allCases.filter { (try? makeEncoder($0)) != nil })
 
     /// The configured encoder and its PCM input format.
-    private static func makeEncoder() throws -> (AVAudioConverter, AVAudioFormat) {
-        guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Atmos_7_1_4) else {
+    private static func makeEncoder(_ target: HeightsLayout) throws -> (AVAudioConverter, AVAudioFormat) {
+        guard let layout = AVAudioChannelLayout(layoutTag: target.layoutTag) else {
             throw Failure.encoderUnavailable
         }
         let pcm = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: Double(sampleRate), interleaved: true, channelLayout: layout
         )
         var tag = AudioChannelLayout()
-        tag.mChannelLayoutTag = kAudioChannelLayoutTag_Atmos_7_1_4
+        tag.mChannelLayoutTag = target.layoutTag
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatAPAC,
             AVSampleRateKey: Double(sampleRate),
-            AVNumberOfChannelsKey: channelCount,
+            AVNumberOfChannelsKey: target.channelCount,
             AVChannelLayoutKey: Data(bytes: &tag, count: MemoryLayout<AudioChannelLayout>.size),
         ]
         guard let apac = AVAudioFormat(settings: settings), let encoder = AVAudioConverter(from: pcm, to: apac) else {
             throw Failure.encoderUnavailable
         }
-        encoder.bitRate = bitRate
+        encoder.bitRate = bitRate(target)
         // Film mastered offline, which is what a TrueHD track is.
         encoder.contentSource = .appleAV_Spatial_Offline
         encoder.dynamicRangeControlConfiguration = .none
@@ -178,12 +184,12 @@ final class HeightsBridge: RenditionEncoder {
             switch self {
             case .notLinked: return "this build has no TrueHDObjects library"
             case .sourceUnsupported(let why): return "heights need 48 kHz TrueHD: \(why)"
-            case .encoderUnavailable: return "this OS has no 7.1.4 APAC encoder"
+            case .encoderUnavailable: return "this OS has no APAC encoder for the layout"
             }
         }
     }
 
-    init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational) throws {
+    init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, layout: HeightsLayout = .atmos7_1_4) throws {
         guard ObjectAudioRendering.rendererIsLinked else { throw Failure.notLinked }
         guard codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD else {
             throw Failure.sourceUnsupported("not TrueHD")
@@ -194,7 +200,9 @@ final class HeightsBridge: RenditionEncoder {
             throw Failure.sourceUnsupported("\(codecpar.pointee.sample_rate) Hz")
         }
         sourceTimeBase = timeBase
-        let (encoder, pcmFormat) = try Self.makeEncoder()
+        self.layout = layout
+        channelCount = layout.channelCount
+        let (encoder, pcmFormat) = try Self.makeEncoder(layout)
         self.pcmFormat = pcmFormat
         guard let cookie = encoder.magicCookie, !cookie.isEmpty,
               let staging = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(Self.framesPerPacket))
@@ -221,14 +229,14 @@ final class HeightsBridge: RenditionEncoder {
     var isDrained: Bool { drained }
     var timeBase: AVRational { AVRational(num: 1, den: Self.sampleRate) }
     var outputCodecName: String? { "apac" }
-    var outputChannelCount: Int? { Self.channelCount }
+    var outputChannelCount: Int? { channelCount }
 
     /// movenc has no Apple Positional Audio (libavformat's `apac` id is an unrelated codec), so
     /// the muxer is handed an ALAC stream — whose sample entry it builds from these parameters
     /// alone and whose packets it never parses — and the init segment's entry is replaced with
     /// the real one (`APACSampleEntry`). Fragments name no codec and need nothing.
     func configure(outputStream: UnsafeMutablePointer<AVStream>) throws {
-        try APACSampleEntry.configureStandIn(outputStream: outputStream)
+        try APACSampleEntry.configureStandIn(outputStream: outputStream, channelCount: channelCount)
     }
 
     // MARK: - Feeding
@@ -285,12 +293,12 @@ final class HeightsBridge: RenditionEncoder {
     /// Where the next rendered sample sits on the source clock: what the encoder has taken,
     /// plus what waits for a whole packet. Internal for the tests that pin the grid.
     var renderedPosition: Int64? {
-        anchor.map { $0 + samplesIn + Int64(pending.count / Self.channelCount) }
+        anchor.map { $0 + samplesIn + Int64(pending.count / channelCount) }
     }
 
     private func padToSourceGrid(packetEnd: Int64?) {
         guard let packetEnd, let position = renderedPosition, packetEnd > position else { return }
-        pending.append(contentsOf: repeatElement(0, count: Int(packetEnd - position) * Self.channelCount))
+        pending.append(contentsOf: repeatElement(0, count: Int(packetEnd - position) * channelCount))
     }
 
     func flush(emit: AudioBridge.Emit) throws {
@@ -354,7 +362,7 @@ final class HeightsBridge: RenditionEncoder {
     private func decode(_ bytes: UnsafeBufferPointer<UInt8>, end: Bool) {
         #if canImport(TrueHDObjects)
         if session == nil {
-            session = truehd_objects_open()
+            session = layout == .atmos7_1_4 ? truehd_objects_open() : truehd_objects_open_layout(layout.rendererLayout)
             if let session, let bedRequest { truehd_objects_request_bed(session, bedRequest) }
         }
         guard let session else {
@@ -365,7 +373,7 @@ final class HeightsBridge: RenditionEncoder {
         let status = truehd_objects_push(session, bytes.baseAddress, bytes.count, end ? 1 : 0, { context, pcm, frames in
             guard let context, let pcm else { return 0 }
             let bridge = Unmanaged<HeightsBridge>.fromOpaque(context).takeUnretainedValue()
-            bridge.pending.append(contentsOf: UnsafeBufferPointer(start: pcm, count: Int(frames) * HeightsBridge.channelCount))
+            bridge.pending.append(contentsOf: UnsafeBufferPointer(start: pcm, count: Int(frames) * bridge.channelCount))
             bridge.progress.decodedFrames += 1
             return 0
         }, context)
@@ -421,7 +429,7 @@ final class HeightsBridge: RenditionEncoder {
     /// Whole packets of PCM into the encoder; at the end the remainder too, padded with silence
     /// to the packet length (at most 21 ms, after the last real sample).
     private func encodePending(final: Bool, emit: AudioBridge.Emit) throws {
-        let packetSamples = Self.framesPerPacket * Self.channelCount
+        let packetSamples = Self.framesPerPacket * channelCount
         if final, !pending.isEmpty, pending.count % packetSamples != 0 {
             pending.append(contentsOf: repeatElement(0, count: packetSamples - pending.count % packetSamples))
         }
@@ -505,8 +513,30 @@ final class HeightsBridge: RenditionEncoder {
 /// The heights rendition's shape, readable on any OS (the master is written before anything
 /// else knows whether the encoder will open).
 enum HeightsBridgeConstants {
-    static let channelCount = 12
     static let sampleRate: Int32 = 48_000
+}
+
+extension HeightsLayout {
+    /// The Core Audio layout APAC is encoded with; the renderer emits its channels in this order.
+    var layoutTag: AudioChannelLayoutTag {
+        switch self {
+        case .atmos5_1_2: return kAudioChannelLayoutTag_Atmos_5_1_2
+        case .atmos5_1_4: return kAudioChannelLayoutTag_Atmos_5_1_4
+        case .atmos7_1_2: return kAudioChannelLayoutTag_Atmos_7_1_2
+        case .atmos7_1_4: return kAudioChannelLayoutTag_Atmos_7_1_4
+        }
+    }
+
+    #if canImport(TrueHDObjects)
+    var rendererLayout: UInt32 {
+        switch self {
+        case .atmos5_1_2: return UInt32(TRUEHD_OBJECTS_LAYOUT_5_1_2)
+        case .atmos5_1_4: return UInt32(TRUEHD_OBJECTS_LAYOUT_5_1_4)
+        case .atmos7_1_2: return UInt32(TRUEHD_OBJECTS_LAYOUT_7_1_2)
+        case .atmos7_1_4: return UInt32(TRUEHD_OBJECTS_LAYOUT_7_1_4)
+        }
+    }
+    #endif
 }
 
 extension ObjectAudioRendering {
@@ -526,16 +556,16 @@ enum APACSampleEntry {
 
     /// The stand-in stream's parameters (see `HeightsBridge.configure`). Needs no encoder, so
     /// a declared heights rendition can mux on while its encoder is being rebuilt.
-    static func configureStandIn(outputStream: UnsafeMutablePointer<AVStream>) throws {
+    static func configureStandIn(outputStream: UnsafeMutablePointer<AVStream>, channelCount: Int) throws {
         let par = outputStream.pointee.codecpar!
         par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
         par.pointee.codec_id = AV_CODEC_ID_ALAC
         par.pointee.codec_tag = 0
         par.pointee.sample_rate = HeightsBridgeConstants.sampleRate
         par.pointee.frame_size = 1024
-        par.pointee.bit_rate = Int64(HeightsBridgeConstants.channelCount * 256_000)
+        par.pointee.bit_rate = Int64(channelCount * 256_000)
         av_channel_layout_uninit(&par.pointee.ch_layout)
-        av_channel_layout_default(&par.pointee.ch_layout, Int32(HeightsBridgeConstants.channelCount))
+        av_channel_layout_default(&par.pointee.ch_layout, Int32(channelCount))
         let cookie = standInCookie
         guard let extradata = av_mallocz(cookie.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)) else {
             throw AudioBridge.Failure.allocationFailed("stand-in extradata")
