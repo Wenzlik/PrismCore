@@ -8,6 +8,13 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.8.7] — 2026-10-26
+
+Audio bridge fixes: FLAC that CoreMedia refuses is bridged, a bridged track that
+ends early plays silence to the video's end, and an E-AC-3 / AC-3 init is never
+empty. Plus a DTS:X feasibility note and a measurement of the heights split
+(documentation and tests). No public API change. Source-compatible.
+
 ### Fixed
 
 - **FLAC that CoreMedia refuses is bridged, not stream-copied.** A FLAC
@@ -3637,7 +3644,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...HEAD
+[3.8.7]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...3.8.7
 [3.8.6]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...3.8.6
 [3.8.5]: https://github.com/Wenzlik/PrismCore/compare/3.8.4...3.8.5
 [3.8.4]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...3.8.4
