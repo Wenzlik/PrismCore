@@ -182,9 +182,10 @@ struct AudioBridgeHardeningTests {
         }
         #expect(abs(try opens(2) - 8) < 0.1, "the silent slot")
         // The slot right before resumed audio stays empty (it may hold that audio's late
-        // interleave), as it always did; the resumed audio sits at its own time.
-        let resumed = try [3, 4].map { try? opens($0) }.compactMap { $0 }.min()
-        #expect((resumed ?? 0) > 20.9, "resumed audio opens at \(String(describing: resumed)) s")
+        // interleave), as it always did; the resumed audio is the final slot's, at its own time.
+        #expect(!FileManager.default.fileExists(atPath: work.appendingPathComponent("seg00003.m4s").path))
+        let resumed = try opens(4)
+        #expect(resumed > 20.9 && resumed < 21.1, "resumed audio opens at \(resumed) s")
         #expect(!report.findings.contains { $0.severity == .error && $0.location.contains("seg00002") }, "\(report.findings)")
     }
 

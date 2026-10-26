@@ -453,6 +453,7 @@ final class AudioRenditionWriter {
         // unmarked, a fetch of it re-anchors production onto it.
         silentSlots.removeAll()
         lastBoundarySeconds = startSeconds
+        emittedSinceCut = false
     }
 
     /// Push one source packet for this track through copy or bridge.
@@ -480,6 +481,8 @@ final class AudioRenditionWriter {
     /// passed.
     private var silentSlots: [(index: Int, start: Double, end: Double)] = []
     private var lastBoundarySeconds: Double?
+    /// Whether anything has been muxed since the last cut.
+    private var emittedSinceCut = false
 
     /// Silence for planned slots of a bridged rendition that carried no audio:
     /// a listed segment that answers 404 fails the player — at the end of a
@@ -499,6 +502,7 @@ final class AudioRenditionWriter {
             if bridge.padOpensNewTimeline(from: start) { writer.markDiscontinuity() }
             try bridge.padSilence(from: start, until: Int64((slot.end / tick).rounded()), final: final, emit: emit)
             let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
             if let initSegment, !initSegment.isEmpty {
                 try writeInitSegment(initSegment)
             }
@@ -527,6 +531,12 @@ final class AudioRenditionWriter {
         // Not producing (left by the player): the hold is dropped unmarked, so a
         // later fetch re-anchors onto the slot instead of meeting a 404.
         guard plannedMode, isProducing, let bridge = bridge as? AudioBridge else { return silentSlots.removeAll() }
+        if emittedSinceCut {
+            // Audio came back after the held slot was cut: it belongs to the final
+            // segment, and the held slot stays empty, as at any cut that brings audio.
+            for slot in silentSlots { onPlannedSegment?(slot.index, false) }
+            silentSlots.removeAll()
+        }
         let slots = silentSlots
         silentSlots.removeAll()
         try fillSilentSlots(slots, final: true)
@@ -644,6 +654,7 @@ final class AudioRenditionWriter {
         packet.pointee.stream_index = outputIndex
         packet.pointee.pos = -1
         try writer.write(packet)
+        emittedSinceCut = true
     }
 
     /// Cut a segment at the boundary the *video* just chose.
@@ -682,6 +693,7 @@ final class AudioRenditionWriter {
             return 0
         }
         let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
         // The first cut mints the init segment; write it BEFORE the playlist
         // entry that references it.
         if let initSegment, !initSegment.isEmpty {
@@ -763,6 +775,7 @@ final class AudioRenditionWriter {
             return
         }
         let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
         if let initSegment, !initSegment.isEmpty {
             try writeInitSegment(initSegment)
         }
