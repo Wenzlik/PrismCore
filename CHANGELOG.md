@@ -8,10 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
-TrueHD Atmos heights are rendered from the objects again; the split of the
-7.1 presentation is the fallback. **Needs a new `TrueHDObjects.xcframework`**
-(new C symbols): the release that ships this must build, attach and pin it
-(AGENTS.md, *Releasing* step 4).
+## [3.9.0] — 2026-10-26
+
+TrueHD Atmos heights are rendered from the objects again; the 3.8 split of the
+7.1 presentation is the fallback. Heights can be served in 5.1.2, 5.1.4, 7.1.2
+or 7.1.4 (`HeightsLayout`, new public API; the default stays 7.1.4). A
+behaviour change against 3.8 for `.heights` only (off by default);
+source-compatible. Ships a new `TrueHDObjects.xcframework` (new C symbols),
+attached to this release and pinned in `Package.swift`.
 
 ### Changed
 
@@ -3717,7 +3721,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.9.0...HEAD
+[3.9.0]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...3.9.0
 [3.8.7]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...3.8.7
 [3.8.6]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...3.8.6
 [3.8.5]: https://github.com/Wenzlik/PrismCore/compare/3.8.4...3.8.5
