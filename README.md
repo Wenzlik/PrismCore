@@ -354,8 +354,9 @@ DTS:X) is untouched.
   content: two scenes of a TrueHD Atmos film, 1.0 % of the energy on another
   speaker (median; p90 2.4 % and 1.8 %), heights within 0.1 dB (median), the
   floor within 0.3 dB and the front heights within 0.7 dB over the clip; a
-  synthetic eight-object scene, 0.9 % (p90 1.2 %). Correlation and
-  front-versus-rear separation too, on synthetic scenes with known positions:
+  synthetic eight-object scene, 0.9 % (p90 1.2 %) (`split.rs`'s scene test).
+  Waveform correlation and front-versus-rear separation are measured too, on
+  five synthetic scenes with known positions and the same two film scenes:
   `docs/ObjectAudioMeasurement.md` (`Rust/TrueHDObjects/scripts/measure-heights.sh`).
 - **The encoder.** `AVAudioConverter` APAC (OS 26), 3.07 Mbit/s, no DRC
   (every other DRC setting holds 1.5–20 s of audio before its first packet,

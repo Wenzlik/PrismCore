@@ -20,8 +20,8 @@ source-compatible.)
   Over each run the split's heights are within 0.11 dB of the exact
   render (per-window medians within 0.13 dB), the front/rear balance is
   kept, and the height feeds correlate 0.875–0.937 (synthetic) and 0.99
-  (two film scenes) with it; the exact render costs about a third of the
-  split's CPU. Loose guards in the test catch a
+  (two film scenes) with it; the exact render costs 29–42 % of the split's
+  CPU on those scenes. Loose guards in the test catch a
   regression of the shipped split. Measurement only: nothing in the library
   changes.
 

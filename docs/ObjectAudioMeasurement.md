@@ -82,8 +82,8 @@ regression in the shipped split fails `cargo test --features exact-render`.
 
 | clip | heights split − exact dB (whole / window median, p10…p90) | corr. heights | corr. all 12 | front − rear tops, exact / split dB | front-share error (mean / worst window) | energy on another speaker (median / p90) | CPU exact / split |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| action, 180 s (538 of 720 windows with heights) | −0.06 / −0.02 (−0.34…+0.24) | 0.991 | 0.999 | −11.59 / −12.25 | 0.001 / 0.151 | 1.02 % / 2.44 % | 18.5 / 63.4 ms per s |
-| ambience, 120 s (147 of 480) | −0.09 / −0.06 (−0.38…+0.13) | 0.993 | 1.000 | rear only / rear only | 0.000 / 0.000 | 0.96 % / 1.78 % | 21.3 / 50.3 ms per s |
+| action, 180.15 s (538 of 720 windows with heights) | −0.06 / −0.02 (−0.34…+0.24) | 0.991 | 0.999 | −11.59 / −12.25 | 0.001 / 0.151 | 1.02 % / 2.44 % | 18.5 / 63.4 ms per s |
+| ambience, 120.17 s (147 of 480) | −0.09 / −0.06 (−0.38…+0.13) | 0.993 | 1.000 | rear only / rear only | 0.000 / 0.000 | 0.96 % / 1.78 % | 21.3 / 50.3 ms per s |
 
 Per feed on the action scene: the floor within 0.3 dB (the side and back
 surrounds 0.28 dB under, the level matching's ±3 dB clamp is not reached),
@@ -107,8 +107,9 @@ height energy, so they only check the plumbing.
   0.99, because their height content rarely shares a bin with the floor.
 - **The exact render is cheaper.** It is a gain matrix on the decoded
   objects; the split decodes the 7.1 as well and runs 10 + ⌈objects / 2⌉
-  complex 2048-point FFTs per 512-frame hop (18 for 16 objects): about
-  2.5–3.5× the CPU (18–21 against 50–63 ms per second of audio).
+  complex 2048-point FFTs per 512-frame hop (18 for 16 objects): 2.4–3.4×
+  the CPU on these clips (18.5 / 21.3 against 63.4 / 50.3 ms per second of
+  audio).
 - **What only the split has.** It keeps the stream's own 7.1 mix (its floor
   is the disc's bed, level-matched) and takes object metadata the exact
   render refuses (bed channel distribution, bed downmix metadata, objects
