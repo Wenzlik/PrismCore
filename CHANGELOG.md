@@ -10,6 +10,13 @@ source-compatible.)
 
 ### Added
 
+- **DTS:X feasibility note** (`docs/DTSXFeasibility.md`): what FFmpeg n8.1.2
+  exposes (detection of the DTS:X payload after XLL frame data, never its
+  contents), what the public ETSI specifications cover (TS 102 114, TS 103
+  491 DTS-UHD, TS 103 584, TS 103 223) and do not (the Blu-ray DTS:X object
+  payload), what an implementation would need, patent and licensing
+  questions, and a phased plan. Documentation only: DTS:X objects are still
+  not rendered, and nothing in the library changes.
 - **A reproducible measurement of the heights split against the exact object
   render** (`Rust/TrueHDObjects/tests/measure.rs`,
   `Rust/TrueHDObjects/scripts/measure-heights.sh`,
