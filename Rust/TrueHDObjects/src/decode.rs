@@ -353,6 +353,7 @@ impl Session {
         if let Some(split) = self.split.as_mut() {
             // Through the splitter, which delays what it holds: silence takes its turn.
             split.push(&vec![0.; frames * CHANNELS], &[], frames, &mut self.rendered);
+            self.route_split();
         } else {
             self.rendered.resize(frames * CHANNELS, 0.);
         }
@@ -1015,6 +1016,30 @@ mod tests {
         session.unit_frames = Some(40);
         session.push(&[], true, &mut sink).unwrap();
         assert_eq!(session.mode(), Mode::Bed);
+    }
+
+    #[test]
+    fn the_split_tail_reaches_another_layout_routed_even_through_concealment() {
+        // A second of the 7.1.4 split's back-left (slot 6) in a 5.1.2 session, then concealment:
+        // what the splitter still held comes out folded into Ls (slot 4), never in a top middle.
+        let mut session = Session::default().in_layout(Layout::L512);
+        session.split = Some(BedSplitter::default());
+        let mut frames = vec![0f32; 48_000 * CHANNELS];
+        frames.iter_mut().skip(6).step_by(CHANNELS).enumerate().for_each(|(n, x)| *x = (n as f32 * 0.05).sin() * 0.3);
+        session.rendered.clear();
+        session.split.as_mut().unwrap().push(&frames, &[], 48_000, &mut session.rendered);
+        session.route_split();
+        session.limit_and_flush(&mut |_: &[f32]| Ok(())).unwrap();
+        let mut tail = Vec::new();
+        session
+            .silence(4_096, &mut |pcm: &[f32]| {
+                tail.extend_from_slice(pcm);
+                Ok(())
+            })
+            .unwrap();
+        let energy = |c: usize| tail.iter().skip(c).step_by(8).map(|x| f64::from(*x).powi(2)).sum::<f64>();
+        assert!(energy(4) > 1., "the held back-left comes out in Ls: {}", energy(4));
+        assert_eq!(energy(6) + energy(7), 0., "nothing of it in the top middles");
     }
 
     #[test]
