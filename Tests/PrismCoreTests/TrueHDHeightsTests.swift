@@ -274,6 +274,17 @@ struct TrueHDHeightsTests {
         #expect(slow.bedRequest == nil)
     }
 
+    @Test("Every heights layout has its APAC encoder on OS 26, and its CODECS level")
+    func heightsLayouts() {
+        #expect(HeightsLayout.allCases.map(\.channelCount) == [8, 10, 10, 12])
+        #expect(HeightsLayout.allCases.map { APACSampleEntry.codecsString(channelCount: $0.channelCount) }
+            == ["apac.31.02", "apac.31.03", "apac.31.03", "apac.31.03"])
+        if ObjectAudioRendering.isAvailable {
+            #expect(HeightsLayout.allCases.allSatisfy { $0.isAvailable }, "macOS 26+ encodes every layout")
+        }
+        #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true, layout: .atmos5_1_2).hasPrefix("heights 5.1.2"))
+    }
+
     @Test("CODECS follows Apple's APAC profile/level table")
     func codecsString() {
         #expect(APACSampleEntry.codecsString(channelCount: 12) == "apac.31.03")
@@ -312,16 +323,18 @@ struct TrueHDHeightsTests {
         writer.close()
     }
 
-    @Test("Rendered to apac, served as fMP4, decoded by AVFoundation: each bed channel lands on its speaker, on time")
-    func apacRoundTrip() async throws {
-        guard ObjectAudioRendering.isAvailable else { return }
+    @Test("Rendered to apac in each layout, served as fMP4, decoded by AVFoundation: each bed channel lands on its speaker, on time",
+          arguments: HeightsLayout.allCases)
+    func apacRoundTrip(layout: HeightsLayout) async throws {
+        guard layout.isAvailable else { return }
         let parent = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: parent) }
-        let (writer, deliveries) = try renderFixture(into: parent)
+        let (writer, deliveries) = try renderFixture(into: parent, layout: layout)
         #expect(writer.rendersHeights)
         let rendition = writer.rendition(groupID: "aud", isDefault: true)
-        #expect(rendition.codecString == "apac.31.03")
-        #expect(rendition.channels == "12")
+        let channels = layout.channelCount
+        #expect(rendition.codecString == (channels == 8 ? "apac.31.02" : "apac.31.03"))
+        #expect(rendition.channels == "\(channels)")
         // FFmpeg's TrueHD has no objects: the renderer says so and plays the bed.
         #expect(deliveries.last == .notPreserved)
 
@@ -339,31 +352,32 @@ struct TrueHDHeightsTests {
         }
         let joined = parent.appendingPathComponent("joined.mp4")
         try file.write(to: joined)
-        let (pcm, firstTime) = try await decode(joined)
+        let (pcm, firstTime) = try await decode(joined, layout: layout)
 
         // 3 s of source, every sample of it (± one 1024-frame packet of padding).
-        let frames = pcm.count / 12
+        let frames = pcm.count / channels
         #expect(abs(frames - 144_000) <= 1024 + 2048, "\(frames) frames")
         // The tones start at source time 0: so does the decoded audio.
-        let onset = (0..<frames).first { abs(pcm[$0 * 12]) > 0.01 } ?? -1
+        let onset = (0..<frames).first { abs(pcm[$0 * channels]) > 0.01 } ?? -1
         let onsetSeconds = firstTime + Double(onset) / 48_000
         #expect(abs(onsetSeconds) < 0.002, "first sample of L at \(onsetSeconds) s")
 
-        // Each bed channel on its own speaker, backs and heights silent. The fixture was meant as
+        // Each bed channel on its own speaker (L R C LFE Ls Rs lead every layout), backs and
+        // heights silent. The fixture was meant as
         // L 220, R 330, C 440, but FFmpeg's experimental TrueHD encoder rotates the front three:
         // FFmpeg's own decoder and the truehd crate both read L 330, R 440, C 220 — and the
         // channel each decoder names is the speaker it has to reach.
         let tones: [Int: Double] = [0: 330, 1: 440, 2: 220, 3: 55, 4: 550, 5: 660]
         let window = 24_000..<120_000
-        for channel in 0..<12 {
-            let energy = window.reduce(0.0) { $0 + Double(pcm[$1 * 12 + channel] * pcm[$1 * 12 + channel]) }
+        for channel in 0..<channels {
+            let energy = window.reduce(0.0) { $0 + Double(pcm[$1 * channels + channel] * pcm[$1 * channels + channel]) }
             guard let tone = tones[channel] else {
                 #expect(energy < 1e-3, "channel \(channel) should be silent, energy \(energy)")
                 continue
             }
-            let own = goertzel(pcm, channel: channel, frequency: tone, window: window)
+            let own = goertzel(pcm, channels: channels, channel: channel, frequency: tone, window: window)
             for (other, frequency) in tones where other != channel {
-                let leak = goertzel(pcm, channel: channel, frequency: frequency, window: window)
+                let leak = goertzel(pcm, channels: channels, channel: channel, frequency: frequency, window: window)
                 #expect(own > 30 * leak, "channel \(channel): \(tone) Hz \(own) vs \(frequency) Hz \(leak)")
             }
         }
@@ -531,7 +545,7 @@ struct TrueHDHeightsTests {
             try? FileManager.default.removeItem(atPath: mp4)
             let afconvert = Process()
             afconvert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
-            afconvert.arguments = ["-f", "mp4f", "-d", "apac", "-b", "\(HeightsBridge.bitRate)", caf.path, mp4]
+            afconvert.arguments = ["-f", "mp4f", "-d", "apac", "-b", "\(HeightsBridge.bitRate(.atmos7_1_4))", caf.path, mp4]
             try afconvert.run()
             afconvert.waitUntilExit()
             print("heights export: \(caf.path) (\(Double(frames) / 48_000) s)\(afconvert.terminationStatus == 0 ? ", " + mp4 : "; afconvert failed")")
@@ -597,11 +611,14 @@ struct TrueHDHeightsTests {
     }
 
     /// The tones fixture's TrueHD through a heights rendition, cut every second.
-    private func renderFixture(into parent: URL) throws -> (AudioRenditionWriter, [ObjectAudioDelivery]) {
+    private func renderFixture(
+        into parent: URL, layout: HeightsLayout = .atmos7_1_4
+    ) throws -> (AudioRenditionWriter, [ObjectAudioDelivery]) {
         let (context, close) = try open("h264_truehd51_tones_3s.mkv")
         defer { close() }
         let writer = AudioRenditionWriter(
-            route: .init(index: 1, mode: .bridge), track: Self.atmosTrack, ordinal: 0, parent: parent, rendersHeights: true
+            route: .init(index: 1, mode: .bridge), track: Self.atmosTrack, ordinal: 0, parent: parent, rendersHeights: true,
+            heightsLayout: layout
         )
         var deliveries: [ObjectAudioDelivery] = []
         writer.onObjectAudio = { delivery, _ in deliveries.append(delivery) }
@@ -625,17 +642,18 @@ struct TrueHDHeightsTests {
         return (writer, deliveries)
     }
 
-    /// Interleaved 7.1.4 float PCM, and the presentation time of its first frame.
-    private func decode(_ url: URL) async throws -> ([Float], Double) {
+    /// Interleaved float PCM in the layout's channel order, and the presentation time of its
+    /// first frame.
+    private func decode(_ url: URL, layout target: HeightsLayout = .atmos7_1_4) async throws -> ([Float], Double) {
         let asset = AVURLAsset(url: url)
         let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
         let reader = try AVAssetReader(asset: asset)
         var layout = AudioChannelLayout()
-        layout.mChannelLayoutTag = kAudioChannelLayoutTag_Atmos_7_1_4
+        layout.mChannelLayoutTag = target.layoutTag
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
             AVLinearPCMIsNonInterleaved: false, AVLinearPCMIsBigEndianKey: false,
-            AVNumberOfChannelsKey: 12, AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: target.channelCount, AVSampleRateKey: 48_000,
             AVChannelLayoutKey: Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size),
         ])
         reader.add(output)
@@ -654,11 +672,11 @@ struct TrueHDHeightsTests {
         return (pcm, first ?? .nan)
     }
 
-    private func goertzel(_ pcm: [Float], channel: Int, frequency: Double, window: Range<Int>) -> Double {
+    private func goertzel(_ pcm: [Float], channels: Int = 12, channel: Int, frequency: Double, window: Range<Int>) -> Double {
         let w = 2 * Double.pi * frequency / 48_000
         var (s1, s2) = (0.0, 0.0)
         for frame in window {
-            let s = Double(pcm[frame * 12 + channel]) + 2 * cos(w) * s1 - s2
+            let s = Double(pcm[frame * channels + channel]) + 2 * cos(w) * s1 - s2
             s2 = s1
             s1 = s
         }

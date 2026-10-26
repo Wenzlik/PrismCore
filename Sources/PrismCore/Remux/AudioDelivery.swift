@@ -96,6 +96,41 @@ public enum ObjectAudioRendering: String, Sendable, Equatable {
     }
 }
 
+/// The loudspeaker layout `ObjectAudioRendering.heights` renders TrueHD Atmos into: the
+/// layouts with heights that ETSI TS 103 448 (the object renderer's panner) defines and Apple
+/// Positional Audio encodes, each served in the channel order of the matching
+/// `kAudioChannelLayoutTag_Atmos_*`. Objects are panned onto the layout's own loudspeakers
+/// (TS 103 448 tables A.5–A.8) and bed channels routed by its table 6; the 7.1.4 split the
+/// renderer falls back to is routed into the layout by the same table. `.atmos7_1_4` is the
+/// default and what earlier versions always rendered. 9.1.6 is not offered: TS 103 448 defines
+/// no 9.1.6 layout for the panner.
+public enum HeightsLayout: String, Sendable, Equatable, CaseIterable {
+    /// 8 channels: L R C LFE Ls Rs, top middle left/right.
+    case atmos5_1_2 = "5.1.2"
+    /// 10 channels: L R C LFE Ls Rs, top front and top rear left/right.
+    case atmos5_1_4 = "5.1.4"
+    /// 10 channels: L R C LFE, side and rear surrounds, top middle left/right.
+    case atmos7_1_2 = "7.1.2"
+    /// 12 channels: L R C LFE, side and rear surrounds, top front and top rear left/right.
+    case atmos7_1_4 = "7.1.4"
+
+    public var channelCount: Int {
+        switch self {
+        case .atmos5_1_2: return 8
+        case .atmos5_1_4, .atmos7_1_2: return 10
+        case .atmos7_1_4: return 12
+        }
+    }
+
+    /// Whether this build and OS can render heights into this layout: the `TrueHDObjects`
+    /// library is linked and this OS's APAC encoder takes the layout.
+    public var isAvailable: Bool {
+        guard ObjectAudioRendering.rendererIsLinked else { return false }
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return false }
+        return HeightsBridge.encoderLayouts.contains(self)
+    }
+}
+
 /// What the audio bridge encodes TrueHD, DTS, PCM and the other codecs HLS
 /// cannot carry into.
 public enum BridgedAudioFormat: String, Sendable, Equatable {

@@ -336,6 +336,8 @@ final class HLSRemuxer: @unchecked Sendable {
     /// `PrismCoreSession.Options.objectAudioRendering`; engaged only with
     /// `allowsAtmosOutput` too.
     private let objectAudioRendering: ObjectAudioRendering
+    /// The loudspeaker layout heights render into (`PrismCoreSession.Options.heightsLayout`).
+    private let heightsLayout: HeightsLayout
     private let allowsAtmosOutput: Bool
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
@@ -698,6 +700,7 @@ final class HLSRemuxer: @unchecked Sendable {
         bridgedAudio: BridgedAudioFormat = .compressed,
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
+        heightsLayout: HeightsLayout = .atmos7_1_4,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -736,6 +739,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.bridgedAudio = bridgedAudio
         self.objectAudioRendering = objectAudioRendering
         self.allowsAtmosOutput = allowsAtmosOutput
+        self.heightsLayout = heightsLayout
     }
 
     func cancel() {
@@ -996,7 +1000,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // (`TrueHDAtmosScout`). Only when heights can engage at all; reads only, the head
         // rewind below happens either way.
         var trueHDAtmosEvidence: [Int: Bool] = [:]
-        if objectAudioRendering == .heights, allowsAtmosOutput, ObjectAudioRendering.isAvailable,
+        if objectAudioRendering == .heights, allowsAtmosOutput, heightsLayout.isAvailable,
            let pb = input.pointee.pb, pb.pointee.seekable != 0 {
             // A `true` claim needs no asking (see `TrueHDAtmosScout`); only the silent ones.
             let unclaimed = Set(info.audioTracks.filter { $0.codecName == "truehd" && !$0.isObjectAudio }.map(\.streamIndex))
@@ -1336,8 +1340,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     rendersHeights: Self.rendersHeights(
                         track: track, carriesObjects: trueHDAtmosEvidence[track.streamIndex] ?? track.isObjectAudio,
                         mode: route.mode, rendering: objectAudioRendering,
-                        allowsAtmosOutput: allowsAtmosOutput, available: ObjectAudioRendering.isAvailable
-                    )
+                        allowsAtmosOutput: allowsAtmosOutput, available: heightsLayout.isAvailable
+                    ),
+                    heightsLayout: heightsLayout
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)

@@ -49,6 +49,8 @@ final class AudioRenditionWriter {
     /// of bridging its bed. Cleared when the renderer cannot be built — before the master is
     /// written, so the track is declared as what it will really be.
     private(set) var rendersHeights: Bool
+    /// The loudspeaker layout a heights rendition renders into.
+    let heightsLayout: HeightsLayout
     /// The renderer's report of what is playing. Set by the remuxer.
     var onObjectAudio: ((ObjectAudioDelivery, String?) -> Void)?
     /// The APAC encoder's cookie, for the sample entry the init segment gets.
@@ -158,9 +160,11 @@ final class AudioRenditionWriter {
         lazy: Bool = false,
         suspendable: Bool = false,
         bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec,
-        rendersHeights: Bool = false
+        rendersHeights: Bool = false,
+        heightsLayout: HeightsLayout = .atmos7_1_4
     ) {
         self.route = route
+        self.heightsLayout = heightsLayout
         self.rendersHeights = rendersHeights && route.mode == .bridge
         self.bridgeTarget = route.mode == .bridge ? bridgeTarget : AudioBridge.defaultTargetCodec
         self.track = track
@@ -334,7 +338,9 @@ final class AudioRenditionWriter {
                 guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else {
                     throw HeightsUnavailable.operatingSystem
                 }
-                let heights = try HeightsBridge(codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base)
+                let heights = try HeightsBridge(
+                    codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base, layout: heightsLayout
+                )
                 heightsCookie = heights.magicCookie
                 heights.onObjectAudio = { [weak self] delivery, why in self?.onObjectAudio?(delivery, why) }
                 return heights
@@ -378,7 +384,7 @@ final class AudioRenditionWriter {
             // A declared heights rendition without its encoder: the same stand-in stream, so
             // the muxer still describes the entry the served init carries.
             plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
-                try APACSampleEntry.configureStandIn(outputStream: outStream)
+                try APACSampleEntry.configureStandIn(outputStream: outStream, channelCount: self.heightsLayout.channelCount)
             }
         } else {
             plan = .init(inputIndex: index, language: sourceLanguage)
@@ -783,7 +789,7 @@ final class AudioRenditionWriter {
             )
         case .bridge, .boost:
             if rendersHeights {
-                return APACSampleEntry.codecsString(channelCount: HeightsBridgeConstants.channelCount)
+                return APACSampleEntry.codecsString(channelCount: heightsLayout.channelCount)
             }
             // Whichever encoder the bridge negotiated — FLAC when the host
             // asked for lossless, else EAC3 where the build has it, AAC
