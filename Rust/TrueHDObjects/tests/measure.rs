@@ -156,8 +156,9 @@ fn capped(db: f64) -> String {
     }
 }
 
+/// A quantile; a −∞ dB (heights gone) is a value like any other.
 fn pick(v: &[f64], q: f64) -> f64 {
-    let mut v: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    let mut v: Vec<f64> = v.iter().copied().filter(|x| !x.is_nan()).collect();
     v.sort_by(f64::total_cmp);
     v.get(((v.len() as f64 - 1.) * q).round() as usize).copied().unwrap_or(f64::NAN)
 }
@@ -219,13 +220,16 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
         let we: Vec<f64> = e.iter().map(|c| energy(&c[r.clone()])).collect();
         let ws: Vec<f64> = s.iter().map(|c| energy(&c[r.clone()])).collect();
         let (wte, wts) = (we.iter().sum::<f64>(), ws.iter().sum::<f64>());
-        if wte <= 0. || wts <= 0. || sum(&we, &tops) / wte < 0.01 {
+        // Windows are chosen by the exact render alone: a split that went silent
+        // where the exact render has heights must count, not drop out.
+        if wte <= 0. || sum(&we, &tops) / wte < 0.01 {
             continue;
         }
         level.push(db(sum(&ws, &tops) / sum(&we, &tops)));
-        moved.push(50. * (0..CHANNELS).map(|c| (we[c] / wte - ws[c] / wts).abs()).sum::<f64>());
-        let front = |v: &[f64]| sum(v, &FRONT_TOP) / sum(v, &tops).max(1e-30);
-        share_error.push((front(&we) - front(&ws)).abs());
+        moved.push(if wts > 0. { 50. * (0..CHANNELS).map(|c| (we[c] / wte - ws[c] / wts).abs()).sum::<f64>() } else { 100. });
+        // Split heights silent: no front share at all, which is as wrong as it gets.
+        let front = |v: &[f64]| sum(v, &FRONT_TOP) / sum(v, &tops);
+        share_error.push(if sum(&ws, &tops) > 0. { (front(&we) - front(&ws)).abs() } else { 1. });
     }
     let summary = Summary {
         height_db: db(sum(&se, &tops) / sum(&ee, &tops)),
