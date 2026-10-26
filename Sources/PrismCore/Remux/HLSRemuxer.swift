@@ -1888,7 +1888,9 @@ final class HLSRemuxer: @unchecked Sendable {
             var renditionBytes = 0
             let superseded = residentSegments.isSuperseded(index: segmentIndex - 1)
             for rendition in renditions {
-                renditionBytes += try rendition.cut(durationSeconds: duration, superseded: superseded)
+                renditionBytes += try rendition.cut(
+                    durationSeconds: duration, endSeconds: Double(endPTS) * tickSeconds, superseded: superseded
+                )
                 // The boundary is where a rendition the player left can stop
                 // whole: its last segment is on disk, nothing is half-muxed.
                 rendition.suspendIfUnwanted()
@@ -1990,7 +1992,10 @@ final class HLSRemuxer: @unchecked Sendable {
             streamMap = writer.streamMap
             for rendition in renditions {
                 rendition.audioDelaySeconds = audioDelaySeconds
-                try rendition.reanchor(input: input, segmentIndex: anchor)
+                try rendition.reanchor(
+                    input: input, segmentIndex: anchor,
+                    startSeconds: anchor < plannedPlan.entries.count ? Double(plannedPlan.entries[anchor].startPTS) * tickSeconds : nil
+                )
             }
             if adoptedDelay != nil {
                 // Every segment already on disk was muxed with the PREVIOUS
@@ -2410,6 +2415,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     }
                 }
                 for rendition in renditions {
+                    // An audio track shorter than the video gets silence to the video's end.
+                    try rendition.fillTail(untilSeconds: Double(lastVideoEndPTS ?? nextBoundaryPTS) * tickSeconds)
                     try rendition.flushBridge()
                 }
             }

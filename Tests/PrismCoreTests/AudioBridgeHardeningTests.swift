@@ -5,7 +5,8 @@ import Libavcodec
 import Libavutil
 
 /// The audio bridge's edges: what the system refuses even when the codec is
-/// "copyable", and rates an encoder cannot carry.
+/// "copyable", rates an encoder cannot carry, and audio that ends before the
+/// video.
 @Suite("Audio bridge hardening")
 struct AudioBridgeHardeningTests {
 
@@ -120,5 +121,95 @@ struct AudioBridgeHardeningTests {
         try bridge.feed(packet) { last = max(last, $0.pointee.pts + $0.pointee.duration) }
         try bridge.flush { last = max(last, $0.pointee.pts + $0.pointee.duration) }
         #expect(abs(last - 48_000) <= 1536 * 2, "output ends at \(last) of 48 000")
+    }
+
+    // MARK: - Audio that ends before the video
+
+    /// Every rendition of a served session through `SegmentVerifier`, as `segverify` runs it.
+    private func verifyServed(_ session: PrismCoreSession) async throws -> SegmentVerifier.Report {
+        let playlist = try await session.start()
+        return try await SegmentVerifier.verify(playlist: playlist, stallTimeout: .seconds(30))
+    }
+
+    @Test("A bridged alternate whose track ends early serves every slot, on a valid init")
+    func shortBridgedAlternateIsServedWhole() async throws {
+        // The MP2 track (stream 2) stops at 4 s of 14. Before: its lazy rendition was armed
+        // at the playhead past its end, minted an E-AC-3 init from a cut with no packets
+        // (zero-size `stsd`) and every segment under it failed to demux.
+        let session = try PrismCoreSession(url: try fixture("h264_aac_mp2short_14s.mkv"))
+        defer { Task { await session.stop() } }
+        let report = try await verifyServed(session)
+        #expect(!report.hasErrors && report.isComplete, "\(report.findings)")
+        let alternate = try #require(report.playlists.first { $0.uri.hasPrefix("audio1/") })
+        #expect(alternate.segmentsChecked == 3)
+        #expect(alternate.audioFrames > 0)
+    }
+
+    @Test("A bridged DEFAULT track that ends early plays silence to the video's end, no 404")
+    func shortBridgedDefaultIsFilledToTheEnd() async throws {
+        let session = try PrismCoreSession(url: try fixture("h264_aac_mp2short_14s.mkv"), preferredAudioStreamIndex: 2)
+        defer { Task { await session.stop() } }
+        let report = try await verifyServed(session)
+        #expect(!report.hasErrors && report.isComplete, "\(report.findings)")
+        let main = try #require(report.playlists.first { $0.uri.hasPrefix("audio0/") })
+        #expect(main.segmentsChecked == 3)
+        // 14 s of 1536-sample E-AC-3 frames is 437; without the silence, 4 s is 125.
+        #expect(main.audioFrames > 400, "\(main.audioFrames) frames")
+    }
+
+    @Test("Silence pads from where the output stands, or from the given start when nothing was heard")
+    func padSilenceContinuesOrAnchors() throws {
+        let target = try #require(
+            [AV_CODEC_ID_EAC3, AV_CODEC_ID_AAC].first { avcodec_find_encoder($0) != nil }, "no bridge encoder"
+        )
+        func bridge() throws -> AudioBridge {
+            let par = avcodec_parameters_alloc()!
+            defer { var par: UnsafeMutablePointer<AVCodecParameters>? = par; avcodec_parameters_free(&par) }
+            par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+            par.pointee.codec_id = AV_CODEC_ID_PCM_S16LE
+            par.pointee.format = AV_SAMPLE_FMT_S16.rawValue
+            par.pointee.sample_rate = 48_000
+            par.pointee.bits_per_coded_sample = 16
+            par.pointee.block_align = 4
+            av_channel_layout_default(&par.pointee.ch_layout, 2)
+            return try AudioBridge(
+                codecpar: par, timeBase: AVRational(num: 1, den: 48_000), globalHeader: false, targetCodec: target
+            )
+        }
+        // Nothing heard: the silence starts where it is told to, and runs to the end asked.
+        let fresh = try bridge()
+        defer { fresh.close() }
+        var stamps: [(Int64, Int64)] = []
+        let collect: AudioBridge.Emit = { stamps.append(($0.pointee.pts, $0.pointee.duration)) }
+        try fresh.padSilence(from: 96_000, until: 144_000, final: true, emit: collect)
+        try fresh.flush(emit: collect)
+        // The encoder's own delay (E-AC-3's 256 samples, AAC's priming) puts its
+        // first packet up to a frame before the first sample.
+        let first = try #require(stamps.first?.0)
+        #expect(first <= 96_000 && first > 96_000 - 2_048, "starts at \(first)")
+        let end = stamps.map { $0.0 + $0.1 }.max() ?? 0
+        #expect(end >= 144_000 && end < 144_000 + 2 * 1_536, "ends at \(end)")
+
+        // Audio heard first: the silence continues it (the start is ignored), and a
+        // second pad after the end of the source does not end the decoder twice.
+        let heard = try bridge()
+        defer { heard.close() }
+        stamps = []
+        let packet = av_packet_alloc()!
+        defer { var packet: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&packet) }
+        av_new_packet(packet, 48_000 * 4)
+        memset(packet.pointee.data, 0, 48_000 * 4)
+        packet.pointee.pts = 0
+        packet.pointee.duration = 48_000
+        try heard.feed(packet, emit: collect)
+        try heard.padSilence(from: 999_999, until: 96_000, final: false, emit: collect)
+        try heard.padSilence(from: 999_999, until: 144_000, final: true, emit: collect)
+        try heard.flush(emit: collect)
+        let opening = try #require(stamps.first?.0)
+        #expect(opening <= 0 && opening > -2_048, "starts at \(opening)")
+        let pts = stamps.map(\.0)
+        #expect(pts == pts.sorted(), "monotonic")
+        let last = stamps.map { $0.0 + $0.1 }.max() ?? 0
+        #expect(last >= 144_000 && last < 144_000 + 2 * 1_536, "ends at \(last)")
     }
 }

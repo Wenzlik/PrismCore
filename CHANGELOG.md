@@ -19,6 +19,22 @@ source-compatible.)
   bridge like any bridged codec (`bridgedAudio` picks EAC3 or FLAC), and
   the probe reports it as `.requiresAudioBridge`. Every other FLAC still
   stream-copies bit for bit. New fuzz target `flac-streaminfo`.
+- **A bridged track that ends before the video plays silence to the end.**
+  In the planned shape every audio slot after the track's last sample was
+  listed in the playlist and answered 404 — at the end of a film whose
+  bridged track stops early, or across a gap a whole segment long. Such a
+  slot is now held instead of declared empty, and filled with silence by
+  the bridge once the next slot has passed without audio too (an interleave
+  never lags a whole segment), or at the end of the source, up to the
+  video's end; audio that resumes re-anchors the bridge's clock after it.
+  A slot followed by audio stays empty, as before. Stream-copied tracks are
+  unchanged (there is no encoder to make their silence) and still end
+  early; so do heights renditions and the sequential shape.
+- **An E-AC-3 / AC-3 init is never minted from a cut with no packets.** A
+  lazy bridged alternate armed where its track had no audio (past its end)
+  wrote a moov with a zero-size `stsd`, and every segment under that init
+  failed to demux — the whole alternate, not just its tail. The init now
+  waits for the first cut that carries packets.
 
 ### Added
 

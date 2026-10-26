@@ -272,6 +272,16 @@ final class FMP4SegmentWriter {
 
     /// Whether the deferred moov has been emitted yet.
     private(set) var moovWritten = false
+    /// Whether any packet has reached movenc's interleave queue.
+    private var muxedAny = false
+
+    /// Whether movenc builds a sample entry here only from delivered packets.
+    private var needsPacketsForInit: Bool {
+        guard let output else { return false }
+        return (0..<Int(output.pointee.nb_streams)).contains {
+            [AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3].contains(output.pointee.streams[$0]!.pointee.codecpar.pointee.codec_id)
+        }
+    }
 
     var context: UnsafeMutablePointer<AVFormatContext>? { output }
 
@@ -345,6 +355,7 @@ final class FMP4SegmentWriter {
            packet.pointee.pts != swift_AV_NOPTS_VALUE() {
             firstMuxed[index] = (packet.pointee.dts, packet.pointee.pts)
         }
+        muxedAny = true
         try FFmpegError.check(
             av_interleaved_write_frame(output, packet),
             "av_interleaved_write_frame"
@@ -432,6 +443,12 @@ final class FMP4SegmentWriter {
         // Drain the interleave queue into movenc first.
         try FFmpegError.check(av_interleaved_write_frame(output, nil), "flush interleave queue")
 
+        // An AC-3 / E-AC-3 entry is built from delivered packets: a moov minted by a
+        // cut that carried none has a zero-size `stsd` entry, and every segment
+        // after it is undecodable under that init. A lazy rendition armed where its
+        // track has no audio (past where it ends) cut exactly that. With nothing
+        // muxed yet, the init waits for the first cut that has packets.
+        if !moovWritten, !muxedAny, needsPacketsForInit { return (nil, Data()) }
         var initSegment: Data?
         if !moovWritten {
             try FFmpegError.check(av_write_frame(output, nil), "av_write_frame(flush moov)")
@@ -449,7 +466,12 @@ final class FMP4SegmentWriter {
     func finish() throws -> Data {
         guard let output, let avio else { return Data() }
         try releaseHeldPackets()
-        try FFmpegError.check(av_write_trailer(output), "av_write_trailer")
+        // Nothing was ever muxed into an entry that needs packets (see `cutSegment`):
+        // the trailer would mint the same broken moov, so there is no file to finish.
+        let empty = !moovWritten && !muxedAny && needsPacketsForInit
+        if !empty {
+            try FFmpegError.check(av_write_trailer(output), "av_write_trailer")
+        }
         avio_flush(avio)
         let tail = takeBufferedBytes()
         avformat_free_context(output)
