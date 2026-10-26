@@ -244,6 +244,11 @@ impl Session {
             if self.held_frames > 0 {
                 self.fall_back("the stream ended before its first object metadata", output)?;
             }
+            // A split still waiting for its first guide played the plain 7.1: say so.
+            if self.mode == Mode::Pending && self.split.is_some() && !self.guided {
+                self.mode = Mode::Bed;
+                self.fallback_reason.get_or_insert_with(|| "the stream ended before the split had object metadata".into());
+            }
             self.drain_split(output)?;
             self.limiter.finish(&mut self.limited);
             self.flush(output)?;
@@ -476,6 +481,11 @@ impl Session {
     fn leave_exact(&mut self, reason: &str, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
         self.exact = false;
         self.fallback_reason = Some(format!("{reason}; heights from the 7.1 split"));
+        // Heights again only once the split has a guide (`note_guide`); the bed after half a
+        // second without one.
+        self.mode = Mode::Pending;
+        self.guided = false;
+        self.unguided_frames = 0;
         self.switching = true;
         let sample = self.renderer.sample;
         self.renderer = Renderer::default();
@@ -912,7 +922,7 @@ mod tests {
             session.decoded.oamd = vec![isf.clone()];
             session.emit(vec![vec![0.1; 40]], 40, &mut sink).unwrap();
             assert_eq!(session.exact, !split);
-            assert_eq!(session.mode() == Mode::Bed, !split);
+            assert_eq!(session.mode(), if split { Mode::Pending } else { Mode::Bed }, "the split reports once guided");
             assert!(session.switching, "the switch waits for the next major sync");
             assert!(session.fallback_reason.as_deref().unwrap().contains("intermediate spatial format"));
         }
