@@ -316,8 +316,8 @@ let session = try PrismCoreSession(
     url: url, display: .current(),
     bridgedAudio: .lossless,                   // what every other bridged track gets
     objectAudioRendering: .heights,            // default .off
-    heightsLayout: .atmos7_1_4,                // default; .atmos7_1_2, .atmos5_1_4, .atmos5_1_2
-    allowsAtmosOutput: userAllowsDolbyAtmos    // the host's word that the route plays Atmos
+    allowsAtmosOutput: userAllowsDolbyAtmos,   // the host's word that the route plays Atmos
+    heightsLayout: .atmos7_1_4                 // default; .atmos7_1_2, .atmos5_1_4, .atmos5_1_2
 )
 // after start(): audioTrackDeliveries[…].objectAudio == .renderedHeights
 ```
