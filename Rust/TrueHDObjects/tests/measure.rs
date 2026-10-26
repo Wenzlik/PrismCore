@@ -172,8 +172,9 @@ struct Summary {
     /// Front tops against back tops (dB), exact and split.
     front_rear_exact: f64,
     front_rear_split: f64,
-    /// Mean absolute difference of the per-window front share of the heights (0…1).
+    /// Mean and worst absolute difference of the per-window front share of the heights (0…1).
     front_share_error: f64,
+    front_share_worst: f64,
     moved_median: f64,
 }
 
@@ -233,6 +234,7 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
         total_correlation: joint(&(0..CHANNELS).collect::<Vec<_>>()),
         front_rear_exact: db(sum(&ee, &FRONT_TOP) / sum(&ee, &BACK_TOP)),
         front_rear_split: db(sum(&se, &FRONT_TOP) / sum(&se, &BACK_TOP)),
+        front_share_worst: share_error.iter().copied().fold(f64::NAN, f64::max),
         front_share_error: if share_error.is_empty() { f64::NAN } else { share_error.iter().sum::<f64>() / share_error.len() as f64 },
         moved_median: pick(&moved, 0.5),
     };
@@ -253,10 +255,11 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
         pick(&moved, 0.9)
     );
     println!(
-        "front vs rear tops: exact {} dB, split {} dB; front share of the heights per window off by {:.3} on average",
+        "front vs rear tops: exact {} dB, split {} dB; front share of the heights per window off by {:.3} on average, {:.3} at worst",
         capped(summary.front_rear_exact),
         capped(summary.front_rear_split),
-        summary.front_share_error
+        summary.front_share_error,
+        summary.front_share_worst
     );
     summary
 }
@@ -270,11 +273,11 @@ fn synthetic_scenes_against_the_exact_render() {
         let s = compare(scene.name, &exact, &split);
         rows.push((scene.name, s));
     }
-    println!("\n| scene | heights dB (whole / window median) | corr. heights | corr. all | front−rear exact / split dB | front-share error | moved % |");
+    println!("\n| scene | heights dB (whole / window median) | corr. heights | corr. all | front−rear exact / split dB | front-share error (mean / worst window) | moved % |");
     println!("|---|---:|---:|---:|---:|---:|---:|");
     for (name, s) in &rows {
         println!(
-            "| {name} | {:+.2} / {:+.2} | {:.3} | {:.3} | {} / {} | {:.3} | {:.2} |",
+            "| {name} | {:+.2} / {:+.2} | {:.3} | {:.3} | {} / {} | {:.3} / {:.3} | {:.2} |",
             s.height_db,
             s.height_db_median,
             s.height_correlation,
@@ -282,6 +285,7 @@ fn synthetic_scenes_against_the_exact_render() {
             capped(s.front_rear_exact),
             capped(s.front_rear_split),
             s.front_share_error,
+            s.front_share_worst,
             s.moved_median
         );
     }
@@ -291,7 +295,7 @@ fn synthetic_scenes_against_the_exact_render() {
     for (name, s) in &rows {
         assert!(s.height_db.abs() < 1.5, "{name}: heights {:+.2} dB", s.height_db);
         assert!(s.height_correlation > 0.7, "{name}: height correlation {:.3}", s.height_correlation);
-        assert!(s.front_share_error < 0.05, "{name}: front share of the heights off by {:.3}", s.front_share_error);
+        assert!(s.front_share_worst < 0.05, "{name}: front share of the heights off by {:.3} in a window", s.front_share_worst);
         if s.front_rear_exact.abs() > 6. {
             assert_eq!(s.front_rear_split.signum(), s.front_rear_exact.signum(), "{name}: front/rear swapped");
         }
