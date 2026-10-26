@@ -8,6 +8,24 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **FLAC that CoreMedia refuses is bridged, not stream-copied.** A FLAC
+  track whose STREAMINFO declares a minimum block size under 192 samples
+  does not open in AudioToolbox at all (measured on macOS 27.0.1: 64, 128
+  and 191 refused, 192 and up decoded; the header field alone decides, a
+  short final frame is fine), so copying it served a rendition nothing
+  could play. Such a track is now decoded and re-encoded by the audio
+  bridge like any bridged codec (`bridgedAudio` picks EAC3 or FLAC), and
+  the probe reports it as `.requiresAudioBridge`. Every other FLAC still
+  stream-copies bit for bit. New fuzz target `flac-streaminfo`.
+
+### Added
+
+- Tests pin the EAC3 bridge's sample rate: a 96, 88.2 or 192 kHz source is
+  resampled to 48 kHz (the encoder takes 48, 44.1 and 32 kHz; this was
+  already the behaviour).
+
 ## [3.8.6] — 2026-10-25
 
 Internal cleanup: no public API change and no behaviour change.

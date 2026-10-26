@@ -43,6 +43,7 @@ package enum FuzzTargets {
         "container-layout": { @Sendable in containerLayout($0) },
         "hdr10plus-sei": { @Sendable in hdr10PlusSEI($0) },
         "truehd-major-sync": { @Sendable in trueHDMajorSync($0) },
+        "flac-streaminfo": { @Sendable in flacStreamInfo($0) },
     ]
 
     // MARK: - Targets
@@ -148,6 +149,21 @@ package enum FuzzTargets {
     /// answer needs a TrueHD major sync in the bytes, and any answer must
     /// survive bytes appended after the packet — the walk stops at the first
     /// restart unit, so a verdict that moves with a tail was read off it.
+    /// The FLAC copy gate's STREAMINFO read. The wrong answers: a verdict that
+    /// moves with bytes after the STREAMINFO (it reads past it), or block sizes
+    /// that are not the two big-endian fields at its start.
+    package static func flacStreamInfo(_ bytes: [UInt8]) {
+        guard let sizes = bytes.withUnsafeBufferPointer({ FLACStreamInfo.blockSizes(extradata: $0) }) else { return }
+        let start = bytes.starts(with: Array("fLaC".utf8)) ? 8 : 0
+        guard sizes.min == Int(bytes[start]) << 8 | Int(bytes[start + 1]),
+              sizes.max == Int(bytes[start + 2]) << 8 | Int(bytes[start + 3])
+        else { fatalError("block sizes not read from the STREAMINFO's first fields") }
+        let longer = bytes + [0xFF, 0x00, 0x7F]
+        guard let again = longer.withUnsafeBufferPointer({ FLACStreamInfo.blockSizes(extradata: $0) }),
+              again == sizes
+        else { fatalError("a verdict changed with bytes after the STREAMINFO") }
+    }
+
     package static func trueHDMajorSync(_ bytes: [UInt8]) {
         guard let verdict = TrueHDMajorSync.carriesObjectAudio(in: bytes) else { return }
         if verdict, !bytes.indices.dropLast(3).contains(where: {
