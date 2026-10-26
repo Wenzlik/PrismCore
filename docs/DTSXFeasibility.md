@@ -82,12 +82,20 @@ Assuming a public specification turns up that describes the disc payload as
 TS 103 491 metadata + audio chunks (the most likely shape), the work splits
 the way TrueHD's did:
 
-1. **Getting the bytes.** PrismCore already has every packet. The payload
-   can be located without touching FFmpeg: an XLL frame's length is in its
-   header (TS 102 114 clause 8), the extension substream header gives the
-   asset's XLL offset (TS 102 114 clause 7.5). A Swift/Rust walker, like
-   `TrueHDAtmosScout` and `EAC3Syncframe`, is preferable to an FFmpeg patch:
-   it keeps the MPVKit fork at "upstream + the `eac3` encoder", it is
+1. **Getting the bytes.** PrismCore already has every packet, but the
+   payload's *start* is not in any header: the XLL frame header gives where
+   the frame ends (TS 102 114 clause 8), and the extension substream header
+   where the asset's XLL data begins (clause 7.5), while the payload begins
+   after the last band data — which FFmpeg finds by parsing the common
+   header, every channel-set sub-header and the NAVI table of segment sizes,
+   then aligning to a dword (`dca_xll.c`, `parse_frame()`). XLL frames can
+   also span packets under the peak-bit-rate smoothing buffer (clause
+   7.5.3.4, `nuPeakBRCntrlBuffSzkB`;
+   FFmpeg's PBR path reassembles them before parsing). A walker therefore
+   needs the XLL header, channel-set and NAVI parsing plus PBR reassembly —
+   a real parser, not an offset lookup. Doing it in Swift/Rust, like
+   `TrueHDAtmosScout` and `EAC3Syncframe`, is still preferable to an FFmpeg
+   patch: it keeps the MPVKit fork at "upstream + the `eac3` encoder", it is
    testable without a rebuild, and it is fuzzable (`FuzzTargets`).
 2. **Metadata.** Object positions, gains, sizes, update timing, beds — TS
    103 491 clause 7 (3D object metadata, renderer configuration, rendering
@@ -125,9 +133,11 @@ find the same bytes itself (step 1), the patch is optional.
   normally licensed through Xperi.
 - FFmpeg's `dca` decoder is LGPL; its patent status is the user's concern
   (FFmpeg's own legal notice). PrismCore already ships it via MPVKit.
-- A clean-room implementation from the ETSI texts is a copyright question
-  answered (own code from public specs); the patent question is separate and
-  is not answered by clean-room work.
+- Copyright and terms of use are open too: whether code written from the
+  ETSI texts (and their pseudocode) may ship under PrismCore's LGPL-2.1+ /
+  the TrueHDObjects Apache-2.0 terms needs the specifications' own terms
+  reviewed. Clean-room work keeps the provenance clean; it does not by
+  itself settle either this question or the patent one.
 - Apple's frameworks do not decode DTS:X objects; nothing on the platform
   replaces this work.
 
@@ -137,7 +147,7 @@ find the same bytes itself (step 1), the patch is optional.
 |---|---|---|---|
 | 0 | Read DTS:X off the bitstream (the XLL trailing syncword, as FFmpeg does) in a bounded scout, so `.notPreserved` and the DTS:X label stop depending on the profile claim | Only TS 102 114 + the syncword FFmpeg publishes; fuzz target | 2–3 days |
 | 1 | A document for the disc payload (or DTS's statement that it is TS 103 491 syntax); real DTS:X test material; the licensing answer | Václav | — |
-| 2 | Payload walker + metadata parser (TS 103 491 clause 7) with fixtures and fuzzing | Phase 1 | 2–3 weeks |
+| 2 | Payload walker (XLL header, channel sets, NAVI, PBR reassembly) + metadata parser (TS 103 491 clause 7) with fixtures and fuzzing | Phase 1 | 3–4 weeks |
 | 3 | Object audio decode: XLL channel sets via a small FFmpeg patch, or an ACE decoder | Phase 1; ACE is the large case | 1–2 weeks (XLL) / 2–3 months (ACE) |
 | 4 | Rendering (TS 103 584, or the TS 103 448 panner with a measured mapping) into 7.1.4 / 9.1.6, through `HeightsBridge` | Phases 2–3 | 2–3 weeks |
 | 5 | Measurement against a reference decode (as `docs/ObjectAudioMeasurement.md` does for TrueHD), device runs on a receiver | A licensed reference decoder or DTS-provided reference output | 1 week |
