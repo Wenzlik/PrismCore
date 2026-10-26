@@ -22,7 +22,9 @@ extern "C" {
 
 /// What a session is delivering (`truehd_objects_mode`).
 enum {
-    /// Nothing decoded yet.
+    /// Nothing decided yet: nothing decoded, audio held for the first object metadata (at most
+    /// 0.5 s, also when the render takes back over from the split), or the split waiting for its
+    /// first metadata. A host keeps what it last reported meanwhile.
     TRUEHD_OBJECTS_PENDING = 0,
     /// Atmos to 7.1.4, heights included (a channel-based immersive presentation plays as itself).
     TRUEHD_OBJECTS_RENDERED = 1,
@@ -38,7 +40,11 @@ typedef struct TrueHDObjects TrueHDObjects;
 typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uint32_t frames);
 
 /// A new session, or NULL when allocation failed: the object render, with the split of the 7.1
-/// presentation from the next major sync where the render gives up.
+/// presentation where the render gives up — from the stream's first sample when that is before
+/// or at the first object metadata (none within 0.5 s, or metadata the render refuses), else from
+/// the next major sync. Metadata the split cannot read either plays the 7.1 up to there, then the
+/// bed, as 3.8 did. A split that took over for want of metadata hands back to the render at the
+/// major sync after metadata it places arrives.
 TrueHDObjects *truehd_objects_open(void);
 
 /// Output layouts for `truehd_objects_open_layout`: the TS 103 448 layouts with heights, each in
@@ -66,10 +72,10 @@ TrueHDObjects *truehd_objects_open_exact(void);
 TrueHDObjects *truehd_objects_open_split(void);
 
 /// The bed (silent heights, TRUEHD_OBJECTS_BED), whatever was rendering: for a host whose heights
-/// chain cannot keep up. Applied at the next push: the split's last 32 ms come out first (heights
-/// included), then silence of the stream's own length up to its next major sync (at most 107 ms),
-/// then the bed. One way; `reason` (NULL allowed) is what `truehd_objects_message` reports. NULL
-/// session is ignored. The mode reads TRUEHD_OBJECTS_BED from that push on.
+/// chain cannot keep up. Applied at the stream's next major sync (at most 107 ms on): what plays
+/// goes on until then, the split's last 32 ms come out (heights included), and the bed starts at
+/// that sync, with no gap. One way; `reason` (NULL allowed) is what `truehd_objects_message`
+/// reports. NULL session is ignored. The mode reads TRUEHD_OBJECTS_BED from that sync on.
 void truehd_objects_request_bed(TrueHDObjects *session, const char *reason);
 
 /// Feeds TrueHD bytes of this track only, starting at a major sync. `end` nonzero flushes the

@@ -63,7 +63,9 @@ extension AudioBridge: RenditionEncoder {}
 ///
 /// The renderer's output is contiguous from the first sample of the first access unit it is
 /// given — concealed and fallback audio keep their length, and the split's own 32 ms delay (when
-/// it is the one playing) is hidden inside the library — so the
+/// it is the one playing, also when it takes over mid-stream) is hidden inside the library: it
+/// moves when samples are delivered, never which index they have (the Rust test
+/// `switches_keep_every_sample_in_place` pins this for every path and switch) — so the
 /// clock is one anchor, the PTS of the first fed packet, plus a sample count. Decoding has to
 /// start at a major sync, so after a start or a seek packets are skipped until one (at most 128
 /// access units, 107 ms). A jump in the source's timestamps re-anchors like a seek.
@@ -74,9 +76,10 @@ extension AudioBridge: RenditionEncoder {}
 /// explicitly: a background class let a slower device's chain fall to a fraction of real time.
 /// It measures itself too: when decode, render and encode together take more than half the
 /// duration of the audio they produce, over ten seconds of audio, it asks the renderer for the
-/// bed (`truehd_objects_request_bed`: one presentation decoded, nothing rendered), reports
-/// `.notPreserved` and stays there until the next epoch (a seek or re-anchor starts a fresh
-/// session). Not the split: it costs two to three times the render's CPU.
+/// bed (`truehd_objects_request_bed`: one presentation decoded, nothing rendered; it starts at
+/// the stream's next major sync, with no gap), reports `.notPreserved` and stays there until the
+/// next epoch (a seek or re-anchor starts a fresh session). Not the split: it costs two to three
+/// times the render's CPU.
 ///
 /// ## Failure never interrupts playback
 ///
