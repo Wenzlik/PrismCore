@@ -8,6 +8,21 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **A reproducible measurement of the heights split against the exact object
+  render** (`Rust/TrueHDObjects/tests/measure.rs`,
+  `Rust/TrueHDObjects/scripts/measure-heights.sh`,
+  `docs/ObjectAudioMeasurement.md`): per-speaker energy, height level,
+  waveform correlation and front-versus-rear height separation, on five
+  synthetic object scenes with known positions (front, rear, mixed, a
+  front/rear pair over one side, moving) and on any raw TrueHD Atmos given.
+  Heights within 0.11 dB, front/rear balance kept, height correlation
+  0.88–0.94 (synthetic) and 0.99 (two film scenes); the exact render costs
+  about a third of the split's CPU. Loose guards in the test catch a
+  regression of the shipped split. Measurement only: nothing in the library
+  changes.
+
 ## [3.8.6] — 2026-10-25
 
 Internal cleanup: no public API change and no behaviour change.

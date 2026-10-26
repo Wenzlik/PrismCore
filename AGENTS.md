@@ -394,6 +394,8 @@ runs shorter. It does not replace them.
     for listening (`heightsListeningExport`; `.exact.*` too with
     `PRISMCORE_EXACT_HEIGHTS=1`); `TRUEHD_OBJECTS_COMPARE` compares the split
     with the exact render on raw `.thd` in `cargo test --features exact-render`
+    (`Rust/TrueHDObjects/scripts/measure-heights.sh` runs the full measurement:
+    synthetic scenes plus any `.thd` given; `docs/ObjectAudioMeasurement.md`)
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`
   and committed under `Tests/PrismCoreTests/Fixtures/`. They prove the
   pipeline, never the premium claims — Atmos and Dolby Vision need real media
