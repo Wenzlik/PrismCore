@@ -53,8 +53,8 @@ let package = Package(
             ? .binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)
             : .binaryTarget(
                 name: "TrueHDObjects",
-                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.8.0/TrueHDObjects.xcframework.zip",
-                checksum: "0549e89d51ae8b8dcfc400002150e41f9eb0ce207ff1bbb63b53783bcf4c0d39"
+                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.9.0/TrueHDObjects.xcframework.zip",
+                checksum: "5f65ad1b1864a31838ae998ba8902f569161656f555f23c81f2b470d01c7e895"
             ),
     ] + [
         .target(
