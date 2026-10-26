@@ -247,6 +247,33 @@ struct TrueHDHeightsTests {
         #expect(TrueHDAtmosScout.scan(input: local, streams: [1], byteBudget: 0) == [:])
     }
 
+    @Test("A chain under 2x real time over ten seconds of audio asks for the bed, once per epoch")
+    func loadGuardRequestsTheBed() throws {
+        guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
+        let par = try #require(avcodec_parameters_alloc())
+        defer { var par: UnsafeMutablePointer<AVCodecParameters>? = par; avcodec_parameters_free(&par) }
+        par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        par.pointee.codec_id = AV_CODEC_ID_TRUEHD
+        par.pointee.sample_rate = 48_000
+        let fast = try HeightsBridge(codecpar: par, timeBase: AVRational(num: 1, den: 48_000))
+        defer { fast.close() }
+        // 3x real time: fine. A short burst of slowness inside a fast window: fine too.
+        for _ in 0..<20 { fast.noteLoad(busySeconds: 1.0 / 3, audioSeconds: 1) }
+        fast.noteLoad(busySeconds: 2, audioSeconds: 1)
+        for _ in 0..<9 { fast.noteLoad(busySeconds: 0.1, audioSeconds: 1) }
+        #expect(fast.bedRequest == nil)
+        let slow = try HeightsBridge(codecpar: par, timeBase: AVRational(num: 1, den: 48_000))
+        defer { slow.close() }
+        for _ in 0..<9 { slow.noteLoad(busySeconds: 0.6, audioSeconds: 1) }
+        #expect(slow.bedRequest == nil, "not before ten seconds of audio")
+        slow.noteLoad(busySeconds: 0.6, audioSeconds: 1)
+        let why = try #require(slow.bedRequest)
+        #expect(why.contains("1.7x real time"), "\(why)")
+        // A seek starts a new epoch, and a new chance.
+        try slow.reset()
+        #expect(slow.bedRequest == nil)
+    }
+
     @Test("CODECS follows Apple's APAC profile/level table")
     func codecsString() {
         #expect(APACSampleEntry.codecsString(channelCount: 12) == "apac.31.03")

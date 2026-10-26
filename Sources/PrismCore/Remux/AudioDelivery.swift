@@ -71,13 +71,12 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
 /// system's Dolby Atmos setting): a route that cannot play it would get a lossy
 /// 7.1.4 folded back down, where `.lossless` delivers the 7.1 bed intact.
 ///
-/// `.heights` builds 7.1.4 out of the stream's own 7.1 presentation (the bed
-/// `.lossless` plays): truehdd's decoder decodes it and the Atmos presentation,
-/// each 7.1 channel is split per frequency bin between ear level and the
-/// heights by where the objects' energy lies (positions read as points; no
-/// object signal reaches an output), each channel's level is matched to what the
-/// objects put into it, and the result is encoded as Apple Positional Audio
-/// (OS 26). TrueHD only — DTS:X is not rendered. Whatever stops it before the
+/// `.heights` renders the objects to 7.1.4: truehdd's decoder decodes the Atmos
+/// presentation and its object metadata, and the ETSI TS 103 448 panner places
+/// each object. Where the render meets metadata it does not place, the stream's
+/// own 7.1 presentation (the bed `.lossless` plays) is split per frequency bin
+/// between ear level and the heights by where the objects' energy lies,
+/// instead. The result is encoded as Apple Positional Audio (OS 26). TrueHD only — DTS:X is not rendered. Whatever stops it before the
 /// master is written (an older OS, a build without the `TrueHDObjects` library,
 /// a track whose bitstream — read before the master — is not Atmos, a rate
 /// other than 48 kHz) leaves the
