@@ -22,8 +22,9 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
   where it can; the split's own bed fallback and every `.notPreserved` case
   are unchanged. A stream without object metadata in its first half second
   (or whose first metadata the render refuses) plays the 3.8 split from its
-  first sample — the same audio, the bed reported after the same 0.5 s — and
-  the render takes over at the major sync after metadata it places arrives.
+  first sample — the same audio, the bed reported after the same 0.5 s, and
+  for metadata the split refuses too the same 7.1 then bed — and the render
+  takes over at the major sync after metadata it places arrives.
   Why: measured on two film scenes and five synthetic object
   scenes, the split matches the render's levels and front/rear placement
   but not its waveforms where floor and height objects share a channel and

@@ -301,6 +301,10 @@ impl Session {
         if self.mode == Mode::Bed && self.split.is_none() {
             return Ok(());
         }
+        // Audio held with its 7.1 plays as 3.8 played it, the split's plain 7.1, up to here.
+        if self.held_frames > 0 && self.held_beds.len() == self.held.len() {
+            self.split_held(output)?;
+        }
         self.drain_split(output)?;
         self.fallback_reason = Some(reason.into());
         self.mode = Mode::Bed;
@@ -581,6 +585,10 @@ impl Session {
                         // render back; metadata it refused does not.
                         self.may_rejoin = self.decoded.oamd.is_empty();
                         self.leave_exact(&reason, &input, frames, output)
+                    } else if self.split_fallback && self.has_7_1() {
+                        // With the 7.1 decoded beside the objects, as 3.8: the split plays it up
+                        // to and with this unit, then refuses the metadata itself (the bed).
+                        self.split_from_here(&input, frames, output)
                     } else {
                         self.fall_back(&reason, output)?;
                         self.silence(frames, output)
@@ -614,11 +622,8 @@ impl Session {
         let sample = self.renderer.sample;
         self.renderer = Renderer::default();
         self.renderer.sample = sample;
-        if self.bed_unit.is_some() && self.held_beds.len() == self.held.len() {
-            let (bed, labels) = self.bed_unit.take().unwrap();
-            self.split_held(output)?;
-            let metadata = self.decoded.oamd.last().cloned();
-            return self.play_split(bed, labels, input.to_vec(), frames, metadata.as_ref(), false, output);
+        if self.has_7_1() {
+            return self.split_from_here(input, frames, output);
         }
         self.may_rejoin = false;
         self.switching = true;
@@ -631,6 +636,27 @@ impl Session {
         self.parser.reset_for_next_major_sync();
         self.decoder.reset_for_next_major_sync();
         self.silence(frames, output)
+    }
+
+    /// Whether this unit's 7.1, and every held unit's, was decoded beside the objects.
+    fn has_7_1(&self) -> bool {
+        self.bed_unit.is_some() && self.held_beds.len() == self.held.len()
+    }
+
+    /// The split from the first held unit on (`has_7_1`), this unit included with its metadata.
+    fn split_from_here(
+        &mut self,
+        input: &[Vec<f32>],
+        frames: usize,
+        output: &mut impl FnMut(&[f32]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (bed, labels) = self.bed_unit.take().expect("has_7_1");
+        let sample = self.renderer.sample;
+        self.renderer = Renderer::default();
+        self.renderer.sample = sample;
+        self.split_held(output)?;
+        let metadata = self.decoded.oamd.last().cloned();
+        self.play_split(bed, labels, input.to_vec(), frames, metadata.as_ref(), false, output)
     }
 
     /// The held units through the split, from their 7.1 (unguided: they had no metadata).
@@ -688,6 +714,7 @@ impl Session {
                 self.renderer.render(&held, n, &mut self.rendered);
             }
             self.held_frames = 0;
+            self.held_beds.clear();
             // The held units advanced the renderer's clock; schedule against it again.
             events.clear();
             for metadata in oamd {
@@ -1078,7 +1105,8 @@ mod tests {
     fn the_shipped_session_leaves_unplaceable_metadata_to_the_split() {
         // Bed channel distribution: the exact render does not place it, the split reads past it;
         // the shipped session hands the stream to the split (heights stay), the measurement one
-        // to the bed.
+        // to the bed. Mid-stream, without the 7.1 beside the objects (`bed_unit` unset), the
+        // switch waits for the next major sync; with it, see `run`'s tests below.
         let mut distributed = point([0., 0., 1.]);
         distributed.program_assignment.b_bed_chan_distribute = true;
         let mut sink = |_: &[f32]| Ok(());
@@ -1311,6 +1339,47 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_before_the_render_stops_decoding_the_7_1_switches_at_once() {
+        // Review r1: metadata from unit 6 (the held units render), refused from unit 10 — still
+        // before the major sync (32) where the render stops decoding the 7.1 beside it. The split
+        // takes over at unit 10 itself, with no silence.
+        let refused_from_10 = |unit: usize| {
+            (unit >= 6).then(|| {
+                let mut m = point([0., 0., 1.]);
+                m.program_assignment.b_bed_chan_distribute = unit >= 10;
+                m
+            })
+        };
+        let shipped = run(Session::exact_with_split_fallback(), 200, refused_from_10, None);
+        assert_in_place(&shipped, 200, None);
+        assert!(!shipped.exact_at_end);
+        assert!(shipped.modes[10..].iter().all(|m| *m == Mode::Objects), "heights from the split");
+    }
+
+    #[test]
+    fn metadata_both_layers_refuse_during_the_hold_plays_as_3_8() {
+        // Review r1: ISF in the first metadata (unit 6), and a bed asked for during the hold: the
+        // held 7.1 plays, then the bed, exactly as 3.8's split played the same stream.
+        let isf = |unit: usize| {
+            (unit >= 6).then(|| {
+                let mut m = point([0., 0., 1.]);
+                m.program_assignment.num_isf_objects = 1;
+                m
+            })
+        };
+        let shipped = run(Session::exact_with_split_fallback(), 200, isf, None);
+        let split = run(Session::default(), 200, isf, None);
+        assert_same(&shipped.pcm, &split.pcm);
+        assert_eq!(shipped.modes, split.modes);
+        assert_eq!(*shipped.modes.last().unwrap(), Mode::Bed);
+        let shipped = run(Session::exact_with_split_fallback(), 200, from(usize::MAX), Some(10));
+        let split = run(Session::default(), 200, from(usize::MAX), Some(10));
+        assert_same(&shipped.pcm, &split.pcm);
+        assert_in_place(&shipped, 200, None);
+        assert_eq!(first(&shipped.modes, Mode::Bed), Some(32));
+    }
+
+    #[test]
     fn early_metadata_the_render_refuses_hands_the_held_audio_to_the_split() {
         // Bed channel distribution in the first metadata, five units in: no silence either.
         let refused = |unit: usize| {
@@ -1338,6 +1407,7 @@ mod tests {
         let exact = run(Session::exact_with_split_fallback(), units, from(0), None);
         assert_in_place(&exact, units, None);
         assert!(exact.exact_at_end && exact.modes.iter().all(|m| *m == Mode::Objects));
+        assert_same(&exact.pcm, &run(Session::exact(), units, from(0), None).pcm);
         let split = run(Session::default(), units, from(0), None);
         assert_in_place(&split, units, None);
         // (c) the load guard's bed, from the render and from the split: at the next major sync,

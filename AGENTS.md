@@ -229,8 +229,8 @@ API surface.
   next major sync when it meets metadata it does not place; the split has its
   own bed fallback. Until its first metadata the render holds the audio and
   decodes the 7.1 beside it, so when no metadata comes within 0.5 s (or the
-  first is refused) the split plays from the first sample and reports exactly
-  as 3.8 did, never silence; metadata the render places brings it back at the
+  first is refused, by the render or by both) the split plays from the first
+  sample and reports exactly as 3.8 did, never silence; metadata the render places brings it back at the
   next major sync. Switch the decoder between its one- and two-presentation
   calls only with a restart at a major sync: carried over, the PCM differs.
   Measured, the render keeps the objects' waveforms (the

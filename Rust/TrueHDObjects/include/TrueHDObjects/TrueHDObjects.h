@@ -40,8 +40,9 @@ typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uin
 /// A new session, or NULL when allocation failed: the object render, with the split of the 7.1
 /// presentation where the render gives up — from the stream's first sample when that is before
 /// or at the first object metadata (none within 0.5 s, or metadata the render refuses), else from
-/// the next major sync. A split that took over for want of metadata hands back to the render at
-/// the major sync after metadata it places arrives.
+/// the next major sync. Metadata the split cannot read either plays the 7.1 up to there, then the
+/// bed, as 3.8 did. A split that took over for want of metadata hands back to the render at the
+/// major sync after metadata it places arrives.
 TrueHDObjects *truehd_objects_open(void);
 
 /// For measurement and listening: the object render alone (the bed where it gives up).
