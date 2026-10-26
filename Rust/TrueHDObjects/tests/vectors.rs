@@ -7,7 +7,10 @@
 //
 // Without the variable the test passes without asserting anything.
 
-use truehd_objects::decode::{Mode, Session};
+use truehd_objects::{
+    decode::{Mode, Session},
+    render::Layout,
+};
 
 fn decode(name: &str, chunk: usize) -> Option<(Result<(), String>, Vec<f32>, Mode)> {
     decode_with(name, chunk, Session::default)
@@ -226,5 +229,38 @@ fn compare_heights_with_the_exact_render() {
             exact_time * 1e3 / seconds,
             bed_time * 1e3 / seconds
         );
+    }
+}
+
+#[test]
+fn every_layout_renders_the_same_timeline_and_energy() {
+    // The object vector rendered (and the dimtrim vector split) into each layout: the same
+    // frames, the layout's channel count, the LFE untouched, and the energy within 1 dB.
+    for (name, open) in [("fba_atmos_obj.mlp", Session::exact_with_split_fallback as fn() -> Session), ("fba_atmos_dimtrim.mlp", Session::default)] {
+        let Some((_, reference, _)) = decode_with(name, 4096, open) else { return };
+        let frames = reference.len() / 12;
+        let total = |pcm: &[f32]| pcm.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>();
+        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+            let dir = std::env::var("TRUEHD_OBJECTS_VECTORS").unwrap();
+            let data = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
+            let mut session = open().in_layout(layout);
+            let mut pcm = Vec::new();
+            for bytes in data.chunks(4096) {
+                session.push(bytes, false, &mut |b: &[f32]| { pcm.extend_from_slice(b); Ok(()) }).unwrap();
+            }
+            session.push(&[], true, &mut |b: &[f32]| { pcm.extend_from_slice(b); Ok(()) }).unwrap();
+            let channels = layout.channels();
+            assert_eq!(pcm.len(), frames * channels, "{name} {layout:?}");
+            let lfe = |p: &[f32], n: usize| -> Vec<f32> { p.iter().skip(3).step_by(n).copied().collect() };
+            assert_eq!(lfe(&pcm, channels), lfe(&reference, 12), "{name} {layout:?}: LFE");
+            // (The public object vector renders silence; the dimtrim one carries the energy.)
+            if total(&reference) > 0. {
+                let db = 10. * (total(&pcm) / total(&reference)).log10();
+                assert!(db.abs() < 1., "{name} {layout:?}: {db:+.2} dB");
+            }
+            if layout == Layout::L714 {
+                assert_eq!(pcm, reference, "{name}: 7.1.4 is the default session");
+            }
+        }
     }
 }

@@ -13,8 +13,9 @@
 
 use std::{collections::VecDeque, f32::consts::FRAC_1_SQRT_2, f32::consts::FRAC_PI_2};
 
-/// Output channels, in `kAudioChannelLayoutTag_Atmos_7_1_4` order:
-/// L R C LFE Ls Rs Lb Rb Tfl Tfr Tbl Tbr.
+/// Output channels of the widest layout, in `kAudioChannelLayoutTag_Atmos_7_1_4` order:
+/// L R C LFE Ls Rs Lb Rb Tfl Tfr Tbl Tbr. Every layout renders into a frame this wide, its own
+/// channels first (`Layout::speakers`); the session hands out only those.
 pub const CHANNELS: usize = 12;
 pub type Gains = [f32; CHANNELS];
 
@@ -49,13 +50,98 @@ const OUTPUT: [Speaker; CHANNELS] = {
     [L, R, C, Lfe, Ls, Rs, Lb, Rb, Tfl, Tfr, Tbl, Tbr]
 };
 
-// Speaker classes for zone constraints and elevation (TS 103 448 tables 4 and 5).
+// Speaker classes for zone constraints and elevation (TS 103 448 tables 4 and 5). The 3/2/x
+// layouts' surrounds (M±110) are their own class: of the zone masks, only "no side, wide or back"
+// (4) excludes them.
 const FRONT: u8 = 1;
 const CENTRE: u8 = 2;
 const WIDE: u8 = 4;
 const SIDE: u8 = 8;
 const BACK: u8 = 16;
 const ELEVATED: u8 = 32;
+const SURROUND: u8 = 64;
+
+/// The output loudspeaker layouts TS 103 448 table A.1 defines with heights (3/2/2, 3/2/4,
+/// 3/4/2, 3/4/4), each in the channel order of the matching `kAudioChannelLayoutTag_Atmos_*`.
+/// The C API's `TRUEHD_OBJECTS_LAYOUT_*` values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Layout {
+    /// 3/2/2: L R C LFE Ls Rs Ltm Rtm.
+    L512 = 0,
+    /// 3/2/4: L R C LFE Ls Rs Tfl Tfr Tbl Tbr.
+    L514 = 1,
+    /// 3/4/2: L R C LFE Lss Rss Lb Rb Ltm Rtm.
+    L712 = 2,
+    /// 3/4/4: L R C LFE Lss Rss Lb Rb Tfl Tfr Tbl Tbr.
+    #[default]
+    L714 = 3,
+}
+
+impl Layout {
+    pub fn from_raw(value: u32) -> Option<Self> {
+        [Self::L512, Self::L514, Self::L712, Self::L714].into_iter().find(|l| *l as u32 == value)
+    }
+
+    pub fn channels(self) -> usize {
+        self.speakers().len()
+    }
+
+    /// Output speakers, in channel order. A top middle (Ltm/Rtm, TS 103 448's Tl/Tr) is `Tsl`/`Tsr`.
+    pub fn speakers(self) -> &'static [Speaker] {
+        use Speaker::*;
+        match self {
+            Self::L512 => &[L, R, C, Lfe, Ls, Rs, Tsl, Tsr],
+            Self::L514 => &[L, R, C, Lfe, Ls, Rs, Tfl, Tfr, Tbl, Tbr],
+            Self::L712 => &[L, R, C, Lfe, Ls, Rs, Lb, Rb, Tsl, Tsr],
+            Self::L714 => &OUTPUT,
+        }
+    }
+
+    /// Panner target and class of each output channel but the LFE (tables A.5–A.8).
+    fn room(self) -> &'static [(usize, [f32; 3], u8)] {
+        match self {
+            Self::L512 => &ROOM_3_2_2,
+            Self::L514 => &ROOM_3_2_4,
+            Self::L712 => &ROOM_3_4_2,
+            Self::L714 => &ROOM,
+        }
+    }
+}
+
+const ROOM_3_2_2: [(usize, [f32; 3], u8); 7] = [
+    (0, [0., 0., 0.], FRONT),
+    (1, [1., 0., 0.], FRONT),
+    (2, [0.5, 0., 0.], CENTRE),
+    (4, [0., 0.5, 0.], SURROUND),
+    (5, [1., 0.5, 0.], SURROUND),
+    (6, [0.25, 0.5, 1.], ELEVATED),
+    (7, [0.75, 0.5, 1.], ELEVATED),
+];
+
+const ROOM_3_2_4: [(usize, [f32; 3], u8); 9] = [
+    (0, [0., 0., 0.], FRONT),
+    (1, [1., 0., 0.], FRONT),
+    (2, [0.5, 0., 0.], CENTRE),
+    (4, [0., 0.5, 0.], SURROUND),
+    (5, [1., 0.5, 0.], SURROUND),
+    (6, [0.25, 0.25, 1.], ELEVATED),
+    (7, [0.75, 0.25, 1.], ELEVATED),
+    (8, [0.25, 0.75, 1.], ELEVATED),
+    (9, [0.75, 0.75, 1.], ELEVATED),
+];
+
+const ROOM_3_4_2: [(usize, [f32; 3], u8); 9] = [
+    (0, [0., 0., 0.], FRONT),
+    (1, [1., 0., 0.], FRONT),
+    (2, [0.5, 0., 0.], CENTRE),
+    (4, [0., 0.5, 0.], SIDE),
+    (5, [1., 0.5, 0.], SIDE),
+    (6, [0., 1., 0.], BACK),
+    (7, [1., 1., 0.], BACK),
+    (8, [0.25, 0.5, 1.], ELEVATED),
+    (9, [0.75, 0.5, 1.], ELEVATED),
+];
 
 /// Panner target and class of each 7.1.4 output channel except LFE (the 3/4/4 table, A.5).
 /// Ceiling targets sit a quarter of the room in from the walls.
@@ -106,7 +192,7 @@ fn excluded(zone: u8, elevation: bool) -> u8 {
         1 => BACK,
         2 => SIDE | WIDE,
         3 => FRONT | WIDE | SIDE,
-        4 => SIDE | WIDE | BACK,
+        4 => SIDE | WIDE | BACK | SURROUND,
         5 => FRONT | CENTRE | WIDE,
         _ => 0,
     };
@@ -165,38 +251,70 @@ impl Object {
     }
 }
 
+#[cfg(test)]
 fn unit(channel: usize) -> Gains {
     let mut gains = [0.; CHANNELS];
     gains[channel] = 1.;
     gains
 }
 
-/// Speaker-anchored routing of a bed channel (TS 103 448 clause 5.2.5, the 3/4/4 column of
-/// table 6): present speakers route straight through, a wide plays from the front speaker on
-/// its side and a top middle from the front and back tops on its side, each at −3 dB.
+/// Speaker-anchored routing of a bed channel into 7.1.4 (see `bed_in`).
 pub fn bed(speaker: Speaker) -> Gains {
+    bed_in(Layout::L714, speaker, true)
+}
+
+/// Speaker-anchored routing of a bed channel (TS 103 448 clause 5.2.5, table 6): a speaker the
+/// layout has plays straight through; one it lacks plays from the speakers table 6 names, at
+/// −3 dB each — a back from the surround on its side, a front or back top from the top middle on
+/// its side, a top middle from the front and back tops on its side, a wide from the front speaker
+/// on its side. A 3/2/x surround is itself at −3 dB when the backs are present too (table 6's
+/// g), so a 7.1 bed folds into it at constant power (`backs`: whether the program has Lb/Rb).
+/// The centres table 6 does not list (Tc, Tfc, Lsc, Rsc, Cb) take the same −3 dB pair routes
+/// through the speakers above, in every layout.
+pub fn bed_in(layout: Layout, speaker: Speaker, backs: bool) -> Gains {
     use Speaker::*;
-    if let Some(index) = OUTPUT.iter().position(|s| *s == speaker) {
-        return unit(index);
-    }
-    let route: &[usize] = match speaker {
-        Lw => &[0],
-        Rw => &[1],
-        Tsl => &[8, 10],
-        Tsr => &[9, 11],
-        Tfc => &[8, 9],
-        Lsc => &[0, 2],
-        Rsc => &[1, 2],
-        Cb => &[6, 7],
-        Tc => return [0., 0., 0., 0., 0., 0., 0., 0., 0.5, 0.5, 0.5, 0.5],
-        _ => unreachable!("every 7.1.4 speaker is in OUTPUT"),
-    };
-    // A single-target route keeps the table's −3 dB; a pair splits power equally.
     let mut gains = [0.; CHANNELS];
-    for &channel in route {
-        gains[channel] = FRAC_1_SQRT_2;
+    let surround_only = !layout.speakers().contains(&Lb);
+    let add = |target: Speaker, gain: f32, gains: &mut Gains| {
+        for (target, g) in reroute(layout, target) {
+            let index = layout.speakers().iter().position(|s| *s == target).expect("rerouted onto the layout");
+            gains[index] += gain * g;
+        }
+    };
+    match speaker {
+        Ls | Rs if surround_only && backs => add(speaker, FRAC_1_SQRT_2, &mut gains),
+        Tfc => [Tfl, Tfr].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
+        Lsc => [L, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
+        Rsc => [R, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
+        Cb => [Lb, Rb].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
+        Tc => [Tfl, Tfr, Tbl, Tbr].iter().for_each(|s| add(*s, 0.5, &mut gains)),
+        _ => add(speaker, 1., &mut gains),
     }
     gains
+}
+
+/// Where table 6 sends one speaker in a layout that may lack it, as speakers the layout has.
+fn reroute(layout: Layout, speaker: Speaker) -> Vec<(Speaker, f32)> {
+    use Speaker::*;
+    if layout.speakers().contains(&speaker) {
+        return vec![(speaker, 1.)];
+    }
+    let m = FRAC_1_SQRT_2;
+    let via = |pairs: &[(Speaker, f32)]| -> Vec<(Speaker, f32)> {
+        pairs.iter().flat_map(|(s, g)| reroute(layout, *s).into_iter().map(move |(t, h)| (t, g * h))).collect()
+    };
+    match speaker {
+        Lb => via(&[(Ls, m)]),
+        Rb => via(&[(Rs, m)]),
+        Tfl | Tbl => via(&[(Tsl, m)]),
+        Tfr | Tbr => via(&[(Tsr, m)]),
+        Tsl => via(&[(Tfl, m), (Tbl, m)]),
+        Tsr => via(&[(Tfr, m), (Tbr, m)]),
+        Lw => via(&[(L, m)]),
+        Rw => via(&[(R, m)]),
+        // Every layout has L R C LFE Ls Rs; the centres are composed in `bed_in`.
+        _ => unreachable!("{speaker:?} is in every layout or composed in bed_in"),
+    }
 }
 
 /// Metadata preprocessing (clauses 5.1.3 and 5.1.4): elevation off drops to the bed plane,
@@ -225,13 +343,18 @@ pub fn preprocess(mut object: Object) -> Object {
     object
 }
 
-/// Speaker counts selecting an object's trim configuration, after its zone constraints.
+/// Speaker counts selecting an object's trim configuration in 7.1.4, after its zone constraints.
 pub fn trim_layout(object: &Object) -> TrimLayout {
+    trim_layout_in(Layout::L714, object)
+}
+
+/// Speaker counts selecting an object's trim configuration, after its zone constraints.
+pub fn trim_layout_in(layout: Layout, object: &Object) -> TrimLayout {
     let excluded = excluded(object.zone, object.elevation);
     let count = |classes: u8| {
-        ROOM.iter().filter(|(_, _, class)| class & classes != 0 && class & excluded == 0).count()
+        layout.room().iter().filter(|(_, _, class)| class & classes != 0 && class & excluded == 0).count()
     };
-    TrimLayout { mid: count(WIDE | SIDE | BACK), top: count(ELEVATED) }
+    TrimLayout { mid: count(WIDE | SIDE | BACK | SURROUND), top: count(ELEVATED) }
 }
 
 /// Point-source gains at a room position over the whole 7.1.4 layout (no zones, size or
@@ -245,10 +368,16 @@ pub fn point_gains(position: [f32; 3]) -> Gains {
     result
 }
 
-/// Source panner (clause 5.2) for preprocessed metadata.
+/// Source panner (clause 5.2) for preprocessed metadata, into 7.1.4.
 pub fn object(object: &Object) -> Gains {
+    object_in(Layout::L714, object)
+}
+
+/// Source panner (clause 5.2) for preprocessed metadata, into `layout`'s channels.
+pub fn object_in(layout: Layout, object: &Object) -> Gains {
     let excluded = excluded(object.zone, object.elevation);
-    let (channels, targets): (Vec<usize>, Vec<[f32; 3]>) = ROOM
+    let (channels, targets): (Vec<usize>, Vec<[f32; 3]>) = layout
+        .room()
         .iter()
         .filter(|(_, _, class)| class & excluded == 0)
         .map(|(channel, position, _)| (*channel, *position))
@@ -525,6 +654,95 @@ mod tests {
     }
     fn at(position: [f32; 3]) -> Gains {
         point_gains(position)
+    }
+
+    /// Gains as (channel, gain) pairs, for comparing with table 6.
+    fn routed(layout: Layout, speaker: Speaker, backs: bool) -> Gains {
+        bed_in(layout, speaker, backs)
+    }
+
+    #[test]
+    fn bed_routing_into_7_1_4_is_unchanged() {
+        use Speaker::*;
+        for (s, expected) in [
+            (L, vec![(0, 1.)]), (Ls, vec![(4, 1.)]), (Lb, vec![(6, 1.)]), (Tbr, vec![(11, 1.)]), (Lfe, vec![(3, 1.)]),
+            (Lw, vec![(0, M)]), (Rw, vec![(1, M)]), (Tsl, vec![(8, M), (10, M)]), (Tsr, vec![(9, M), (11, M)]),
+            (Tfc, vec![(8, M), (9, M)]), (Lsc, vec![(0, M), (2, M)]), (Rsc, vec![(1, M), (2, M)]), (Cb, vec![(6, M), (7, M)]),
+            (Tc, vec![(8, 0.5), (9, 0.5), (10, 0.5), (11, 0.5)]),
+        ] {
+            assert!(close(&bed(s), &expected), "{s:?}: {:?}", bed(s));
+        }
+    }
+
+    #[test]
+    fn bed_routing_follows_table_6_in_every_layout() {
+        use Speaker::*;
+        // 3/2/2 (Layout::L512, channels L R C LFE Ls Rs Ltm Rtm).
+        let l = Layout::L512;
+        assert!(close(&routed(l, Lb, true), &[(4, M)]));
+        assert!(close(&routed(l, Ls, true), &[(4, M)]), "g = m with backs present");
+        assert!(close(&routed(l, Ls, false), &[(4, 1.)]), "g = 1 without");
+        assert!(close(&routed(l, Tfl, true), &[(6, M)]));
+        assert!(close(&routed(l, Tbr, true), &[(7, M)]));
+        assert!(close(&routed(l, Tsl, true), &[(6, 1.)]));
+        assert!(close(&routed(l, Lw, true), &[(0, M)]));
+        assert!(close(&routed(l, Lfe, true), &[(3, 1.)]));
+        // 3/2/4 (L514: L R C LFE Ls Rs Tfl Tfr Tbl Tbr).
+        let l = Layout::L514;
+        assert!(close(&routed(l, Rb, true), &[(5, M)]));
+        assert!(close(&routed(l, Tfr, true), &[(7, 1.)]));
+        assert!(close(&routed(l, Tsl, true), &[(6, M), (8, M)]));
+        // 3/4/2 (L712: L R C LFE Lss Rss Lb Rb Ltm Rtm).
+        let l = Layout::L712;
+        assert!(close(&routed(l, Ls, true), &[(4, 1.)]), "sides stay whole in a 3/4/x layout");
+        assert!(close(&routed(l, Rb, true), &[(7, 1.)]));
+        assert!(close(&routed(l, Tfl, true), &[(8, M)]));
+        assert!(close(&routed(l, Tbr, true), &[(9, M)]));
+        assert!(close(&routed(l, Tsr, true), &[(9, 1.)]));
+        // A 7.1 bed folds into 5.1 at constant power, and nothing lands past the layout.
+        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+            for s in [L, R, C, Lfe, Ls, Rs, Lb, Rb, Tfl, Tfr, Tbl, Tbr, Lw, Rw, Tsl, Tsr, Tc, Tfc, Lsc, Rsc, Cb] {
+                let g = routed(layout, s, true);
+                assert!(g[layout.channels()..].iter().all(|x| *x == 0.), "{layout:?} {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_layout_pans_onto_its_own_loudspeakers() {
+        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+            // Every panner target lands on its own channel alone.
+            for (channel, position, _) in layout.room() {
+                let g = object_in(layout, &Object::point(*position));
+                assert!(close(&g, &[(*channel, 1.)]), "{layout:?} target {position:?}: {g:?}");
+            }
+            // Unit power, never the LFE, never past the layout.
+            for position in [[0.3, 0.2, 0.7], [0.9, 0.95, 0.1], [0.5, 0.5, 1.], [0.1, 0.6, 0.4]] {
+                let g = object_in(layout, &Object::point(position));
+                assert!((power(&g) - 1.).abs() < 1e-4, "{layout:?} {position:?}");
+                assert_eq!(g[3], 0.);
+                assert!(g[layout.channels()..].iter().all(|x| *x == 0.));
+            }
+        }
+        // With top middles only, a front-top object plays from the top middle on its side.
+        let g = object_in(Layout::L512, &Object::point([0.25, 0.1, 1.]));
+        assert!(close(&g, &[(6, 1.)]), "{g:?}");
+    }
+
+    #[test]
+    fn trims_and_zones_follow_the_layout() {
+        // Table 7: num_mid 2 or 4, num_top 2 or 4.
+        let rear = Object::point([0.5, 1., 0.5]);
+        assert_eq!(trim_layout_in(Layout::L512, &rear).index(), 4);
+        assert_eq!(trim_layout_in(Layout::L514, &rear).index(), 7);
+        assert_eq!(trim_layout_in(Layout::L712, &rear).index(), 5);
+        assert_eq!(trim_layout_in(Layout::L714, &rear).index(), 8);
+        // Table 4 for 3/2/x: "no side" (2) keeps the surrounds, "no side, wide or back" (4)
+        // excludes them, "no front, wide or side" (3) only L and R.
+        let left = [0., 0.5, 0.];
+        assert!(close(&object_in(Layout::L512, &Object { zone: 2, ..Object::point(left) }), &[(4, 1.)]));
+        assert_eq!(object_in(Layout::L512, &Object { zone: 4, ..Object::point(left) })[4], 0.);
+        assert!(close(&object_in(Layout::L514, &Object { zone: 3, ..Object::point(left) }), &[(4, 1.)]));
     }
 
     #[test]

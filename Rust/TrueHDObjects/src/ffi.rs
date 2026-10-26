@@ -37,6 +37,18 @@ pub extern "C" fn truehd_objects_open_split() -> *mut Handle {
     open(Session::default)
 }
 
+/// The shipped session rendering into another layout (`TRUEHD_OBJECTS_LAYOUT_*`), or NULL for
+/// an unknown one.
+#[unsafe(no_mangle)]
+pub extern "C" fn truehd_objects_open_layout(layout: u32) -> *mut Handle {
+    let Some(layout) = crate::render::Layout::from_raw(layout) else { return ptr::null_mut() };
+    catch_unwind(|| {
+        let session = Session::exact_with_split_fallback().in_layout(layout);
+        Box::into_raw(Box::new(Handle { session, error: String::new(), ended: false }))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 fn open(session: fn() -> Session) -> *mut Handle {
     catch_unwind(|| Box::into_raw(Box::new(Handle { session: session(), error: String::new(), ended: false })))
         .unwrap_or(ptr::null_mut())
@@ -79,9 +91,10 @@ pub unsafe extern "C" fn truehd_objects_push(
         return -1;
     }
     let bytes = if length == 0 { &[][..] } else { unsafe { slice::from_raw_parts(data, length) } };
+    let channels = handle.session.channels();
     let result = catch_unwind(AssertUnwindSafe(|| {
         handle.session.push(bytes, end != 0, &mut |pcm: &[f32]| {
-            let frames = (pcm.len() / crate::render::CHANNELS) as u32;
+            let frames = (pcm.len() / channels) as u32;
             match unsafe { callback(context, pcm.as_ptr(), frames) } {
                 0 => Ok(()),
                 _ => Err("PCM consumer cancelled".into()),

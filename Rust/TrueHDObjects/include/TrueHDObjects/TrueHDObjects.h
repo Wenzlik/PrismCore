@@ -33,13 +33,31 @@ enum {
 
 typedef struct TrueHDObjects TrueHDObjects;
 
-/// Receives `frames` frames of interleaved Float32 PCM, TRUEHD_OBJECTS_CHANNELS per frame, valid
-/// only during the call. Return 0 to continue; anything else stops the session.
+/// Receives `frames` frames of interleaved Float32 PCM, TRUEHD_OBJECTS_CHANNELS per frame (the
+/// layout's channel count for `truehd_objects_open_layout`), valid only during the call. Return 0 to continue; anything else stops the session.
 typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uint32_t frames);
 
 /// A new session, or NULL when allocation failed: the object render, with the split of the 7.1
 /// presentation from the next major sync where the render gives up.
 TrueHDObjects *truehd_objects_open(void);
+
+/// Output layouts for `truehd_objects_open_layout`: the TS 103 448 layouts with heights, each in
+/// the channel order of the matching kAudioChannelLayoutTag_Atmos_* (top middles where it has
+/// them). TRUEHD_OBJECTS_CHANNELS is the widest (7.1.4).
+enum {
+    /// 8 channels: L R C LFE Ls Rs Ltm Rtm.
+    TRUEHD_OBJECTS_LAYOUT_5_1_2 = 0,
+    /// 10 channels: L R C LFE Ls Rs Vhl Vhr Ltr Rtr.
+    TRUEHD_OBJECTS_LAYOUT_5_1_4 = 1,
+    /// 10 channels: L R C LFE Ls Rs Rls Rrs Ltm Rtm.
+    TRUEHD_OBJECTS_LAYOUT_7_1_2 = 2,
+    /// 12 channels: what `truehd_objects_open` renders.
+    TRUEHD_OBJECTS_LAYOUT_7_1_4 = 3,
+};
+
+/// `truehd_objects_open` for another layout: the PCM callback then receives frames of that
+/// layout's channel count. NULL for an unknown layout or a failed allocation.
+TrueHDObjects *truehd_objects_open_layout(uint32_t layout);
 
 /// For measurement and listening: the object render alone (the bed where it gives up).
 TrueHDObjects *truehd_objects_open_exact(void);

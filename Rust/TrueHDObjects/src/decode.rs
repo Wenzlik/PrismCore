@@ -11,10 +11,10 @@
 
 use crate::{
     limit::Limiter,
-    render::{self, CHANNELS, Renderer, Speaker},
+    render::{self, CHANNELS, Gains, Layout, Renderer, Speaker},
     split::{BedSplitter, Weight},
 };
-use crate::render::{Event, Gains, Object};
+use crate::render::{Event, Object};
 use truehd::structs::oamd::TrimElement;
 use truehd::{
     process::{
@@ -90,6 +90,11 @@ pub struct Session {
     /// immersive presentation), and the frames it has played without one before that.
     guided: bool,
     unguided_frames: usize,
+    /// The output layout, and the split's 7.1.4 routed into it by table 6 (row per 7.1.4
+    /// channel; `None` for 7.1.4 itself).
+    layout: Layout,
+    split_routing: Option<[Gains; CHANNELS]>,
+    compact: Vec<f32>,
 }
 
 impl Default for Session {
@@ -119,6 +124,9 @@ impl Default for Session {
             split: None,
             guided: false,
             unguided_frames: 0,
+            layout: Layout::L714,
+            split_routing: None,
+            compact: Vec::new(),
         }
     }
 }
@@ -136,6 +144,26 @@ impl Session {
     /// has its own bed fallback, as before.
     pub fn exact_with_split_fallback() -> Self {
         Self { exact: true, split_fallback: true, ..Self::default() }
+    }
+
+    /// The same session rendering into another layout: objects are panned onto its own
+    /// loudspeakers (TS 103 448 tables A.5–A.8), bed channels routed by table 6, and the split
+    /// fallback's 7.1.4 folded into it by the same table.
+    pub fn in_layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
+        self.split_routing = (layout != Layout::L714).then(|| {
+            let mut rows = [[0.; CHANNELS]; CHANNELS];
+            for (row, speaker) in rows.iter_mut().zip(Layout::L714.speakers()) {
+                *row = render::bed_in(layout, *speaker, true);
+            }
+            rows
+        });
+        self
+    }
+
+    /// Channels per output frame.
+    pub fn channels(&self) -> usize {
+        self.layout.channels()
     }
 
     /// The bed, whatever is rendering, for a host whose heights chain cannot keep up (the bed
@@ -394,6 +422,7 @@ impl Session {
         self.renderer.render(&bed_pcm, frames, &mut routed);
         self.rendered.clear();
         split.push(&routed, &object_pcm, frames, &mut self.rendered);
+        self.route_split();
         self.unit_frames = Some(frames);
         self.note_guide(guided, frames);
         self.limit_and_flush(output)?;
@@ -429,7 +458,22 @@ impl Session {
         let Some(mut split) = self.split.take() else { return Ok(()) };
         self.rendered.clear();
         split.finish(&mut self.rendered);
+        self.route_split();
         self.limit_and_flush(output)
+    }
+
+    /// The split's 7.1.4 (`rendered`) into the session's layout, frame by frame.
+    fn route_split(&mut self) {
+        let Some(rows) = &self.split_routing else { return };
+        for frame in self.rendered.chunks_exact_mut(CHANNELS) {
+            let mut out = [0.; CHANNELS];
+            for (input, row) in frame.iter().zip(rows) {
+                if *input != 0. {
+                    out.iter_mut().zip(row).for_each(|(o, g)| *o += input * g);
+                }
+            }
+            frame.copy_from_slice(&out);
+        }
     }
 
     fn emit(
@@ -444,13 +488,14 @@ impl Session {
         // without object metadata. An object presentation labels only its bed (LFE).
         let labelled = self.decoded.channel_labels.len() == input.len();
         if self.mode == Mode::Bed || (labelled && self.decoded.oamd.is_empty() && self.held.is_empty()) {
-            let labels = if labelled {
+            let labels: Vec<Speaker> = if labelled {
                 self.decoded.channel_labels.iter().map(|l| speaker(*l)).collect()
             } else {
                 default_speakers(input.len())
             };
+            let backs = labels.iter().any(|s| matches!(s, Speaker::Lb | Speaker::Rb));
             for (channel, speaker) in labels.into_iter().enumerate() {
-                self.renderer.route(channel, render::bed(speaker));
+                self.renderer.route(channel, render::bed_in(self.layout, speaker, backs));
             }
             if self.mode == Mode::Pending {
                 self.mode = Mode::Objects;
@@ -518,7 +563,7 @@ impl Session {
         let mut events = Vec::new();
         let mut first = Vec::new();
         for metadata in oamd {
-            for_each_block(self.renderer.sample, metadata, channels, |e| {
+            for_each_block(self.layout, self.renderer.sample, metadata, channels, |e| {
                 if e.block == 0 && first.len() < channels {
                     first.push((e.channel, e.gains));
                 }
@@ -550,7 +595,7 @@ impl Session {
             // The held units advanced the renderer's clock; schedule against it again.
             events.clear();
             for metadata in oamd {
-                for_each_block(self.renderer.sample, metadata, channels, |e| events.push(e.event))?;
+                for_each_block(self.layout, self.renderer.sample, metadata, channels, |e| events.push(e.event))?;
             }
         }
         for event in events {
@@ -574,7 +619,15 @@ impl Session {
         if self.limited.iter().any(|v| !v.is_finite()) {
             return Err("renderer produced non-finite PCM".into());
         }
-        let result = output(&self.limited);
+        let channels = self.channels();
+        let result = if channels == CHANNELS {
+            output(&self.limited)
+        } else {
+            // Every layout renders its own channels first in a 7.1.4-wide frame.
+            self.compact.clear();
+            self.compact.extend(self.limited.chunks_exact(CHANNELS).flat_map(|f| f[..channels].iter().copied()));
+            output(&self.compact)
+        };
         self.limited.clear();
         result
     }
@@ -637,6 +690,7 @@ struct BlockEvent {
 /// Validates one OAMD payload and yields the target gains of every channel in every update
 /// block, scheduled from `sample` (the renderer's position at the start of this unit).
 fn for_each_block(
+    layout: Layout,
     sample: u64,
     metadata: &ObjectAudioMetadataPayload,
     channels: usize,
@@ -684,7 +738,8 @@ fn for_each_block(
                 [0.; CHANNELS]
             } else if block.b_object_in_bed_or_isf {
                 let index = *beds.get(channel).ok_or("bed assignment mismatch")?;
-                render::bed(*BED.get(index).ok_or("unknown bed speaker")?)
+                let backs = beds.iter().any(|b| matches!(BED.get(*b), Some(Lb | Rb)));
+                render::bed_in(layout, *BED.get(index).ok_or("unknown bed speaker")?, backs)
             } else {
                 let [x, y, z] = *positions
                     .get(channel)
@@ -714,8 +769,8 @@ fn for_each_block(
                     zone: info.zone_constraints_idx,
                     elevation: info.b_enable_elevation,
                 });
-                let mut gains = render::object(&object);
-                let trim = trim_gain(trim, channel, render::trim_layout(&object), object.position);
+                let mut gains = render::object_in(layout, &object);
+                let trim = trim_gain(trim, channel, render::trim_layout_in(layout, &object), object.position);
                 gains.iter_mut().for_each(|g| *g *= trim);
                 gains
             };
@@ -849,7 +904,7 @@ mod tests {
 
     fn gains(metadata: &ObjectAudioMetadataPayload) -> Result<Gains, Unsupported> {
         let mut out = None;
-        for_each_block(0, metadata, 1, |e| out = Some(e.gains))?;
+        for_each_block(Layout::L714, 0, metadata, 1, |e| out = Some(e.gains))?;
         Ok(out.unwrap())
     }
 
