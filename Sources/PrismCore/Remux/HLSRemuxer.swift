@@ -218,19 +218,25 @@ final class HLSRemuxer: @unchecked Sendable {
         /// comparison (`LanguageMatch`), never on the way in: what the
         /// container said is also what the master playlist prints.
         var language: String?
+        /// A copyable codec whose stream the system would still refuse (FLAC
+        /// declaring blocks under 192 samples, `FLACStreamInfo`): it is
+        /// decoded and re-encoded instead.
+        var refusesStreamCopy: Bool = false
 
         init(
             index: Int32,
             codecID: AVCodecID,
             isOriginal: Bool = false,
             isDefault: Bool = false,
-            language: String? = nil
+            language: String? = nil,
+            refusesStreamCopy: Bool = false
         ) {
             self.index = index
             self.codecID = codecID
             self.isOriginal = isOriginal
             self.isDefault = isDefault
             self.language = language
+            self.refusesStreamCopy = refusesStreamCopy
         }
     }
 
@@ -1882,7 +1888,9 @@ final class HLSRemuxer: @unchecked Sendable {
             var renditionBytes = 0
             let superseded = residentSegments.isSuperseded(index: segmentIndex - 1)
             for rendition in renditions {
-                renditionBytes += try rendition.cut(durationSeconds: duration, superseded: superseded)
+                renditionBytes += try rendition.cut(
+                    durationSeconds: duration, endSeconds: Double(endPTS) * tickSeconds, superseded: superseded
+                )
                 // The boundary is where a rendition the player left can stop
                 // whole: its last segment is on disk, nothing is half-muxed.
                 rendition.suspendIfUnwanted()
@@ -1984,7 +1992,10 @@ final class HLSRemuxer: @unchecked Sendable {
             streamMap = writer.streamMap
             for rendition in renditions {
                 rendition.audioDelaySeconds = audioDelaySeconds
-                try rendition.reanchor(input: input, segmentIndex: anchor)
+                try rendition.reanchor(
+                    input: input, segmentIndex: anchor,
+                    startSeconds: anchor < plannedPlan.entries.count ? Double(plannedPlan.entries[anchor].startPTS) * tickSeconds : nil
+                )
             }
             if adoptedDelay != nil {
                 // Every segment already on disk was muxed with the PREVIOUS
@@ -2404,6 +2415,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     }
                 }
                 for rendition in renditions {
+                    // An audio track shorter than the video gets silence to the video's end.
+                    try rendition.fillTail(untilSeconds: Double(lastVideoEndPTS ?? nextBoundaryPTS) * tickSeconds)
                     try rendition.flushBridge()
                 }
             }
@@ -2558,7 +2571,9 @@ final class HLSRemuxer: @unchecked Sendable {
                 codecID: par.codec_id,
                 isOriginal: disposition & AV_DISPOSITION_ORIGINAL != 0,
                 isDefault: disposition & AV_DISPOSITION_DEFAULT != 0,
-                language: avMetadataValue(input.pointee.streams[index]!.pointee.metadata, "language")
+                language: avMetadataValue(input.pointee.streams[index]!.pointee.metadata, "language"),
+                refusesStreamCopy: par.codec_id == AV_CODEC_ID_FLAC
+                    && !FLACStreamInfo.isStreamCopyable(extradata: par.extradata, size: par.extradata_size)
             ))
         }
         return candidates
@@ -2583,15 +2598,7 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredStreamIndex: Int32? = nil,
         canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
     ) -> [AudioRoute] {
-        let viable: [AudioRoute] = candidates.compactMap { candidate in
-            if copyableAudio.contains(candidate.codecID) {
-                return AudioRoute(index: candidate.index, mode: .streamCopy)
-            }
-            if canBridge(candidate.codecID) {
-                return AudioRoute(index: candidate.index, mode: .bridge)
-            }
-            return nil
-        }
+        let viable: [AudioRoute] = candidates.compactMap { route($0, canBridge: canBridge) }
         guard let preferred = chooseAudio(
                   candidates: candidates,
                   best: best,
@@ -2776,15 +2783,8 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredStreamIndex: Int32? = nil,
         canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
     ) -> AudioRoute? {
-        /// How this track would be carried, or `nil` when it cannot be.
         func route(_ candidate: AudioCandidate) -> AudioRoute? {
-            if copyableAudio.contains(candidate.codecID) {
-                return AudioRoute(index: candidate.index, mode: .streamCopy)
-            }
-            if canBridge(candidate.codecID) {
-                return AudioRoute(index: candidate.index, mode: .bridge)
-            }
-            return nil
+            Self.route(candidate, canBridge: canBridge)
         }
 
         // Rung -1. Only carriable candidates are offered to the matcher: a
@@ -2813,24 +2813,32 @@ final class HLSRemuxer: @unchecked Sendable {
         if let original = candidates.first(where: \.isOriginal), let route = route(original) {
             return route
         }
-        if let best, let bestCandidate = candidates.first(where: { $0.index == best }) {
-            if copyableAudio.contains(bestCandidate.codecID) {
-                return AudioRoute(index: best, mode: .streamCopy)
-            }
-            if canBridge(bestCandidate.codecID) {
-                return AudioRoute(index: best, mode: .bridge)
-            }
+        if let best, let bestCandidate = candidates.first(where: { $0.index == best }),
+           let route = route(bestCandidate) {
+            return route
         }
         if let flagged = candidates.first(where: \.isDefault), let route = route(flagged) {
             return route
         }
-        if let copyable = candidates.first(where: { copyableAudio.contains($0.codecID) }) {
-            return AudioRoute(index: copyable.index, mode: .streamCopy)
+        let routes = candidates.compactMap { route($0) }
+        return routes.first { $0.mode == .streamCopy } ?? routes.first { $0.mode == .bridge }
+    }
+
+    /// How one track would be carried, or `nil` when it cannot be. A copyable
+    /// codec the system would refuse anyway (`refusesStreamCopy`) is bridged
+    /// when this build can decode it: the copy would play nothing.
+    static func route(
+        _ candidate: AudioCandidate,
+        canBridge: (AVCodecID) -> Bool = { AudioBridge.canBridge(codecID: $0) }
+    ) -> AudioRoute? {
+        if copyableAudio.contains(candidate.codecID) {
+            if !candidate.refusesStreamCopy {
+                return AudioRoute(index: candidate.index, mode: .streamCopy)
+            }
+            return AudioBridge.canDecodeForBoost(codecID: candidate.codecID)
+                ? AudioRoute(index: candidate.index, mode: .bridge) : nil
         }
-        if let bridgeable = candidates.first(where: { canBridge($0.codecID) }) {
-            return AudioRoute(index: bridgeable.index, mode: .bridge)
-        }
-        return nil
+        return canBridge(candidate.codecID) ? AudioRoute(index: candidate.index, mode: .bridge) : nil
     }
 
     // MARK: - Video output stream

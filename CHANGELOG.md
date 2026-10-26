@@ -8,6 +8,40 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **FLAC that CoreMedia refuses is bridged, not stream-copied.** A FLAC
+  track whose STREAMINFO declares a minimum block size under 192 samples
+  does not open in AudioToolbox at all (measured on macOS 27.0.1: 64, 128
+  and 191 refused, 192 and up decoded; the header field alone decides, a
+  short final frame is fine), so copying it served a rendition nothing
+  could play. Such a track is now decoded and re-encoded by the audio
+  bridge like any bridged codec (`bridgedAudio` picks EAC3 or FLAC), and
+  the probe reports it as `.requiresAudioBridge`. Every other FLAC still
+  stream-copies bit for bit. New fuzz target `flac-streaminfo`.
+- **A bridged track that ends before the video plays silence to the end.**
+  In the planned shape every audio slot after the track's last sample was
+  listed in the playlist and answered 404 — at the end of a film whose
+  bridged track stops early, or across a gap two or more segments long.
+  Such a slot is now held instead of declared empty, and filled with silence
+  by the bridge once the next slot has passed without audio too (an
+  interleave never lags a whole segment), or at the end of the source, up to
+  the video's end. The silence opens on its slot's own boundary, and audio
+  that resumes after it keeps its own time: movenc used to close any gap
+  between two fragments of one muxer (a fragment's `tfdt` was the previous
+  fragments' summed durations), so audio after a gap played early by the
+  gap's length; such a fragment is now marked discontinuous. The slot right
+  before resumed audio stays empty, as before (it may hold that audio's late
+  interleave). Stream-copied tracks are unchanged (no encoder to make their
+  silence) and still end early, as do heights renditions and the sequential
+  shape. Files whose audio runs the whole length are served byte for byte as
+  before (three fixtures compared).
+- **An E-AC-3 / AC-3 init is never minted from a cut with no packets.** A
+  lazy bridged alternate armed where its track had no audio (past its end)
+  wrote a moov with a zero-size `stsd`, and every segment under that init
+  failed to demux — the whole alternate, not just its tail. The init now
+  waits for the first cut that carries packets.
+
 ### Added
 
 - **DTS:X feasibility note** (`docs/DTSXFeasibility.md`): what FFmpeg n8.1.2
@@ -31,6 +65,9 @@ source-compatible.)
   CPU on those scenes. Loose guards in the test catch a
   regression of the shipped split. Measurement only: nothing in the library
   changes.
+- Tests pin the EAC3 bridge's sample rate: a 96, 88.2 or 192 kHz source is
+  resampled to 48 kHz (the encoder takes 48, 44.1 and 32 kHz; this was
+  already the behaviour).
 
 ## [3.8.6] — 2026-10-25
 

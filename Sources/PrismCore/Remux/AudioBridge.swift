@@ -229,6 +229,8 @@ final class AudioBridge {
     /// state, so a flushed bridge accepts no more input. Latched so a late
     /// `feed` after EOF is a no-op instead of an error storm.
     private var drained = false
+    /// The decoder has been sent its end (`drainInput`), by `padSilence` or `flush`.
+    private var inputDrained = false
 
     private let sourceTimeBase: AVRational
 
@@ -461,6 +463,7 @@ final class AudioBridge {
         progress.encoderFrameSamples = Int(encoderCtx?.pointee.frame_size ?? 0)
         onProgress?(progress)
         if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
+        inputDrained = false
         if let fifo { av_audio_fifo_reset(fifo) }
         // The resampler's delay line belongs to the old position; dropping
         // the context makes `reconfigureResamplerIfNeeded` build a fresh one
@@ -591,22 +594,10 @@ final class AudioBridge {
     /// End of source: drain decoder, resampler, FIFO and encoder in that order.
     /// After this the bridge is spent (see `drained`).
     func flush(emit: Emit) throws {
-        guard !drained, let decoderCtx, let encoderCtx else { return }
+        guard !drained, let encoderCtx else { return }
         defer { onProgress?(progress) }
 
-        try FFmpegError.check(
-            avcodec_send_packet(decoderCtx, nil),
-            "avcodec_send_packet(audio, flush)"
-        )
-        try drainDecoder(emit: emit)
-
-        // Boost-graph tail before the resampler's: downstream stages drain in
-        // pipeline order or the last frames land behind earlier ones.
-        if let boostFilter {
-            try boostFilter.flush { filtered in
-                try self.absorb(filtered)
-            }
-        }
+        try drainInput(emit: emit)
 
         // Resampler tail: whatever its internal delay line still holds.
         if swrCtx != nil {
@@ -620,6 +611,110 @@ final class AudioBridge {
         if progress.inputPackets > 0 && progress.outputPackets == 0 {
             throw AudioBridgeFailure.producedNoAudio(progress)
         }
+    }
+
+    /// The decoder's and the boost graph's tails into the FIFO — once: a decoder
+    /// drained twice answers EOF as an error.
+    private func drainInput(emit: Emit) throws {
+        guard !inputDrained, let decoderCtx else { return }
+        inputDrained = true
+        try FFmpegError.check(
+            avcodec_send_packet(decoderCtx, nil),
+            "avcodec_send_packet(audio, flush)"
+        )
+        try drainDecoder(emit: emit)
+
+        // Boost-graph tail before the resampler's: downstream stages drain in
+        // pipeline order or the last frames land behind earlier ones.
+        if let boostFilter {
+            try boostFilter.flush { filtered in
+                try self.absorb(filtered)
+            }
+        }
+    }
+
+    /// Silence from where the output stands up to `end` (encoder ticks), for
+    /// a planned slot that carried no audio (`AudioRenditionWriter`): a track
+    /// that ended before its video, or a gap a whole segment long. `start`
+    /// places it when nothing has been heard yet (a rendition armed past its
+    /// track's end). `final`: the source has ended, so the decoder's and the
+    /// resampler's tails go first; call `flush` after.
+    ///
+    /// Not the drift `BridgeClock` avoids by re-anchoring: the silence ends on
+    /// the slot's boundary, and audio that resumes later re-anchors the clock
+    /// on its own timestamp, which lies past it.
+    ///
+    /// The silence continues the output when it stands within the clock's gap
+    /// tolerance of `start`. Further back, the slot before was already cut: the
+    /// silence opens a new fragment, so it starts at `start` — continued from
+    /// the old position instead, the fragment's `tfdt` would sit seconds before
+    /// its slot. What is still buffered of the old audio (a decoder's held
+    /// frame, less than one encoder frame in the FIFO: the very end of the
+    /// track) is dropped with the old timeline; it belongs to a slot already cut.
+    /// Mid-stream, a decoder's held frame is dropped either way: it would come
+    /// out after the silence when the audio resumes.
+    /// Whether `padSilence(from: start, …)` starts a new timeline (see there): the
+    /// muxer has to be told before the first packet (`FMP4SegmentWriter.markDiscontinuity`).
+    func padOpensNewTimeline(from start: Int64) -> Bool {
+        guard let fifo else { return false }
+        return clock.isAnchored && clock.nextPTS + Int64(av_audio_fifo_size(fifo)) < start - clock.gapTolerance
+    }
+
+    func padSilence(from start: Int64, until end: Int64, final: Bool, emit: Emit) throws {
+        guard !drained, let encoderCtx, let fifo else { return }
+        let gap = padOpensNewTimeline(from: start)
+        if final, !gap {
+            try drainInput(emit: emit)
+            if swrCtx != nil {
+                try convertIntoFIFO(frame: nil)
+            }
+        } else {
+            if let decoderCtx { avcodec_flush_buffers(decoderCtx) }
+            boostFilter?.reset()
+            // The end of the source either way: `flush` has nothing left to drain.
+            if final { inputDrained = true }
+        }
+        if gap {
+            try restartTimeline()
+        }
+        let depth = Int64(av_audio_fifo_size(fifo))
+        let position = clock.isAnchored ? clock.nextPTS + depth : start
+        guard end > position else { return }
+        if !clock.isAnchored {
+            clock.observe(framePTS: start, frameSamples: Int(end - start), fifoDepth: Int(depth))
+        }
+        let channels = encoderCtx.pointee.ch_layout.nb_channels
+        var remaining = end - position
+        while remaining > 0 {
+            let samples = Int32(min(remaining, 4_096))
+            try growConvertedBuffer(to: samples)
+            try FFmpegError.check(
+                av_samples_set_silence(convertedData, 0, samples, channels, encoderCtx.pointee.sample_fmt),
+                "av_samples_set_silence"
+            )
+            try FFmpegError.check(
+                av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + samples),
+                "av_audio_fifo_realloc"
+            )
+            let planes = UnsafeMutableRawPointer(convertedData!)
+                .assumingMemoryBound(to: UnsafeMutableRawPointer?.self)
+            try FFmpegError.check(av_audio_fifo_write(fifo, planes, samples), "av_audio_fifo_write")
+            chunker.appended(Int(samples))
+            remaining -= Int64(samples)
+        }
+        try encodeFromFIFO(final: false, emit: emit)
+    }
+
+    /// Forget the output timeline without touching the decoder: buffered samples,
+    /// the resampler's delay line, an encoder that holds frames, the clock.
+    private func restartTimeline() throws {
+        if let fifo { av_audio_fifo_reset(fifo) }
+        if swrCtx != nil { swr_free(&swrCtx) }
+        swrInFormat = AV_SAMPLE_FMT_NONE
+        swrInRate = 0
+        chunker.reset()
+        clock.reset()
+        try reopenEncoderIfItKeepsFrames()
     }
 
     private func drainDecoder(emit: Emit) throws {
@@ -1132,6 +1227,7 @@ struct BridgeClock {
     /// PTS to stamp the next encoder frame with.
     private(set) var nextPTS: Int64 = 0
     private var anchored = false
+    var isAnchored: Bool { anchored }
     /// Where the next input frame is expected to start, if the stream is
     /// continuous.
     private var expectedInputPTS: Int64?
