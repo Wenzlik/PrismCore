@@ -81,6 +81,74 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
   `truehd_objects_request_bed`; `truehd_objects_open_exact` is in every
   build.
 
+## [3.8.7] — 2026-10-26
+
+Audio bridge fixes: FLAC that CoreMedia refuses is bridged, a bridged track that
+ends early plays silence to the video's end, and an E-AC-3 / AC-3 init is never
+empty. Plus a DTS:X feasibility note and a measurement of the heights split
+(documentation and tests). No public API change. Source-compatible.
+
+### Fixed
+
+- **FLAC that CoreMedia refuses is bridged, not stream-copied.** A FLAC
+  track whose STREAMINFO declares a minimum block size under 192 samples
+  does not open in AudioToolbox at all (measured on macOS 27.0.1: 64, 128
+  and 191 refused, 192 and up decoded; the header field alone decides, a
+  short final frame is fine), so copying it served a rendition nothing
+  could play. Such a track is now decoded and re-encoded by the audio
+  bridge like any bridged codec (`bridgedAudio` picks EAC3 or FLAC), and
+  the probe reports it as `.requiresAudioBridge`. Every other FLAC still
+  stream-copies bit for bit. New fuzz target `flac-streaminfo`.
+- **A bridged track that ends before the video plays silence to the end.**
+  In the planned shape every audio slot after the track's last sample was
+  listed in the playlist and answered 404 — at the end of a film whose
+  bridged track stops early, or across a gap two or more segments long.
+  Such a slot is now held instead of declared empty, and filled with silence
+  by the bridge once the next slot has passed without audio too (an
+  interleave never lags a whole segment), or at the end of the source, up to
+  the video's end. The silence opens on its slot's own boundary, and audio
+  that resumes after it keeps its own time: movenc used to close any gap
+  between two fragments of one muxer (a fragment's `tfdt` was the previous
+  fragments' summed durations), so audio after a gap played early by the
+  gap's length; such a fragment is now marked discontinuous. The slot right
+  before resumed audio stays empty, as before (it may hold that audio's late
+  interleave). Stream-copied tracks are unchanged (no encoder to make their
+  silence) and still end early, as do heights renditions and the sequential
+  shape. Files whose audio runs the whole length are served byte for byte as
+  before (three fixtures compared).
+- **An E-AC-3 / AC-3 init is never minted from a cut with no packets.** A
+  lazy bridged alternate armed where its track had no audio (past its end)
+  wrote a moov with a zero-size `stsd`, and every segment under that init
+  failed to demux — the whole alternate, not just its tail. The init now
+  waits for the first cut that carries packets.
+
+### Added
+
+- **DTS:X feasibility note** (`docs/DTSXFeasibility.md`): what FFmpeg n8.1.2
+  exposes (detection of the DTS:X payload after XLL frame data, never its
+  contents), what the public ETSI specifications cover (TS 102 114, TS 103
+  491 DTS-UHD, TS 103 584, TS 103 223) and do not (the Blu-ray DTS:X object
+  payload), what an implementation would need, patent and licensing
+  questions, and a phased plan. Documentation only: DTS:X objects are still
+  not rendered, and nothing in the library changes.
+- **A reproducible measurement of the heights split against the exact object
+  render** (`Rust/TrueHDObjects/tests/measure.rs`,
+  `Rust/TrueHDObjects/scripts/measure-heights.sh`,
+  `docs/ObjectAudioMeasurement.md`): per-speaker energy, height level,
+  waveform correlation and front-versus-rear height separation, on five
+  synthetic object scenes with known positions (front, rear, mixed, a
+  front/rear pair over one side, moving) and on any raw TrueHD Atmos given.
+  Over each run the split's heights are within 0.11 dB of the exact
+  render (per-window medians within 0.13 dB), the front/rear balance is
+  kept, and the height feeds correlate 0.875–0.937 (synthetic) and 0.99
+  (two film scenes) with it; the exact render costs 29–42 % of the split's
+  CPU on those scenes. Loose guards in the test catch a
+  regression of the shipped split. Measurement only: nothing in the library
+  changes.
+- Tests pin the EAC3 bridge's sample rate: a 96, 88.2 or 192 kHz source is
+  resampled to 48 kHz (the encoder takes 48, 44.1 and 32 kHz; this was
+  already the behaviour).
+
 ## [3.8.6] — 2026-10-25
 
 Internal cleanup: no public API change and no behaviour change.
@@ -3649,7 +3717,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...HEAD
+[3.8.7]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...3.8.7
 [3.8.6]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...3.8.6
 [3.8.5]: https://github.com/Wenzlik/PrismCore/compare/3.8.4...3.8.5
 [3.8.4]: https://github.com/Wenzlik/PrismCore/compare/3.8.3...3.8.4

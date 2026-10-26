@@ -1257,8 +1257,13 @@ public enum SourceProbe {
         }()
 
         let copyability: StreamCopyability
-        if copyableAudio.contains(par.codec_id) {
+        // The remuxer's rule for a FLAC the system would refuse (`HLSRemuxer.route`).
+        let refusesStreamCopy = par.codec_id == AV_CODEC_ID_FLAC
+            && !FLACStreamInfo.isStreamCopyable(extradata: par.extradata, size: par.extradata_size)
+        if copyableAudio.contains(par.codec_id), !refusesStreamCopy {
             copyability = .streamCopy
+        } else if refusesStreamCopy {
+            copyability = AudioBridge.canDecodeForBoost(codecID: par.codec_id) ? .requiresAudioBridge : .unsupported
         } else if isBridgeable(par.codec_id) {
             copyability = .requiresAudioBridge
         } else {

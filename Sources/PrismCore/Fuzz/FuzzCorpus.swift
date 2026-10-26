@@ -25,7 +25,13 @@ package enum FuzzSeeds {
         "container-layout": [matroskaHead, faststartMP4Head],
         "hdr10plus-sei": [hdr10PlusAccessUnit(annexB: false), hdr10PlusAccessUnit(annexB: true)],
         "truehd-major-sync": [trueHDAtmosUnits],
+        "flac-streaminfo": [flacMatroskaPrivate],
     ]
+
+    /// Matroska's FLAC CodecPrivate: `fLaC`, a last-block STREAMINFO header,
+    /// and a STREAMINFO declaring 128-sample blocks (the refused kind).
+    package static let flacMatroskaPrivate: [UInt8] =
+        Array("fLaC".utf8) + [0x80, 0x00, 0x00, 0x22, 0x00, 0x80, 0x00, 0x80] + Array(repeating: 0x11, count: 30)
 
     /// A non-restart TrueHD access unit, then a restart unit whose major sync
     /// declares the 16-channel presentation (four substreams, the top bit of
