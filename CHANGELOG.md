@@ -8,6 +8,42 @@ source-compatible.)
 
 ## [Unreleased]
 
+TrueHD Atmos heights are rendered from the objects again; the split of the
+7.1 presentation is the fallback. **Needs a new `TrueHDObjects.xcframework`**
+(new C symbols): the release that ships this must build, attach and pin it
+(AGENTS.md, *Releasing* step 4).
+
+### Changed
+
+- **`.heights` renders the objects** (ETSI TS 103 448 room-coordinate panner:
+  size, divergence, snap, zones, trims, ramps — 3.7's renderer, and what 3.8
+  measured its split against). Metadata the render does not place hands the
+  stream, from the next major sync, to the 3.8 split, which keeps heights
+  where it can; the split's own bed fallback and every `.notPreserved` case
+  are unchanged. Why: measured on two film scenes and five synthetic object
+  scenes, the split matches the render's levels and front/rear placement
+  but not its waveforms where floor and height objects share a channel and
+  frequency bin (height correlation 0.875–0.937 on synthetic scenes), and
+  it costs 2.4–3.4× the render's CPU.
+- **Cost.** The whole chain runs 16.3× real time per core on an M2 (10.8×
+  with the split, same day, same 3-minute film scene); the first APAC packet
+  comes after 28 input access units (77).
+- **The heights chain cannot fall behind silently.** It runs on the
+  producer's thread, which has explicit `.userInitiated` QoS (now pinned by
+  a test), and when decode, render and encode take more than half the
+  audio's duration over ten seconds of audio, it asks the renderer for the
+  bed until the next seek and reports `.notPreserved`. Not the split: that
+  would cost more.
+- `heightsListeningExport` writes `.heights.*` (the render) and `.split.*`;
+  `PRISMCORE_EXACT_HEIGHTS` is gone. The Cargo feature `exact-render` is a
+  no-op kept for old commands.
+
+### Added
+
+- C API (`TrueHDObjects.h`): `truehd_objects_open_split`,
+  `truehd_objects_request_bed`; `truehd_objects_open_exact` is in every
+  build. No Swift public API change.
+
 ## [3.8.6] — 2026-10-25
 
 Internal cleanup: no public API change and no behaviour change.

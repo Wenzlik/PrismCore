@@ -14,9 +14,7 @@ use crate::{
     render::{self, CHANNELS, Renderer, Speaker},
     split::{BedSplitter, Weight},
 };
-#[cfg(feature = "exact-render")]
 use crate::render::{Event, Gains, Object};
-#[cfg(feature = "exact-render")]
 use truehd::structs::oamd::TrimElement;
 use truehd::{
     process::{
@@ -79,10 +77,14 @@ pub struct Session {
     unit_frames: Option<usize>,
     rendered: Vec<f32>,
     limited: Vec<f32>,
-    /// The exact object render (measurement builds only); otherwise the 7.1 presentation is
-    /// split per bin, guided by where the objects' energy lies (`split`).
-    #[cfg(feature = "exact-render")]
+    /// The exact object render; otherwise the 7.1 presentation is split per bin, guided by
+    /// where the objects' energy lies (`split`).
     exact: bool,
+    /// What the exact render leaves to when it meets metadata it does not place: the split
+    /// (the shipped session) or the bed (`exact()`, for measurement).
+    split_fallback: bool,
+    /// The bed asked for from outside (`request_bed`), applied at the next `push`.
+    bed_request: Option<String>,
     split: Option<BedSplitter>,
     /// Whether the split has had an object guide (readable metadata, or a channel-based
     /// immersive presentation), and the frames it has played without one before that.
@@ -111,8 +113,9 @@ impl Default for Session {
             unit_frames: None,
             rendered: Vec::new(),
             limited: Vec::new(),
-            #[cfg(feature = "exact-render")]
             exact: false,
+            split_fallback: false,
+            bed_request: None,
             split: None,
             guided: false,
             unguided_frames: 0,
@@ -121,17 +124,29 @@ impl Default for Session {
 }
 
 impl Session {
-    /// The exact object render the heights split is measured against (measurement builds).
-    #[cfg(feature = "exact-render")]
+    /// The exact object render alone: metadata it does not place sends it to the bed. What the
+    /// split is measured against.
     pub fn exact() -> Self {
         Self { exact: true, ..Self::default() }
     }
 
+    /// The shipped session: the exact object render, and the split of the 7.1 presentation
+    /// from the next major sync when the render meets metadata it does not place (the split
+    /// reads object positions only as points, so it takes what the render refuses). The split
+    /// has its own bed fallback, as before.
+    pub fn exact_with_split_fallback() -> Self {
+        Self { exact: true, split_fallback: true, ..Self::default() }
+    }
+
+    /// The bed from the next access unit on, whatever is rendering: for a host whose heights
+    /// chain cannot keep up (the bed decodes one presentation and renders nothing). One way:
+    /// a new session is how heights come back.
+    pub fn request_bed(&mut self, reason: &str) {
+        self.bed_request = Some(reason.into());
+    }
+
     fn renders_objects(&self) -> bool {
-        #[cfg(feature = "exact-render")]
-        return self.exact;
-        #[cfg(not(feature = "exact-render"))]
-        false
+        self.exact
     }
 
     pub fn mode(&self) -> Mode {
@@ -147,6 +162,9 @@ impl Session {
         end: bool,
         output: &mut impl FnMut(&[f32]) -> Result<(), String>,
     ) -> Result<(), String> {
+        if let Some(reason) = self.bed_request.take() {
+            self.fall_back(&reason, output)?;
+        }
         self.bytes += data.len() as u64;
         self.extractor.push_bytes(data);
         while let Some(frame) = self.extractor.next() {
@@ -432,27 +450,46 @@ impl Session {
             self.renderer.render(&input, frames, &mut self.rendered);
             return self.limit_and_flush(output);
         }
-        #[cfg(feature = "exact-render")]
         {
             let oamd = std::mem::take(&mut self.decoded.oamd);
             let result = self.emit_objects(input, frames, &oamd, output);
             self.decoded.oamd = oamd;
             match result {
                 Err(Unsupported(reason)) => {
-                    // Nothing of this unit was rendered; it plays as silence and the bed takes
-                    // over at the next major sync.
-                    self.fall_back(&reason, output)?;
+                    // Nothing of this unit was rendered; it plays as silence and the split (or
+                    // the bed) takes over at the next major sync.
+                    if self.split_fallback {
+                        self.leave_exact(&reason, output)?;
+                    } else {
+                        self.fall_back(&reason, output)?;
+                    }
                     self.silence(frames, output)
                 }
                 Ok(r) => r,
             }
         }
-        // Only the bed reaches here without the exact render (`push` splits everything else).
-        #[cfg(not(feature = "exact-render"))]
-        unreachable!("object presentation without the exact render")
     }
 
-#[cfg(feature = "exact-render")]
+    /// The exact render gives way to the split at the next major sync; audio held for
+    /// metadata plays as silence, as in `fall_back`. Heights stay: the split reports them once
+    /// it has a guide, and the bed after half a second without one.
+    fn leave_exact(&mut self, reason: &str, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+        self.exact = false;
+        self.fallback_reason = Some(format!("{reason}; heights from the 7.1 split"));
+        self.switching = true;
+        let sample = self.renderer.sample;
+        self.renderer = Renderer::default();
+        self.renderer.sample = sample;
+        let held = std::mem::take(&mut self.held_frames);
+        self.held.clear();
+        if held > 0 {
+            self.silence(held, output)?;
+        }
+        self.parser.reset_for_next_major_sync();
+        self.decoder.reset_for_next_major_sync();
+        Ok(())
+    }
+
     fn emit_objects(
         &mut self,
         input: Vec<Vec<f32>>,
@@ -526,11 +563,9 @@ impl Session {
     }
 }
 
-#[cfg(feature = "exact-render")]
 /// Metadata the renderer does not place; the session falls back to the bed.
 pub struct Unsupported(pub String);
 
-#[cfg(feature = "exact-render")]
 impl From<&str> for Unsupported {
     fn from(reason: &str) -> Self {
         Self(reason.into())
@@ -575,7 +610,6 @@ fn speaker(label: ChannelLabel) -> Speaker {
     }
 }
 
-#[cfg(feature = "exact-render")]
 struct BlockEvent {
     block: usize,
     channel: usize,
@@ -583,7 +617,6 @@ struct BlockEvent {
     event: Event,
 }
 
-#[cfg(feature = "exact-render")]
 /// Validates one OAMD payload and yields the target gains of every channel in every update
 /// block, scheduled from `sample` (the renderer's position at the start of this unit).
 fn for_each_block(
@@ -747,7 +780,6 @@ fn point_weights(metadata: &ObjectAudioMetadataPayload, channels: usize) -> Opti
         .collect()
 }
 
-#[cfg(feature = "exact-render")]
 /// Trim gain at a preprocessed position (TS 103 448 clause 5.3). Without trim metadata the
 /// default trim applies; balance metadata has no TS 103 448 equivalent and is ignored.
 fn trim_gain(trim: Option<&TrimElement>, object: usize, layout: render::TrimLayout, position: [f32; 3]) -> f32 {
@@ -774,12 +806,10 @@ fn trim_gain(trim: Option<&TrimElement>, object: usize, layout: render::TrimLayo
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "exact-render")]
     use truehd::structs::oamd::{
         BlockUpdateInfo, MDUpdateInfo, ObjectBasicInfo, ObjectElement, ObjectInfoBlock, ObjectRenderInfo, Trim,
     };
 
-    #[cfg(feature = "exact-render")]
     fn point(pos3d: [f64; 3]) -> ObjectAudioMetadataPayload {
         ObjectAudioMetadataPayload {
             object_count: 1,
@@ -800,7 +830,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "exact-render")]
     fn gains(metadata: &ObjectAudioMetadataPayload) -> Result<Gains, Unsupported> {
         let mut out = None;
         for_each_block(0, metadata, 1, |e| out = Some(e.gains))?;
@@ -808,7 +837,6 @@ mod tests {
     }
 
     // DAMF (x −1…1 left→right, y 1…−1 front→back, z 0…1) lands on the TS 103 448 targets.
-    #[cfg(feature = "exact-render")]
     #[test]
     fn damf_positions_reach_the_expected_speakers() {
         let ceiling_front_left = gains(&point([0., 0., 1.])).ok().unwrap();
@@ -821,7 +849,6 @@ mod tests {
         assert_eq!(g[8..].iter().sum::<f32>(), 0.);
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn custom_trim_attenuates_surround_and_height_positions() {
         let mut metadata = point([0., 1., 1.]);
@@ -832,7 +859,6 @@ mod tests {
         assert!((peak - 10f32.powf(-9. / 20.)).abs() < 1e-6);
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn unsupported_metadata_is_reported_not_rendered() {
         let mut isf = point([0., 0., 0.]);
@@ -856,7 +882,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn metadata_timeout_keeps_every_sample_exactly_once() {
         // 601 object units of 40 samples with no OAMD: 600 are held (24 000, the limit), the
@@ -874,6 +899,33 @@ mod tests {
         session.limiter.finish(&mut session.limited);
         session.flush(&mut sink).unwrap();
         assert_eq!(frames, 601 * 40);
+    }
+
+    #[test]
+    fn the_shipped_session_leaves_unplaceable_metadata_to_the_split() {
+        // Intermediate spatial format: the exact render does not place it; the shipped session
+        // hands the stream to the split (heights stay), the measurement one to the bed.
+        let mut isf = point([0., 0., 1.]);
+        isf.program_assignment.num_isf_objects = 1;
+        let mut sink = |_: &[f32]| Ok(());
+        for (mut session, split) in [(Session::exact_with_split_fallback(), true), (Session::exact(), false)] {
+            session.decoded.oamd = vec![isf.clone()];
+            session.emit(vec![vec![0.1; 40]], 40, &mut sink).unwrap();
+            assert_eq!(session.exact, !split);
+            assert_eq!(session.mode() == Mode::Bed, !split);
+            assert!(session.switching, "the switch waits for the next major sync");
+            assert!(session.fallback_reason.as_deref().unwrap().contains("intermediate spatial format"));
+        }
+    }
+
+    #[test]
+    fn a_requested_bed_applies_at_the_next_push() {
+        let mut session = Session::exact_with_split_fallback();
+        session.request_bed("the renderer fell behind real time");
+        let mut sink = |_: &[f32]| Ok(());
+        session.push(&[], false, &mut sink).unwrap();
+        assert_eq!(session.mode(), Mode::Bed);
+        assert!(session.fallback_reason.as_deref().unwrap().contains("fell behind"));
     }
 
     #[test]

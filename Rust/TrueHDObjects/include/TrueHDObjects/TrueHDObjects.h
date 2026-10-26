@@ -1,9 +1,10 @@
 // Copyright 2026 PrismCore contributors. Apache License 2.0 (see Rust/TrueHDObjects/LICENSE-APACHE).
 //
-// TrueHD Atmos to 7.1.4 (truehdd's `truehd` crate decodes): every output is a share of the
-// stream's own 7.1 presentation, split per frequency bin between ear level and the heights by
-// where the objects' energy lies (object positions read as points). TrueHD only. One session per stream; not thread-safe, so every
-// call on a session is serialized by the caller.
+// TrueHD Atmos to 7.1.4 (truehdd's `truehd` crate decodes): the objects rendered by their
+// metadata (the ETSI TS 103 448 room-coordinate panner); where the render meets metadata it does
+// not place, the stream's own 7.1 presentation split per frequency bin between ear level and the
+// heights by where the objects' energy lies. TrueHD only. One session per stream; not
+// thread-safe, so every call on a session is serialized by the caller.
 #ifndef TRUEHD_OBJECTS_H
 #define TRUEHD_OBJECTS_H
 
@@ -26,7 +27,7 @@ enum {
     /// Atmos to 7.1.4, heights included (a channel-based immersive presentation plays as itself).
     TRUEHD_OBJECTS_RENDERED = 1,
     /// The stream's own channel presentation (at most 7.1) with silent heights: a stream without
-    /// an Atmos presentation.
+    /// an Atmos presentation, metadata neither the render nor the split takes, or a requested bed.
     TRUEHD_OBJECTS_BED = 2,
 };
 
@@ -36,12 +37,20 @@ typedef struct TrueHDObjects TrueHDObjects;
 /// only during the call. Return 0 to continue; anything else stops the session.
 typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uint32_t frames);
 
-/// A new session, or NULL when allocation failed.
+/// A new session, or NULL when allocation failed: the object render, with the split of the 7.1
+/// presentation from the next major sync where the render gives up.
 TrueHDObjects *truehd_objects_open(void);
 
-/// Measurement builds only (`exact-render`; no release exports it): a session that renders
-/// the objects themselves to 7.1.4, which `truehd_objects_open` is measured against.
+/// For measurement and listening: the object render alone (the bed where it gives up).
 TrueHDObjects *truehd_objects_open_exact(void);
+
+/// For measurement and listening: the split of the 7.1 presentation alone (`.heights` in 3.8).
+TrueHDObjects *truehd_objects_open_split(void);
+
+/// The bed (silent heights, TRUEHD_OBJECTS_BED) from the next push on, whatever was rendering:
+/// for a host whose heights chain cannot keep up. One way; `reason` (NULL allowed) is what
+/// `truehd_objects_message` reports. NULL session is ignored.
+void truehd_objects_request_bed(TrueHDObjects *session, const char *reason);
 
 /// Feeds TrueHD bytes of this track only, starting at a major sync. `end` nonzero flushes the
 /// last 2 ms. Output is contiguous from the first sample of the first access unit: held,

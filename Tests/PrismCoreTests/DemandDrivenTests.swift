@@ -472,6 +472,17 @@ struct ParkedProducerTests {
         // stop() takes exactly this path when the remux already ended.
         await producer.join()
     }
+
+    @Test("The producer, and every bridge it drives, runs at user-initiated QoS")
+    func producerThreadQualityOfService() async {
+        // The heights chain (decode, render, APAC encode) runs on this thread: a
+        // background class can leave a slower device's chain under real time.
+        final class Seen: @unchecked Sendable { var qos: QualityOfService? }
+        let seen = Seen()
+        let producer = ProducerThread(name: "prismcore.tests.qos") { seen.qos = Thread.current.qualityOfService }
+        await producer.join()
+        #expect(seen.qos == .userInitiated)
+    }
 }
 
 /// The producer's lead cap: production pauses when it has run

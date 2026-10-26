@@ -13,9 +13,8 @@ name = "truehd_objects"
 crate-type = ["staticlib", "rlib"]
 
 [features]
-# The exact object render (TS 103 448 with size, snap, zones, trims and ramps) the heights split
-# is measured against: `cargo test --features exact-render`, or a measurement framework
-# (`TRUEHD_OBJECTS_FEATURES=exact-render build-xcframework.sh --mac`). Never in a release.
+# Kept so measurement commands written for it keep working: the exact object render (TS 103 448
+# with size, snap, zones, trims and ramps) is always built since it became what `.heights` plays.
 exact-render = []
 
 [dependencies]

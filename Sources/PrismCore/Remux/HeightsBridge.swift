@@ -27,10 +27,10 @@ protocol RenditionEncoder: AnyObject {
 
 extension AudioBridge: RenditionEncoder {}
 
-/// TrueHD Atmos with its heights: 7.1.4 derived from the stream's own 7.1 presentation by the
-/// Rust `TrueHDObjects` library (truehdd's decoder; each 7.1 channel split per frequency bin
-/// between ear level and the heights by where the objects' energy lies), encoded to Apple
-/// Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
+/// TrueHD Atmos with its heights: the objects rendered to 7.1.4 by the Rust `TrueHDObjects`
+/// library (truehdd's decoder; the ETSI TS 103 448 room-coordinate panner, and the split of the
+/// stream's 7.1 presentation where the render meets metadata it does not place), encoded to
+/// Apple Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
 ///
 /// ## Why APAC
 ///
@@ -62,11 +62,21 @@ extension AudioBridge: RenditionEncoder {}
 /// ## Timing
 ///
 /// The renderer's output is contiguous from the first sample of the first access unit it is
-/// given — concealed and fallback audio keep their length, and the split's own 32 ms delay is
-/// hidden inside the library — so the
+/// given — concealed and fallback audio keep their length, and the split's own 32 ms delay (when
+/// it is the one playing) is hidden inside the library — so the
 /// clock is one anchor, the PTS of the first fed packet, plus a sample count. Decoding has to
 /// start at a major sync, so after a start or a seek packets are skipped until one (at most 128
 /// access units, 107 ms). A jump in the source's timestamps re-anchors like a seek.
+///
+/// ## Load
+///
+/// The chain runs on the producer's thread, which `ProducerThread` gives `.userInitiated` QoS
+/// explicitly: a background class let a slower device's chain fall to a fraction of real time.
+/// It measures itself too: when decode, render and encode together take more than half the
+/// duration of the audio they produce, over ten seconds of audio, it asks the renderer for the
+/// bed (`truehd_objects_request_bed`: one presentation decoded, nothing rendered), reports
+/// `.notPreserved` and stays there until the next epoch (a seek or re-anchor starts a fresh
+/// session). Not the split: it costs two to three times the render's CPU.
 ///
 /// ## Failure never interrupts playback
 ///
@@ -117,6 +127,14 @@ final class HeightsBridge: RenditionEncoder {
     private var decoderFailure: String?
     private var reported: ObjectAudioDelivery?
     private var drained = false
+    /// Wall seconds spent in `feed` and seconds of audio fed, over the current load window.
+    private var load = (busy: 0.0, audio: 0.0)
+    /// Why this epoch asked the renderer for the bed (the chain fell behind), once it has.
+    private(set) var bedRequest: String?
+    static let loadWindowSeconds = 10.0
+    /// The chain must run at least this many times faster than the audio plays: the
+    /// producer's thread also demuxes and muxes the video.
+    static let minimumRealTimeFactor = 2.0
 
     /// Whether this OS has the 7.1.4 APAC encoder (asked once: building a converter is cheap,
     /// but the answer cannot change).
@@ -215,7 +233,17 @@ final class HeightsBridge: RenditionEncoder {
     func feed(_ source: UnsafeMutablePointer<AVPacket>, emit: AudioBridge.Emit) throws {
         guard !drained, let data = source.pointee.data, source.pointee.size > 0 else { return }
         progress.inputPackets += 1
-        defer { onProgress?(progress) }
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer {
+            onProgress?(progress)
+            // A TrueHD access unit is 40 samples at 48 kHz when the packet does not say.
+            let samples = source.pointee.duration > 0
+                ? av_rescale_q(source.pointee.duration, sourceTimeBase, timeBase) : 40
+            noteLoad(
+                busySeconds: Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9,
+                audioSeconds: Double(samples) / Double(Self.sampleRate)
+            )
+        }
         let raw = source.pointee.pts != swift_AV_NOPTS_VALUE() ? source.pointee.pts : source.pointee.dts
         let pts: Int64? = raw != swift_AV_NOPTS_VALUE() ? av_rescale_q(raw, sourceTimeBase, timeBase) : nil
         let duration: Int64? = source.pointee.duration > 0
@@ -285,7 +313,27 @@ final class HeightsBridge: RenditionEncoder {
         drained = false
     }
 
+    /// The load guard (see *Load*). Internal for the test that drives it.
+    func noteLoad(busySeconds: Double, audioSeconds: Double) {
+        guard bedRequest == nil else { return }
+        load.busy += busySeconds
+        load.audio += audioSeconds
+        guard load.audio >= Self.loadWindowSeconds else { return }
+        defer { load = (0, 0) }
+        let factor = load.audio / max(load.busy, 1e-9)
+        guard factor < Self.minimumRealTimeFactor else { return }
+        let why = String(format: "the heights chain ran at %.1fx real time over %.0f s", factor, load.audio)
+        bedRequest = why
+        PrismCoreLog.notice("\(why); asking the renderer for the bed until the next seek")
+        #if canImport(TrueHDObjects)
+        // No session yet (still waiting for a major sync): `decode` passes it on when it opens one.
+        if let session { truehd_objects_request_bed(session, why) }
+        #endif
+    }
+
     private func restartEpoch() {
+        load = (0, 0)
+        bedRequest = nil
         closeSession()
         encoder.reset()
         pending.removeAll(keepingCapacity: true)
@@ -304,6 +352,7 @@ final class HeightsBridge: RenditionEncoder {
         #if canImport(TrueHDObjects)
         if session == nil {
             session = truehd_objects_open()
+            if let session, let bedRequest { truehd_objects_request_bed(session, bedRequest) }
         }
         guard let session else {
             fail("the renderer could not allocate a session")
