@@ -61,6 +61,48 @@ fn each_presentation_kind_takes_its_path() {
 }
 
 #[test]
+fn the_shipped_session_renders_the_objects_exactly() {
+    // The public object vector has nothing the exact render refuses: the shipped session is the
+    // exact render, sample for sample — also over its start, where it decodes the 7.1 beside the
+    // objects until the major sync after the first metadata.
+    let Some((result, pcm, mode)) = decode_with("fba_atmos_obj.mlp", 4096, Session::exact_with_split_fallback) else { return };
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(mode, Mode::Objects);
+    assert_eq!(pcm, decode_with("fba_atmos_obj.mlp", 4096, Session::exact).unwrap().1);
+}
+
+/// The same on longer raw TrueHD Atmos files (`-f truehd`) the exact render plays to the end:
+/// `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
+#[test]
+fn the_shipped_session_renders_compared_files_exactly() {
+    let Ok(list) = std::env::var("TRUEHD_OBJECTS_COMPARE") else { return };
+    for path in list.split(':').filter(|s| !s.is_empty()) {
+        let data = std::fs::read(path).expect("stream");
+        let run = |mut session: Session| {
+            let mut pcm = Vec::new();
+            let mut sink = |b: &[f32]| {
+                pcm.extend_from_slice(b);
+                Ok(())
+            };
+            for bytes in data.chunks(4096) {
+                session.push(bytes, false, &mut sink).unwrap();
+            }
+            session.push(&[], true, &mut sink).unwrap();
+            (pcm, session.mode())
+        };
+        let (exact, mode) = run(Session::exact());
+        if mode != Mode::Objects {
+            println!("{path}: the exact render fell back ({mode:?}); nothing to compare");
+            continue;
+        }
+        let (shipped, shipped_mode) = run(Session::exact_with_split_fallback());
+        let differs = shipped.iter().zip(&exact).position(|(a, b)| a != b);
+        assert!(shipped.len() == exact.len() && differs.is_none(), "{path}: {shipped_mode:?}, {} vs {} frames, first difference at frame {:?}", shipped.len() / 12, exact.len() / 12, differs.map(|i| i / 12));
+        println!("{path}: {} frames, identical", exact.len() / 12);
+    }
+}
+
+#[test]
 fn a_stream_without_objects_falls_back_to_its_bed() {
     let Some((result, pcm, mode)) = decode("fbb_6ch.mlp", 4096) else { return };
     assert!(result.is_ok(), "{result:?}");
@@ -68,6 +110,51 @@ fn a_stream_without_objects_falls_back_to_its_bed() {
     // Heights stay silent; the bed carries the audio.
     assert!((8..12).all(|c| energy(&pcm, c) == 0.));
     assert!((0..8).map(|c| energy(&pcm, c)).sum::<f64>() > 0.);
+    // From its first sample, with no gap: the bed starts at the first major sync, and the units
+    // after it parse (review r3 of #170: they did not, ~100 ms of silence).
+    for (name, open) in [("fbb_6ch.mlp", Session::exact_with_split_fallback as fn() -> Session), ("fba_spliced.mlp", Session::default), ("fba_spliced.mlp", Session::exact_with_split_fallback)] {
+        let (_, pcm, _) = decode_with(name, 4096, open).unwrap();
+        assert_eq!(silent_windows(&pcm, 0), Vec::<usize>::new(), "{name}");
+    }
+}
+
+/// The starts of the 10 ms windows from frame `from` on that are digital silence.
+fn silent_windows(pcm: &[f32], from: usize) -> Vec<usize> {
+    let frames = pcm.len() / 12;
+    (from / 480..frames / 480).map(|w| w * 480).filter(|w| pcm[w * 12..(w + 480) * 12].iter().all(|x| *x == 0.)).collect()
+}
+
+/// The load guard's bed on longer raw TrueHD Atmos files (`TRUEHD_OBJECTS_COMPARE`): it starts at
+/// the next major sync with no gap, the stream keeping its length.
+#[test]
+fn a_requested_bed_starts_without_a_gap_on_compared_files() {
+    let Ok(list) = std::env::var("TRUEHD_OBJECTS_COMPARE") else { return };
+    for path in list.split(':').filter(|s| !s.is_empty()) {
+        let data = std::fs::read(path).expect("stream");
+        let mut session = Session::exact_with_split_fallback();
+        let mut pcm = Vec::new();
+        let mut asked_at = 0;
+        for (i, bytes) in data.chunks(1024).enumerate() {
+            if i == 2000 {
+                session.request_bed("the chain fell behind");
+                asked_at = pcm.len() / 12;
+            }
+            session.push(bytes, false, &mut |b: &[f32]| {
+                pcm.extend_from_slice(b);
+                Ok(())
+            })
+            .unwrap();
+        }
+        session.push(&[], true, &mut |b: &[f32]| {
+            pcm.extend_from_slice(b);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(session.mode(), Mode::Bed, "{path}");
+        let half_second_on = &pcm[..(asked_at + 24_000) * 12];
+        assert_eq!(silent_windows(half_second_on, asked_at), Vec::<usize>::new(), "{path}");
+        println!("{path}: bed asked for at frame {asked_at}, no gap");
+    }
 }
 
 #[test]
@@ -78,7 +165,6 @@ fn heights_keep_the_timeline_and_fall_back_to_the_plain_bed() {
         assert!(pcm.iter().all(|x| x.is_finite() && x.abs() <= 1.), "{name}");
         let (_, again, _) = decode(name, 317).unwrap();
         assert_eq!(pcm, again, "{name}: independent of chunking");
-        #[cfg(feature = "exact-render")]
         {
             let (_, exact, _) = decode_with(name, 4096, Session::exact).unwrap();
             assert_eq!(pcm.len(), exact.len(), "{name}: same length as the exact render");
@@ -89,13 +175,11 @@ fn heights_keep_the_timeline_and_fall_back_to_the_plain_bed() {
     let (_, pcm, mode) = decode("fbb_6ch.mlp", 4096).unwrap();
     assert_eq!(mode, Mode::Bed);
     assert!((8..12).all(|c| energy(&pcm, c) == 0.));
-    #[cfg(feature = "exact-render")]
     assert_eq!(pcm, decode_with("fbb_6ch.mlp", 4096, Session::exact).unwrap().1, "exactly the exact render's fallback");
     // Channel-based immersive: it plays as its own speaker feeds, as the exact render routes
     // them (the public vector's content is all in L, so this pins the routing, not heights).
     let (_, cbi, _) = decode("fba_atmos_cbi.mlp", 4096).unwrap();
     assert!(energy(&cbi, 0) > 0.);
-    #[cfg(feature = "exact-render")]
     {
         let (_, exact, _) = decode_with("fba_atmos_cbi.mlp", 4096, Session::exact).unwrap();
         let worst = cbi.iter().zip(&exact).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
@@ -103,13 +187,13 @@ fn heights_keep_the_timeline_and_fall_back_to_the_plain_bed() {
     }
 }
 
-#[cfg(feature = "exact-render")]
+#[cfg(target_vendor = "apple")]
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: u32) -> u64;
 }
 
-#[cfg(feature = "exact-render")]
 /// CPU seconds of this thread (CLOCK_THREAD_CPUTIME_ID): a loaded machine still measures the work.
+#[cfg(target_vendor = "apple")]
 fn cpu() -> f64 {
     unsafe { clock_gettime_nsec_np(16) as f64 / 1e9 }
 }
@@ -117,8 +201,9 @@ fn cpu() -> f64 {
 /// Heights from the bed against the exact object render, on the same stream: how much of the
 /// energy lands on another speaker, per channel and over windows, plus CPU and the input it
 /// takes before the first output. Measurement only (prints; asserts nothing about quality).
-/// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
-#[cfg(feature = "exact-render")]
+/// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`. Apple
+/// platforms only (the thread CPU clock).
+#[cfg(target_vendor = "apple")]
 #[test]
 fn compare_heights_with_the_exact_render() {
     let mut files: Vec<std::path::PathBuf> = Vec::new();

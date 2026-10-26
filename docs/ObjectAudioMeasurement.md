@@ -1,11 +1,13 @@
 # Object audio: the heights split against the exact object render
 
-`.heights` (TrueHD Atmos → APAC 7.1.4) ships the **split**: every 7.1.4 feed is a
+3.8 shipped the **split** for `.heights` (TrueHD Atmos → APAC 7.1.4), and it is now
+the fallback for metadata the render does not place: every 7.1.4 feed is a
 per-STFT-bin share of the stream's own 7.1 presentation, guided by where the
-objects are (`Rust/TrueHDObjects/src/split.rs`). The **exact render** places the
-decoded objects themselves with the ETSI TS 103 448 room-coordinate panner
-(size, snap, zones, trims, ramps; `src/render.rs`, Cargo feature
-`exact-render`). This page is the reproducible comparison of the two.
+objects are (`Rust/TrueHDObjects/src/split.rs`). The **exact render**, what
+`.heights` plays now, places the decoded objects themselves with the ETSI TS 103
+448 room-coordinate panner (size, snap, zones, trims, ramps; `src/render.rs`;
+the measurement runs with the Cargo feature `exact-render`). This page is the
+reproducible comparison of the two.
 
 ## Running it
 
@@ -64,7 +66,7 @@ same positions.
 
 The test asserts loose guards (heights within 1.5 dB, height correlation
 above 0.7, front share within 5 % in every window, front/rear never swapped), so a
-regression in the shipped split fails `cargo test --features exact-render`.
+regression in the split fails `cargo test --features exact-render`.
 
 ## Results (2026-10-26, Apple M2, macOS 27.0.1, rustc 1.99.0, release build)
 
@@ -113,5 +115,5 @@ height energy, so they only check the plumbing.
 - **What only the split has.** It keeps the stream's own 7.1 mix (its floor
   is the disc's bed, level-matched) and takes object metadata the exact
   render refuses (bed channel distribution, bed downmix metadata, objects
-  with a distance, reserved zones or warp), for which the exact render falls
-  back to the bed with silent heights.
+  with a distance, reserved zones or warp); for those the shipped session
+  hands the stream from the exact render to the split.

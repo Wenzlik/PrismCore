@@ -50,17 +50,11 @@ const OUTPUT: [Speaker; CHANNELS] = {
 };
 
 // Speaker classes for zone constraints and elevation (TS 103 448 tables 4 and 5).
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const FRONT: u8 = 1;
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const CENTRE: u8 = 2;
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const WIDE: u8 = 4;
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const SIDE: u8 = 8;
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const BACK: u8 = 16;
-#[cfg_attr(not(feature = "exact-render"), allow(dead_code))]
 const ELEVATED: u8 = 32;
 
 /// Panner target and class of each 7.1.4 output channel except LFE (the 3/4/4 table, A.5).
@@ -79,7 +73,6 @@ const ROOM: [(usize, [f32; 3], u8); 11] = [
     (11, [0.75, 0.75, 1.], ELEVATED),
 ];
 
-#[cfg(feature = "exact-render")]
 /// Snap locations: the 22.2 panner targets of TS 103 448 table A.9, in the order clause 5.1.4.2
 /// breaks ties (centre first, then descending z, descending y, ascending x).
 const SNAP: [([f32; 3], u8); 22] = [
@@ -107,7 +100,6 @@ const SNAP: [([f32; 3], u8); 22] = [
     ([1., 0., -1.], ELEVATED),
 ];
 
-#[cfg(feature = "exact-render")]
 /// Speaker classes excluded by `zone_constraints_idx` and `b_enable_elevation`.
 fn excluded(zone: u8, elevation: bool) -> u8 {
     let zone = match zone {
@@ -121,7 +113,6 @@ fn excluded(zone: u8, elevation: bool) -> u8 {
     if elevation { zone } else { zone | ELEVATED }
 }
 
-#[cfg(feature = "exact-render")]
 /// Mid-layer (non-front) and top speakers left after zone constraints; they select the trim
 /// configuration (TS 103 448 table 7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +121,6 @@ pub struct TrimLayout {
     pub top: usize,
 }
 
-#[cfg(feature = "exact-render")]
 impl TrimLayout {
     /// Trim configuration index; 8 for the full 7.1.4 layout.
     pub fn index(self) -> usize {
@@ -157,7 +147,6 @@ impl TrimLayout {
     }
 }
 
-#[cfg(feature = "exact-render")]
 /// Object metadata in TS 103 448 room coordinates: x left→right and y front→back in [0, 1],
 /// z from the bed plane (0) to the ceiling (1).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,7 +159,6 @@ pub struct Object {
     pub elevation: bool,
 }
 
-#[cfg(feature = "exact-render")]
 impl Object {
     pub fn point(position: [f32; 3]) -> Self {
         Self { position, size: [0.; 3], divergence: 0., snap: false, zone: 0, elevation: true }
@@ -211,7 +199,6 @@ pub fn bed(speaker: Speaker) -> Gains {
     gains
 }
 
-#[cfg(feature = "exact-render")]
 /// Metadata preprocessing (clauses 5.1.3 and 5.1.4): elevation off drops to the bed plane,
 /// then snap moves to the nearest allowed location and cancels size and divergence.
 pub fn preprocess(mut object: Object) -> Object {
@@ -238,7 +225,6 @@ pub fn preprocess(mut object: Object) -> Object {
     object
 }
 
-#[cfg(feature = "exact-render")]
 /// Speaker counts selecting an object's trim configuration, after its zone constraints.
 pub fn trim_layout(object: &Object) -> TrimLayout {
     let excluded = excluded(object.zone, object.elevation);
@@ -259,7 +245,6 @@ pub fn point_gains(position: [f32; 3]) -> Gains {
     result
 }
 
-#[cfg(feature = "exact-render")]
 /// Source panner (clause 5.2) for preprocessed metadata.
 pub fn object(object: &Object) -> Gains {
     let excluded = excluded(object.zone, object.elevation);
@@ -333,13 +318,11 @@ fn point(targets: &[[f32; 3]], [x, y, z]: [f32; 3]) -> Vec<f32> {
     (0..targets.len()).map(|j| gx[j] * gy[j] * gz[j]).collect()
 }
 
-#[cfg(feature = "exact-render")]
 fn normalized(gains: &[f64]) -> Vec<f64> {
     let total = gains.iter().map(|g| g * g).sum::<f64>().sqrt();
     gains.iter().map(|g| g / total.max(1e-5)).collect()
 }
 
-#[cfg(feature = "exact-render")]
 /// Divergence panner (pseudocode 15): two sources at x ± divergence/2, kept inside the room.
 fn divergence(targets: &[[f32; 3]], object: &Object) -> Vec<f32> {
     let [x, y, z] = object.position;
@@ -351,7 +334,6 @@ fn divergence(targets: &[[f32; 3]], object: &Object) -> Vec<f32> {
     normalized(&gains).into_iter().map(|g| g as f32).collect()
 }
 
-#[cfg(feature = "exact-render")]
 /// Object width to the size panner's scale (pseudocode 7).
 fn size_scale(width: f64) -> f64 {
     match width {
@@ -363,20 +345,17 @@ fn size_scale(width: f64) -> f64 {
     }
 }
 
-#[cfg(feature = "exact-render")]
 /// Weight of a virtual source at `a` for an object at `b` of scaled size `c` (pseudocode 8).
 fn weight(a: f64, b: f64, c: f64) -> f64 {
     if c > 0. { 10f64.powf(-(1.5 * (a - b) / c).powi(4)) } else { 0. }
 }
 
-#[cfg(feature = "exact-render")]
 /// Fade of the inside sources near the room boundaries (pseudocode 13).
 fn fade(position: f64, size: f64) -> f64 {
     let distance = position.min(1. - position);
     if distance < size || distance < 0.2 { distance / size.max(0.2) } else { 1. }
 }
 
-#[cfg(feature = "exact-render")]
 /// Size panner (clause 5.2.3) for a layout without bottom speakers: weighted sums over 20×20×8
 /// equidistant virtual sources plus sources on the six room boundaries, crossfaded from the
 /// point panner for small objects.
@@ -548,7 +527,6 @@ mod tests {
         point_gains(position)
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn the_exact_panner_agrees_with_point_gains_for_a_point() {
         for position in [[0.3, 0.2, 0.7], [1., 1., 0.], [0.5, 0.5, 1.]] {
@@ -601,7 +579,6 @@ mod tests {
         assert!(close(&bed(Speaker::Tsr), &[(9, M), (11, M)]));
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn zones_and_elevation_exclude_speakers() {
         let zoned = |zone, position| object(&Object { zone, ..Object::point(position) });
@@ -613,7 +590,6 @@ mod tests {
         assert!(close(&object(&low), &[(0, 1.)]));
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn trim_configuration_follows_the_remaining_speakers() {
         let rear = [0., 1., 0.];
@@ -626,7 +602,6 @@ mod tests {
         assert!((screen.default_db(rear) + 3.).abs() < 1e-6);
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn snap_moves_to_the_nearest_allowed_location() {
         let snapped = |position, zone, elevation| {
@@ -641,7 +616,6 @@ mod tests {
         assert_eq!(snapped([0.1, 0.05, 0.], 5, true).position, [0., 0.5, 0.]);
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn divergence_splits_along_x_within_the_room() {
         let diverged = |d, p| object(&Object { divergence: d, ..Object::point(p) });
@@ -649,7 +623,6 @@ mod tests {
         assert!(close(&diverged(1., [0.9, 0., 0.]), &[(1, 0.951057), (2, 0.309017)]));
     }
 
-    #[cfg(feature = "exact-render")]
     #[test]
     fn size_spreads_with_unit_power_and_converges_to_a_point() {
         let sized = |s, p| object(&Object { size: s, ..Object::point(p) });

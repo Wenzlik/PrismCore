@@ -223,12 +223,32 @@ API surface.
 - **The TrueHD profile is not evidence for heights either.** Gate on the
   bitstream (`TrueHDAtmosScout`, before the master), as the E-AC-3 JOC
   note above says for E-AC-3.
-- **The exact object render is measurement-only.** `.heights` is the bed split
-  (`split.rs`); the TS 103 448 object render it is measured against builds only
-  with the Cargo feature `exact-render` (`truehd_objects_open_exact`), and the
-  Swift tests reach it only under `PRISMCORE_EXACT_HEIGHTS` with a framework
-  built that way. A release framework must not contain it: build it without
-  `TRUEHD_OBJECTS_FEATURES`.
+- **The exact object render is what `.heights` plays; the split is its
+  fallback.** `truehd_objects_open` renders the objects (TS 103 448, `render.rs`)
+  and hands the stream to the bed split (`split.rs`, what 3.8 shipped) at the
+  next major sync (at once while the 7.1 is still decoded beside the objects)
+  when it meets metadata it does not place; the split has its
+  own bed fallback. Until its first metadata the render holds the audio and
+  decodes the 7.1 beside it, so when no metadata comes within 0.5 s (or the
+  first is refused, by the render or by both) the split plays from the first
+  sample and reports exactly as 3.8 did, never silence; metadata the render places brings it back at the
+  next major sync. Switch the decoder between its one- and two-presentation
+  calls only with a restart at a major sync: carried over, the PCM differs.
+  Measured, the render keeps the objects' waveforms (the
+  split's height feeds correlate ~0.9 with it where floor and height objects
+  share bins) at a third of the split's CPU. `truehd_objects_open_exact` and
+  `truehd_objects_open_split` open either alone, for measurement and
+  listening. The Cargo feature `exact-render` is a no-op kept for old
+  commands.
+- **Do not fall back to the split under load.** It costs 2.4–3.4× the render.
+  `HeightsBridge` asks for the bed (`truehd_objects_request_bed`) when its
+  chain runs under 2× real time over 10 s of audio, one way per epoch; it
+  applies at the next major sync, gaplessly.
+- **Every sample stays on its index.** `HeightsBridge` stamps by sample
+  count from one anchor, so no path or switch may drop, add or move a sample
+  (`switches_keep_every_sample_in_place`). The split's 32 ms delay is hidden
+  (its first outputs are dropped, its tail flushed): a mid-stream switch
+  delays delivery, not timestamps.
 - **The bed's levels are not the objects'.** A film's 7.1 measured its four
   surrounds 1.5 dB under the objects' floor projection; the split matches each
   channel's level adaptively (±3 dB). Without that, ~4 % of the energy
@@ -391,9 +411,9 @@ runs shorter. It does not replace them.
     here); `TRUEHD_OBJECTS_VECTORS` is the same for `cargo test`
   - `PRISMCORE_HEIGHTS_BENCH` — heights chain throughput on a TrueHD Atmos file
   - `PRISMCORE_HEIGHTS_EXPORT` — a file's heights to 7.1.4 CAF and APAC `.mp4`
-    for listening (`heightsListeningExport`; `.exact.*` too with
-    `PRISMCORE_EXACT_HEIGHTS=1`); `TRUEHD_OBJECTS_COMPARE` compares the split
-    with the exact render on raw `.thd` in `cargo test --features exact-render`
+    for listening (`heightsListeningExport`: `.heights.*` and the split's
+    `.split.*`); `TRUEHD_OBJECTS_COMPARE` compares the split with the exact
+    render on raw `.thd` in `cargo test --features exact-render`
     (`Rust/TrueHDObjects/scripts/measure-heights.sh` runs the full measurement:
     synthetic scenes plus any `.thd` given; `docs/ObjectAudioMeasurement.md`)
 - Fixtures are synthetic (`testsrc2` + `sine`), generated with system `ffmpeg`

@@ -4,7 +4,7 @@
 #
 #   Rust/TrueHDObjects/build-xcframework.sh           # all slices
 #   Rust/TrueHDObjects/build-xcframework.sh --mac     # this Mac's slice only (fast, for tests)
-#   TRUEHD_OBJECTS_FEATURES=exact-render …  --mac     # measurement build with the exact render
+#   TRUEHD_OBJECTS_FEATURES=…                         # extra Cargo features (none needed today)
 #
 # Output: Rust/TrueHDObjects/build/ (git-ignored). Package.swift links the framework when it is
 # there; without it PrismCore builds as before and TrueHD keeps its 7.1 bridge.

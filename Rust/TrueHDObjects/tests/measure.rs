@@ -1,9 +1,10 @@
 // Copyright 2026 PrismCore contributors. Apache License 2.0 (see LICENSE-APACHE).
 //
-// The heights split (what `.heights` ships) measured against the exact object render (TS 103 448,
-// `exact-render`): per-speaker energy, height level, waveform correlation and front-versus-rear
-// height separation. Synthetic object scenes with known positions always run; real TrueHD Atmos
-// streams (raw `-f truehd`) run when listed. Prints Markdown tables; the asserts are loose guards.
+// The heights split (the `.heights` fallback; 3.8 shipped it) measured against the exact object
+// render (TS 103 448, `exact-render`): per-speaker energy, height level, waveform correlation and
+// front-versus-rear height separation. Synthetic object scenes with known positions always run;
+// real TrueHD Atmos streams (raw `-f truehd`) run when listed. Prints Markdown tables; the asserts
+// are loose guards.
 //
 //   cargo test --release --locked --features exact-render --test measure -- --nocapture
 //   TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd cargo test … (or scripts/measure-heights.sh /a.thd …)
@@ -293,7 +294,7 @@ fn synthetic_scenes_against_the_exact_render() {
             s.moved_median
         );
     }
-    // Loose guards on the shipped split, so a regression shows: heights within 1.5 dB, the
+    // Loose guards on the split (the fallback), so a regression shows: heights within 1.5 dB, the
     // heights' front share within 5 % per window, and front and rear tops on the same side of
     // each other as the exact render puts them.
     for (name, s) in &rows {

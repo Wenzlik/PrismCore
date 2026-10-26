@@ -21,17 +21,38 @@ pub struct Handle {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn truehd_objects_open() -> *mut Handle {
-    catch_unwind(|| Box::into_raw(Box::new(Handle { session: Session::default(), error: String::new(), ended: false })))
+    open(Session::exact_with_split_fallback)
+}
+
+/// The exact object render alone (the bed where it gives up): for measurement and listening.
+#[unsafe(no_mangle)]
+pub extern "C" fn truehd_objects_open_exact() -> *mut Handle {
+    open(Session::exact)
+}
+
+/// The split of the 7.1 presentation alone (what `.heights` shipped in 3.8): for measurement
+/// and listening.
+#[unsafe(no_mangle)]
+pub extern "C" fn truehd_objects_open_split() -> *mut Handle {
+    open(Session::default)
+}
+
+fn open(session: fn() -> Session) -> *mut Handle {
+    catch_unwind(|| Box::into_raw(Box::new(Handle { session: session(), error: String::new(), ended: false })))
         .unwrap_or(ptr::null_mut())
 }
 
-/// The exact object render the heights split is measured against: measurement builds only
-/// (`exact-render`), never a release.
-#[cfg(feature = "exact-render")]
+/// # Safety
+/// `handle` is live or NULL; `reason` is NULL or a NUL-terminated string.
 #[unsafe(no_mangle)]
-pub extern "C" fn truehd_objects_open_exact() -> *mut Handle {
-    catch_unwind(|| Box::into_raw(Box::new(Handle { session: Session::exact(), error: String::new(), ended: false })))
-        .unwrap_or(ptr::null_mut())
+pub unsafe extern "C" fn truehd_objects_request_bed(handle: *mut Handle, reason: *const c_char) {
+    let Some(handle) = (unsafe { handle.as_mut() }) else { return };
+    let reason = if reason.is_null() {
+        "the host asked for the bed".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(reason) }.to_string_lossy().into_owned()
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| handle.session.request_bed(&reason)));
 }
 
 /// # Safety
@@ -155,7 +176,6 @@ mod tests {
             truehd_objects_close(handle);
             truehd_objects_close(ptr::null_mut());
 
-            #[cfg(feature = "exact-render")]
             {
                 // The same contract for the measurement render.
                 let handle = truehd_objects_open_exact();
