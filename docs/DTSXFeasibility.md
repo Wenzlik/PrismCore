@@ -73,8 +73,9 @@ ETSI specifications listed below. The decision this asks for is at the end
 So the gap is precise: **the structure that follows `0x02000850` in a disc
 XLL frame is not in any of these documents.** It may well reuse TS 103 491
 or TS 103 223 syntax, but establishing that from streams is reverse
-engineering, which is out of bounds for this project (and for a clean-room
-implementation generally). The question has to be answered by a document.
+engineering, which this project's own rules exclude (whatever its legal
+standing elsewhere, which is not assessed here). The question has to be
+answered by a document.
 
 ## What an implementation would need, if the payload were specified
 
@@ -129,9 +130,10 @@ the XLL frame — into side data on the decoded output frame (a new
 `AV_FRAME_DATA_*` type, or an opaque buffer), instead of seeking past it.
 The parser (`dca_parser.c`) is the wrong place: it reads only the XLL
 common-header prefix for the frame duration and never walks the channel
-sets or NAVI. With the patch, steps 1 and 2 of the walker shrink to reading
-side data, at the cost of carrying the patch on every MPVKit rebuild; it is
-only worth carrying once steps 2–4 have something to decode.
+sets or NAVI. With the patch, step 1 shrinks to reading side data (step 2,
+the metadata parser, is still needed: the bytes are passed through as they
+are), at the cost of carrying the patch on every MPVKit rebuild; it is only
+worth carrying once steps 2–4 have something to decode.
 
 ## Patents and licensing — **for Václav to decide, not decided here**
 
