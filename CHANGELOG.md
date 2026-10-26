@@ -17,9 +17,11 @@ source-compatible.)
   waveform correlation and front-versus-rear height separation, on five
   synthetic object scenes with known positions (front, rear, mixed, a
   front/rear pair over one side, moving) and on any raw TrueHD Atmos given.
-  Heights within 0.11 dB, front/rear balance kept, height correlation
-  0.88–0.94 (synthetic) and 0.99 (two film scenes); the exact render costs
-  about a third of the split's CPU. Loose guards in the test catch a
+  Over each run the split's heights are within 0.11 dB of the exact
+  render (per-window medians within 0.13 dB), the front/rear balance is
+  kept, and the height feeds correlate 0.875–0.937 (synthetic) and 0.99
+  (two film scenes) with it; the exact render costs about a third of the
+  split's CPU. Loose guards in the test catch a
   regression of the shipped split. Measurement only: nothing in the library
   changes.
 
