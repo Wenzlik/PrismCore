@@ -44,6 +44,27 @@ source-compatible.)
 
 ### Added
 
+- **DTS:X feasibility note** (`docs/DTSXFeasibility.md`): what FFmpeg n8.1.2
+  exposes (detection of the DTS:X payload after XLL frame data, never its
+  contents), what the public ETSI specifications cover (TS 102 114, TS 103
+  491 DTS-UHD, TS 103 584, TS 103 223) and do not (the Blu-ray DTS:X object
+  payload), what an implementation would need, patent and licensing
+  questions, and a phased plan. Documentation only: DTS:X objects are still
+  not rendered, and nothing in the library changes.
+- **A reproducible measurement of the heights split against the exact object
+  render** (`Rust/TrueHDObjects/tests/measure.rs`,
+  `Rust/TrueHDObjects/scripts/measure-heights.sh`,
+  `docs/ObjectAudioMeasurement.md`): per-speaker energy, height level,
+  waveform correlation and front-versus-rear height separation, on five
+  synthetic object scenes with known positions (front, rear, mixed, a
+  front/rear pair over one side, moving) and on any raw TrueHD Atmos given.
+  Over each run the split's heights are within 0.11 dB of the exact
+  render (per-window medians within 0.13 dB), the front/rear balance is
+  kept, and the height feeds correlate 0.875–0.937 (synthetic) and 0.99
+  (two film scenes) with it; the exact render costs 29–42 % of the split's
+  CPU on those scenes. Loose guards in the test catch a
+  regression of the shipped split. Measurement only: nothing in the library
+  changes.
 - Tests pin the EAC3 bridge's sample rate: a 96, 88.2 or 192 kHz source is
   resampled to 48 kHz (the encoder takes 48, 44.1 and 32 kHz; this was
   already the behaviour).
