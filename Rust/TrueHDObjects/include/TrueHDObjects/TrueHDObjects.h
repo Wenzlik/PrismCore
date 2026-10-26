@@ -38,7 +38,10 @@ typedef struct TrueHDObjects TrueHDObjects;
 typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uint32_t frames);
 
 /// A new session, or NULL when allocation failed: the object render, with the split of the 7.1
-/// presentation from the next major sync where the render gives up.
+/// presentation where the render gives up — from the stream's first sample when that is before
+/// or at the first object metadata (none within 0.5 s, or metadata the render refuses), else from
+/// the next major sync. A split that took over for want of metadata hands back to the render at
+/// the major sync after metadata it places arrives.
 TrueHDObjects *truehd_objects_open(void);
 
 /// For measurement and listening: the object render alone (the bed where it gives up).
@@ -48,10 +51,10 @@ TrueHDObjects *truehd_objects_open_exact(void);
 TrueHDObjects *truehd_objects_open_split(void);
 
 /// The bed (silent heights, TRUEHD_OBJECTS_BED), whatever was rendering: for a host whose heights
-/// chain cannot keep up. Applied at the next push: the split's last 32 ms come out first (heights
-/// included), then silence of the stream's own length up to its next major sync (at most 107 ms),
-/// then the bed. One way; `reason` (NULL allowed) is what `truehd_objects_message` reports. NULL
-/// session is ignored. The mode reads TRUEHD_OBJECTS_BED from that push on.
+/// chain cannot keep up. Applied at the stream's next major sync (at most 107 ms on): what plays
+/// goes on until then, the split's last 32 ms come out (heights included), and the bed starts at
+/// that sync, with no gap. One way; `reason` (NULL allowed) is what `truehd_objects_message`
+/// reports. NULL session is ignored. The mode reads TRUEHD_OBJECTS_BED from that sync on.
 void truehd_objects_request_bed(TrueHDObjects *session, const char *reason);
 
 /// Feeds TrueHD bytes of this track only, starting at a major sync. `end` nonzero flushes the

@@ -227,7 +227,13 @@ API surface.
   fallback.** `truehd_objects_open` renders the objects (TS 103 448, `render.rs`)
   and hands the stream to the bed split (`split.rs`, what 3.8 shipped) at the
   next major sync when it meets metadata it does not place; the split has its
-  own bed fallback. Measured, the render keeps the objects' waveforms (the
+  own bed fallback. Until its first metadata the render holds the audio and
+  decodes the 7.1 beside it, so when no metadata comes within 0.5 s (or the
+  first is refused) the split plays from the first sample and reports exactly
+  as 3.8 did, never silence; metadata the render places brings it back at the
+  next major sync. Switch the decoder between its one- and two-presentation
+  calls only with a restart at a major sync: carried over, the PCM differs.
+  Measured, the render keeps the objects' waveforms (the
   split's height feeds correlate ~0.9 with it where floor and height objects
   share bins) at a third of the split's CPU. `truehd_objects_open_exact` and
   `truehd_objects_open_split` open either alone, for measurement and
@@ -235,7 +241,13 @@ API surface.
   commands.
 - **Do not fall back to the split under load.** It costs 2.4–3.4× the render.
   `HeightsBridge` asks for the bed (`truehd_objects_request_bed`) when its
-  chain runs under 2× real time over 10 s of audio, one way per epoch.
+  chain runs under 2× real time over 10 s of audio, one way per epoch; it
+  applies at the next major sync, gaplessly.
+- **Every sample stays on its index.** `HeightsBridge` stamps by sample
+  count from one anchor, so no path or switch may drop, add or move a sample
+  (`switches_keep_every_sample_in_place`). The split's 32 ms delay is hidden
+  (its first outputs are dropped, its tail flushed): a mid-stream switch
+  delays delivery, not timestamps.
 - **The bed's levels are not the objects'.** A film's 7.1 measured its four
   surrounds 1.5 dB under the objects' floor projection; the split matches each
   channel's level adaptively (±3 dB). Without that, ~4 % of the energy

@@ -20,7 +20,11 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
   measured its split against). Metadata the render does not place hands the
   stream, from the next major sync, to the 3.8 split, which keeps heights
   where it can; the split's own bed fallback and every `.notPreserved` case
-  are unchanged. Why: measured on two film scenes and five synthetic object
+  are unchanged. A stream without object metadata in its first half second
+  (or whose first metadata the render refuses) plays the 3.8 split from its
+  first sample — the same audio, the bed reported after the same 0.5 s — and
+  the render takes over at the major sync after metadata it places arrives.
+  Why: measured on two film scenes and five synthetic object
   scenes, the split matches the render's levels and front/rear placement
   but not its waveforms where floor and height objects share a channel and
   frequency bin (height correlation 0.875–0.937 on synthetic scenes), and
@@ -32,8 +36,12 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
   producer's thread, which has explicit `.userInitiated` QoS (now pinned by
   a test), and when decode, render and encode take more than half the
   audio's duration over ten seconds of audio, it asks the renderer for the
-  bed until the next seek and reports `.notPreserved`. Not the split: that
-  would cost more.
+  bed until the next seek and reports `.notPreserved`; the bed starts at the
+  stream's next major sync, with no gap. Not the split: that would cost
+  more.
+- Tests pin that every path and every switch (render, split, the load
+  guard's bed, the split taking over and handing back) keeps each sample on
+  its own index: the heights' timestamps are a sample count.
 - `heightsListeningExport` writes `.heights.*` (the render) and `.split.*`;
   `PRISMCORE_EXACT_HEIGHTS` is gone. The Cargo feature `exact-render` is a
   no-op kept for old commands.

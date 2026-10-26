@@ -32,7 +32,9 @@ use truehd::{
 /// How long a session waits for the first object metadata: half a second at 48 kHz. Atmos
 /// repeats its metadata every few tens of milliseconds, and a stream entered at a later major
 /// sync carries its first block a few access units in. The exact render holds its audio that
-/// long; the split plays the plain 7.1 meanwhile and reports the bed after it.
+/// long (with the 7.1 decoded beside it, in the shipped session); the split plays the plain 7.1
+/// meanwhile and reports the bed after it — and so does the shipped session when that time runs
+/// out, from the held 7.1.
 const MAX_HELD_FRAMES: usize = 24_000;
 /// FBA streams repeat their major sync at least every 128 access units.
 const MAX_SYNC_INTERVAL: usize = 128;
@@ -83,8 +85,19 @@ pub struct Session {
     /// What the exact render leaves to when it meets metadata it does not place: the split
     /// (the shipped session) or the bed (`exact()`, for measurement).
     split_fallback: bool,
-    /// The bed asked for from outside (`request_bed`), applied at the next `push`.
+    /// The bed asked for from outside (`request_bed`), applied at the next major sync.
     bed_request: Option<String>,
+    /// While the shipped session holds audio for its first object metadata (and up to the next
+    /// major sync after it), the 7.1 is decoded beside the objects: the latest unit's, and each
+    /// held unit's. Should the render give way then, the split plays them from the first held
+    /// sample on, as 3.8 did, instead of silence.
+    dual: bool,
+    bed_unit: Option<(Vec<Vec<f32>>, Vec<Speaker>)>,
+    held_beds: Vec<(Vec<Vec<f32>>, Vec<Speaker>)>,
+    /// The split took over for want of metadata: metadata the render places brings the render
+    /// back, at the next major sync (`rejoining`).
+    may_rejoin: bool,
+    rejoining: bool,
     split: Option<BedSplitter>,
     /// Whether the split has had an object guide (readable metadata, or a channel-based
     /// immersive presentation), and the frames it has played without one before that.
@@ -116,6 +129,11 @@ impl Default for Session {
             exact: false,
             split_fallback: false,
             bed_request: None,
+            dual: false,
+            bed_unit: None,
+            held_beds: Vec::new(),
+            may_rejoin: false,
+            rejoining: false,
             split: None,
             guided: false,
             unguided_frames: 0,
@@ -135,14 +153,14 @@ impl Session {
     /// reads object positions only as points, so it takes what the render refuses). The split
     /// has its own bed fallback, as before.
     pub fn exact_with_split_fallback() -> Self {
-        Self { exact: true, split_fallback: true, ..Self::default() }
+        Self { exact: true, split_fallback: true, dual: true, ..Self::default() }
     }
 
     /// The bed, whatever is rendering, for a host whose heights chain cannot keep up (the bed
-    /// decodes one presentation and renders nothing). At the next `push` what the split still
-    /// holds comes out (its last 32 ms, heights included), and the stream plays silence of its
-    /// own length until its next major sync (at most 107 ms), where the bed starts. One way: a
-    /// new session is how heights come back.
+    /// decodes one presentation and renders nothing). What is playing goes on up to the next
+    /// major sync (at most 107 ms), where what the split still holds comes out (its last 32 ms,
+    /// heights included) and the bed starts, with no gap. One way: a new session is how heights
+    /// come back.
     pub fn request_bed(&mut self, reason: &str) {
         self.bed_request = Some(reason.into());
     }
@@ -164,9 +182,6 @@ impl Session {
         end: bool,
         output: &mut impl FnMut(&[f32]) -> Result<(), String>,
     ) -> Result<(), String> {
-        if let Some(reason) = self.bed_request.take() {
-            self.fall_back(&reason, output)?;
-        }
         self.bytes += data.len() as u64;
         self.extractor.push_bytes(data);
         while let Some(frame) = self.extractor.next() {
@@ -209,13 +224,22 @@ impl Session {
                 // The widest channel presentation below the object one: 7.1 on Atmos.
                 self.bed_presentation = (sync.substreams as usize).clamp(1, 3) - 1;
             }
+            if major_sync {
+                self.at_major_sync(output)?;
+            }
             // An unguided split reports the bed but keeps splitting (`note_guide`).
             if !self.renders_objects() && (self.mode != Mode::Bed || self.split.is_some()) {
                 self.decode_from_bed(&au, restarting, output)?;
                 continue;
             }
             let presentation = if self.mode == Mode::Bed { self.bed_presentation } else { ATMOS_PRESENTATION };
-            if let Err(e) = self.decoder.decode_presentation_into(&au, presentation, &mut self.decoded) {
+            self.bed_unit = None;
+            let decoded = if self.dual && self.mode != Mode::Bed {
+                self.decode_with_bed(&au)
+            } else {
+                self.decoder.decode_presentation_into(&au, presentation, &mut self.decoded).map_err(|e| e.to_string())
+            };
+            if let Err(e) = decoded {
                 self.lose(restarting, format!("TrueHD decoding: {e}"), output)?;
                 continue;
             }
@@ -242,9 +266,14 @@ impl Session {
             if let Some((error, _)) = self.lost.take() {
                 return Err(error);
             }
-            // Audio still held for metadata that never came keeps its time, as silence.
+            // Audio still held for metadata that never came plays as the split of its 7.1 (or,
+            // without it, keeps its time as silence).
             if self.held_frames > 0 {
-                self.fall_back("the stream ended before its first object metadata", output)?;
+                if self.held_beds.len() == self.held.len() {
+                    self.split_held(output)?;
+                } else {
+                    self.fall_back("the stream ended before its first object metadata", output)?;
+                }
             }
             // A split still waiting for its first guide (or about to take over from the render
             // at a major sync that never came) played the plain 7.1 or silence: say so.
@@ -273,16 +302,65 @@ impl Session {
         self.fallback_reason = Some(reason.into());
         self.mode = Mode::Bed;
         self.switching = true;
+        (self.may_rejoin, self.rejoining) = (false, false);
         let sample = self.renderer.sample;
         self.renderer = Renderer::default();
         self.renderer.sample = sample;
         let held = std::mem::take(&mut self.held_frames);
         self.held.clear();
+        self.held_beds.clear();
         if held > 0 {
             self.silence(held, output)?;
         }
         self.parser.reset_for_next_major_sync();
         self.decoder.reset_for_next_major_sync();
+        Ok(())
+    }
+
+    /// Every substream restarts at a major sync, so the session changes what it decodes there:
+    /// a requested bed starts, the split hands back to the render, and the render stops decoding
+    /// the 7.1 beside the objects once it no longer holds audio.
+    fn at_major_sync(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+        if let Some(reason) = self.bed_request.take() {
+            self.fall_back(&reason, output)?;
+            // The bed starts at this very unit.
+            self.switching = false;
+        }
+        if std::mem::take(&mut self.rejoining) && self.split.is_some() {
+            // The split's last 32 ms out, then the render, holding audio until the metadata in
+            // force (it repeats every few tens of milliseconds) as at the start.
+            self.drain_split(output)?;
+            self.exact = true;
+            self.dual = true;
+            self.mode = Mode::Pending;
+            self.fallback_reason = None;
+            let sample = self.renderer.sample;
+            self.renderer = Renderer::default();
+            self.renderer.sample = sample;
+        }
+        if self.dual && self.mode != Mode::Pending {
+            // The objects alone from here, by a decoder restarted at this major sync: carried over
+            // from decoding two presentations, the one-presentation decode's PCM differs
+            // (measured on film); from a restart it is the same as if it had decoded alone.
+            self.dual = false;
+            self.decoder.reset_for_next_major_sync();
+        }
+        Ok(())
+    }
+
+    /// The object presentation into `decoded`, and the 7.1 beside it into `bed_unit`.
+    fn decode_with_bed(&mut self, au: &truehd::structs::access_unit::AccessUnit) -> Result<(), String> {
+        let mut wanted = [false; 4];
+        wanted[self.bed_presentation] = true;
+        wanted[ATMOS_PRESENTATION] = true;
+        let mut decoded = self.decoder.decode_presentations(au, &wanted).map_err(|e| e.to_string())?;
+        let (Some(bed), Some(objects)) = (decoded[self.bed_presentation].take(), decoded[ATMOS_PRESENTATION].take()) else {
+            return Err("a presentation is missing".into());
+        };
+        if !bed.is_duplicate {
+            self.bed_unit = Some(bed_feeds(&bed));
+        }
+        self.decoded = objects;
         Ok(())
     }
 
@@ -357,15 +435,8 @@ impl Session {
             return Err("only 48 kHz TrueHD is rendered".into());
         }
         let frames = bed.sample_length;
-        let planar = |d: &DecodedAccessUnit| -> Vec<Vec<f32>> {
-            (0..d.channel_count).map(|ch| (0..frames).map(|s| d.pcm_data[s][ch] as f32 / 8_388_608.).collect()).collect()
-        };
-        let (mut bed_pcm, mut object_pcm) = (planar(bed), planar(objects));
-        let mut labels: Vec<Speaker> = if bed.channel_labels.len() == bed_pcm.len() {
-            bed.channel_labels.iter().map(|l| speaker(*l)).collect()
-        } else {
-            default_speakers(bed_pcm.len())
-        };
+        let (mut bed_pcm, mut labels) = bed_feeds(bed);
+        let mut object_pcm = planar(objects);
         // A channel-based immersive presentation (every channel labelled, 7.1.4-style, no
         // object metadata) is already speaker feeds: it plays as itself, through the splitter
         // without a guide so the timeline is the same, and nothing is split.
@@ -374,16 +445,36 @@ impl Session {
             labels = objects.channel_labels.iter().map(|l| speaker(*l)).collect();
             bed_pcm = std::mem::take(&mut object_pcm);
         }
+        self.play_split(bed_pcm, labels, object_pcm, frames, objects.oamd.last(), immersive, output)
+    }
+
+    /// One access unit through the split: the bed routed by its speakers, split by where the
+    /// objects' energy lies.
+    #[allow(clippy::too_many_arguments)]
+    fn play_split(
+        &mut self,
+        bed_pcm: Vec<Vec<f32>>,
+        labels: Vec<Speaker>,
+        object_pcm: Vec<Vec<f32>>,
+        frames: usize,
+        metadata: Option<&ObjectAudioMetadataPayload>,
+        immersive: bool,
+        output: &mut impl FnMut(&[f32]) -> Result<(), String>,
+    ) -> Result<(), String> {
         let split = self.split.get_or_insert_with(BedSplitter::default);
         // Metadata comes every few access units; the last one read stays in force until the
         // next. Anything this reading does not accept leaves no guide: the plain 7.1.
         let mut unreadable = false;
         let mut guided = immersive;
-        if let Some(metadata) = objects.oamd.last() {
+        if let Some(metadata) = metadata {
             let weights = point_weights(metadata, object_pcm.len());
             unreadable = weights.is_none();
             guided = !unreadable;
             split.set_weights(weights.unwrap_or_default());
+            if self.may_rejoin && for_each_block(self.renderer.sample, metadata, object_pcm.len(), |_| ()).is_ok() {
+                self.may_rejoin = false;
+                self.rejoining = true;
+            }
         } else if immersive {
             split.set_weights(Vec::new());
         }
@@ -461,31 +552,42 @@ impl Session {
         {
             let oamd = std::mem::take(&mut self.decoded.oamd);
             let channels = input.len();
-            let result = self.emit_objects(input, frames, &oamd, output);
+            let result = self.emit_objects(&input, frames, &oamd, output);
             self.decoded.oamd = oamd;
             match result {
                 Err(Unsupported(reason)) => {
-                    // Nothing of this unit was rendered; it plays as silence and the split (or
-                    // the bed) takes over at the next major sync. Metadata the split refuses too
-                    // (ISF, several beds, a count mismatch) goes to the bed at once, not via the
-                    // split's own refusal one major sync later.
+                    // Nothing of this unit was rendered. The split (or the bed) takes over;
+                    // metadata the split refuses too (ISF, several beds, a count mismatch) goes
+                    // to the bed at once, not via the split's own refusal one major sync later.
                     let split_takes = self.decoded.oamd.iter().all(|m| point_weights(m, channels).is_some());
                     if self.split_fallback && split_takes {
-                        self.leave_exact(&reason, output)?;
+                        // For want of metadata (none within 0.5 s), metadata later brings the
+                        // render back; metadata it refused does not.
+                        self.may_rejoin = self.decoded.oamd.is_empty();
+                        self.leave_exact(&reason, &input, frames, output)
                     } else {
                         self.fall_back(&reason, output)?;
+                        self.silence(frames, output)
                     }
-                    self.silence(frames, output)
                 }
                 Ok(r) => r,
             }
         }
     }
 
-    /// The exact render gives way to the split at the next major sync; audio held for
-    /// metadata plays as silence, as in `fall_back`. Heights stay: the split reports them once
-    /// it has a guide, and the bed after half a second without one.
-    fn leave_exact(&mut self, reason: &str, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+    /// The exact render gives way to the split, `input` (this unit) included. Where the 7.1
+    /// was decoded beside the objects (`dual`), the split plays it from the first held unit on,
+    /// with no gap: a stream without metadata in its first half second plays and reports as in
+    /// 3.8. Otherwise the split takes over at the next major sync, and this unit and the audio
+    /// held for metadata play as silence, as in `fall_back`. Heights stay: the split reports
+    /// them once it has a guide, and the bed after half a second without one.
+    fn leave_exact(
+        &mut self,
+        reason: &str,
+        input: &[Vec<f32>],
+        frames: usize,
+        output: &mut impl FnMut(&[f32]) -> Result<(), String>,
+    ) -> Result<(), String> {
         self.exact = false;
         self.fallback_reason = Some(format!("{reason}; heights from the 7.1 split"));
         // Heights again only once the split has a guide (`note_guide`); the bed after half a
@@ -493,23 +595,43 @@ impl Session {
         self.mode = Mode::Pending;
         self.guided = false;
         self.unguided_frames = 0;
-        self.switching = true;
         let sample = self.renderer.sample;
         self.renderer = Renderer::default();
         self.renderer.sample = sample;
+        if self.bed_unit.is_some() && self.held_beds.len() == self.held.len() {
+            let (bed, labels) = self.bed_unit.take().unwrap();
+            self.split_held(output)?;
+            let metadata = self.decoded.oamd.last().cloned();
+            return self.play_split(bed, labels, input.to_vec(), frames, metadata.as_ref(), false, output);
+        }
+        self.may_rejoin = false;
+        self.switching = true;
         let held = std::mem::take(&mut self.held_frames);
         self.held.clear();
+        self.held_beds.clear();
         if held > 0 {
             self.silence(held, output)?;
         }
         self.parser.reset_for_next_major_sync();
         self.decoder.reset_for_next_major_sync();
+        self.silence(frames, output)
+    }
+
+    /// The held units through the split, from their 7.1 (unguided: they had no metadata).
+    fn split_held(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+        self.exact = false;
+        self.held_frames = 0;
+        let beds = std::mem::take(&mut self.held_beds);
+        for (objects, (bed, labels)) in std::mem::take(&mut self.held).into_iter().zip(beds) {
+            let frames = bed.first().map_or(0, Vec::len);
+            self.play_split(bed, labels, objects, frames, None, false, output)?;
+        }
         Ok(())
     }
 
     fn emit_objects(
         &mut self,
-        input: Vec<Vec<f32>>,
+        input: &[Vec<f32>],
         frames: usize,
         oamd: &[ObjectAudioMetadataPayload],
         output: &mut impl FnMut(&[f32]) -> Result<(), String>,
@@ -534,7 +656,10 @@ impl Session {
                     return Err(Unsupported("no object metadata within 0.5 s".into()));
                 }
                 self.held_frames += frames;
-                self.held.push(input);
+                self.held.push(input.to_vec());
+                if let Some(bed) = self.bed_unit.take() {
+                    self.held_beds.push(bed);
+                }
                 return Ok(Ok(()));
             }
             // Held audio, and the start of this unit, take the first known object state.
@@ -556,7 +681,7 @@ impl Session {
         for event in events {
             self.renderer.event(event);
         }
-        self.renderer.render(&input, frames, &mut self.rendered);
+        self.renderer.render(input, frames, &mut self.rendered);
         Ok(self.limit_and_flush(output))
     }
 
@@ -587,6 +712,21 @@ impl From<&str> for Unsupported {
     fn from(reason: &str) -> Self {
         Self(reason.into())
     }
+}
+
+fn planar(d: &DecodedAccessUnit) -> Vec<Vec<f32>> {
+    (0..d.channel_count).map(|ch| (0..d.sample_length).map(|s| d.pcm_data[s][ch] as f32 / 8_388_608.).collect()).collect()
+}
+
+/// A channel presentation's PCM and the speaker of each channel.
+fn bed_feeds(bed: &DecodedAccessUnit) -> (Vec<Vec<f32>>, Vec<Speaker>) {
+    let pcm = planar(bed);
+    let labels = if bed.channel_labels.len() == pcm.len() {
+        bed.channel_labels.iter().map(|l| speaker(*l)).collect()
+    } else {
+        default_speakers(pcm.len())
+    };
+    (pcm, labels)
 }
 
 /// Speakers for an unlabelled presentation (MLP-style FBB streams), by channel count.
@@ -963,13 +1103,210 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_bed_applies_at_the_next_push() {
+    fn a_requested_bed_applies_at_the_next_major_sync() {
         let mut session = Session::exact_with_split_fallback();
         session.request_bed("the renderer fell behind real time");
         let mut sink = |_: &[f32]| Ok(());
         session.push(&[], false, &mut sink).unwrap();
+        assert_eq!(session.mode(), Mode::Pending, "what plays goes on until the next major sync");
+        session.at_major_sync(&mut sink).unwrap();
         assert_eq!(session.mode(), Mode::Bed);
+        assert!(!session.switching, "the bed starts at that major sync, no silence");
         assert!(session.fallback_reason.as_deref().unwrap().contains("fell behind"));
+    }
+
+    // Synthetic streams for the timeline tests: 40-sample access units, a major sync every 32,
+    // one object at the front-left ceiling whose signal is also the 7.1's L (the bed is the
+    // objects' floor projection). The signal is low noise with a 0.9 click every 1000 samples:
+    // the clicks must come out exactly where they went in, whatever renders them.
+    const UNIT: usize = 40;
+    const SYNC_EVERY: usize = 32;
+
+    fn signal(at: usize) -> f32 {
+        let noise = ((at as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+        if at % 1000 == 500 { 0.9 } else { 0.1 * noise }
+    }
+
+    /// What one unit's output and the mode after it look like.
+    struct Run {
+        pcm: Vec<f32>,
+        modes: Vec<Mode>,
+        exact_at_end: bool,
+    }
+
+    /// `units` access units through `session`, as `push` hands decoded ones on (the render gets
+    /// the objects, with the 7.1 beside them while `dual`; the split and the bed get the 7.1):
+    /// `metadata(unit)` says whether a unit carries OAMD, `bed_at` asks for the bed before a unit.
+    fn run(mut session: Session, units: usize, metadata: impl Fn(usize) -> Option<ObjectAudioMetadataPayload>, bed_at: Option<usize>) -> Run {
+        let mut pcm = Vec::new();
+        let mut modes = Vec::new();
+        let mut sink = |block: &[f32]| {
+            pcm.extend_from_slice(block);
+            Ok(())
+        };
+        for unit in 0..units {
+            if bed_at == Some(unit) {
+                session.request_bed("the chain fell behind");
+            }
+            let sync = unit % SYNC_EVERY == 0;
+            let objects: Vec<Vec<f32>> = vec![(unit * UNIT..(unit + 1) * UNIT).map(signal).collect()];
+            let mut bed = vec![vec![0.; UNIT]; 8];
+            bed[0] = objects[0].clone();
+            let oamd = metadata(unit);
+            if !sync && (session.lost.is_some() || session.switching) {
+                session.conceal(&mut sink).unwrap();
+            } else {
+                session.switching = false;
+                if sync {
+                    session.at_major_sync(&mut sink).unwrap();
+                }
+                if !session.renders_objects() && (session.mode != Mode::Bed || session.split.is_some()) {
+                    session.play_split(bed, default_speakers(8), objects, UNIT, oamd.as_ref(), false, &mut sink).unwrap();
+                } else {
+                    let bed_mode = session.mode == Mode::Bed;
+                    session.bed_unit = (session.dual && !bed_mode).then(|| (bed.clone(), default_speakers(8)));
+                    session.decoded.oamd = if bed_mode { Vec::new() } else { oamd.into_iter().collect() };
+                    session.unit_frames = Some(UNIT);
+                    session.emit(if bed_mode { bed } else { objects }, UNIT, &mut sink).unwrap();
+                }
+            }
+            modes.push(session.mode());
+        }
+        session.push(&[], true, &mut sink).unwrap();
+        Run { pcm, modes, exact_at_end: session.exact }
+    }
+
+    fn from(units: usize) -> impl Fn(usize) -> Option<ObjectAudioMetadataPayload> {
+        move |unit| (unit >= units).then(|| point([0., 0., 1.]))
+    }
+
+    fn first(modes: &[Mode], mode: Mode) -> Option<usize> {
+        modes.iter().position(|m| *m == mode)
+    }
+
+    /// Every input sample comes out once, in place: the same length, each click on its own
+    /// sample, and (outside `gap`) no 10 ms of silence.
+    fn assert_in_place(run: &Run, units: usize, gap: Option<std::ops::Range<usize>>) {
+        let frames = run.pcm.len() / CHANNELS;
+        assert_eq!(frames, units * UNIT, "every input sample comes out exactly once");
+        let energy = |i: usize| run.pcm[i * CHANNELS..(i + 1) * CHANNELS].iter().map(|x| x * x).sum::<f32>();
+        for click in (500..frames).step_by(1000) {
+            if gap.as_ref().is_some_and(|g| g.contains(&click)) {
+                continue;
+            }
+            let peak = (click - 200..(click + 200).min(frames)).max_by(|a, b| energy(*a).total_cmp(&energy(*b))).unwrap();
+            assert_eq!(peak, click, "the click at {click} came out at {peak}");
+        }
+        for window in (0..frames).step_by(480) {
+            if gap.as_ref().is_some_and(|g| g.contains(&window) || g.contains(&(window + 479))) {
+                continue;
+            }
+            let e: f32 = (window..(window + 480).min(frames)).map(energy).sum();
+            assert!(e > 1e-3, "silence at {window} ({:.1} ms)", window as f64 / 48.);
+        }
+    }
+
+    fn assert_same(a: &[f32], b: &[f32]) {
+        assert_eq!(a.len(), b.len());
+        if let Some(i) = a.iter().zip(b).position(|(x, y)| x != y) {
+            panic!("differs from frame {} (channel {}): {} vs {}", i / CHANNELS, i % CHANNELS, a[i], b[i]);
+        }
+    }
+
+    #[test]
+    fn no_metadata_in_the_first_half_second_plays_and_reports_as_the_split_did() {
+        // Review r4 of #170: such a stream played 0.5 s of silence and reported the bed after
+        // 1 s. It must play from its first sample, report the bed when 3.8's split did (once
+        // more than 0.5 s went by without metadata), and, when metadata comes, heights.
+        let units = 2400;
+        for metadata_from in [900, usize::MAX] {
+            let shipped = run(Session::exact_with_split_fallback(), units, from(metadata_from), None);
+            let split = run(Session::default(), units, from(metadata_from), None);
+            assert_in_place(&shipped, units, None);
+            // Onset: the first click (10 ms in) is in place, and until metadata comes the output
+            // is the 7.1 as 3.8 played it, sample for sample (short of the split's last 2048
+            // samples before the render takes over again: they see silence after them).
+            let until = (metadata_from.min(units) * UNIT - crate::split::FFT) * CHANNELS;
+            assert_same(&shipped.pcm[..until], &split.pcm[..until]);
+            // The bed is reported after the same unit: the 601st (24 040 samples > 0.5 s).
+            assert_eq!(first(&shipped.modes, Mode::Bed), Some(600));
+            assert_eq!(first(&split.modes, Mode::Bed), Some(600));
+            if metadata_from == usize::MAX {
+                assert_same(&shipped.pcm, &split.pcm);
+                assert_eq!(shipped.modes, split.modes);
+                assert_eq!(*shipped.modes.last().unwrap(), Mode::Bed);
+            } else {
+                // Heights as soon as metadata comes (the split, guided), then the render again
+                // from the next major sync.
+                assert_eq!(first(&shipped.modes[600..], Mode::Objects).map(|u| u + 600), Some(metadata_from));
+                assert_eq!(first(&split.modes[600..], Mode::Objects).map(|u| u + 600), Some(metadata_from));
+                assert_eq!(*shipped.modes.last().unwrap(), Mode::Objects);
+                assert!(shipped.exact_at_end, "the render took over again");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_ending_before_its_first_metadata_plays_its_7_1() {
+        let shipped = run(Session::exact_with_split_fallback(), 300, from(usize::MAX), None);
+        let split = run(Session::default(), 300, from(usize::MAX), None);
+        assert_in_place(&shipped, 300, None);
+        assert_same(&shipped.pcm, &split.pcm);
+        assert_eq!(*shipped.modes.last().unwrap(), Mode::Pending);
+    }
+
+    #[test]
+    fn early_metadata_the_render_refuses_hands_the_held_audio_to_the_split() {
+        // Bed channel distribution in the first metadata, five units in: no silence either.
+        let refused = |unit: usize| {
+            (unit >= 5).then(|| {
+                let mut m = point([0., 0., 1.]);
+                m.program_assignment.b_bed_chan_distribute = true;
+                m
+            })
+        };
+        let shipped = run(Session::exact_with_split_fallback(), 200, refused, None);
+        let split = run(Session::default(), 200, refused, None);
+        assert_in_place(&shipped, 200, None);
+        assert_same(&shipped.pcm, &split.pcm);
+        assert_eq!(first(&shipped.modes, Mode::Objects), Some(5));
+        assert!(!shipped.exact_at_end, "metadata the render refused does not bring it back");
+    }
+
+    #[test]
+    fn switches_keep_every_sample_in_place() {
+        // The heights' timestamps are the epoch's anchor plus a sample count (`HeightsBridge`),
+        // so a path or a switch that dropped, added or delayed samples would shift the audio
+        // against the video. Each path and each switch keeps every sample on its own index.
+        let units = 2000;
+        // (a) the render throughout, (b) 3.8's split throughout.
+        let exact = run(Session::exact_with_split_fallback(), units, from(0), None);
+        assert_in_place(&exact, units, None);
+        assert!(exact.exact_at_end && exact.modes.iter().all(|m| *m == Mode::Objects));
+        let split = run(Session::default(), units, from(0), None);
+        assert_in_place(&split, units, None);
+        // (c) the load guard's bed, from the render and from the split: at the next major sync,
+        // with no gap.
+        for open in [Session::exact_with_split_fallback as fn() -> Session, Session::default] {
+            let guarded = run(open(), units, from(0), Some(1000));
+            assert_in_place(&guarded, units, None);
+            assert_eq!(first(&guarded.modes, Mode::Bed), Some(1024), "the major sync after the request");
+        }
+        // The split taking over for want of metadata, and the render taking over again when it
+        // comes (the major sync after unit 900): see also the test above.
+        let rejoined = run(Session::exact_with_split_fallback(), units, from(900), None);
+        assert_in_place(&rejoined, units, None);
+        // Metadata the render refuses mid-stream: the split from the next major sync; until then
+        // silence of the units' own length, every later sample still in place.
+        let refused = |unit: usize| {
+            let mut m = point([0., 0., 1.]);
+            m.program_assignment.b_bed_chan_distribute = unit >= 1000;
+            Some(m)
+        };
+        let left = run(Session::exact_with_split_fallback(), units, refused, None);
+        assert_in_place(&left, units, Some(1000 * UNIT..1024 * UNIT));
+        let gap = &left.pcm[1000 * UNIT * CHANNELS..1024 * UNIT * CHANNELS];
+        assert!(gap.iter().all(|x| x.abs() < 0.02), "silence (the limiter's 2 ms tail aside)");
     }
 
     #[test]

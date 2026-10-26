@@ -63,11 +63,43 @@ fn each_presentation_kind_takes_its_path() {
 #[test]
 fn the_shipped_session_renders_the_objects_exactly() {
     // The public object vector has nothing the exact render refuses: the shipped session is the
-    // exact render, sample for sample.
+    // exact render, sample for sample — also over its start, where it decodes the 7.1 beside the
+    // objects until the major sync after the first metadata.
     let Some((result, pcm, mode)) = decode_with("fba_atmos_obj.mlp", 4096, Session::exact_with_split_fallback) else { return };
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(mode, Mode::Objects);
     assert_eq!(pcm, decode_with("fba_atmos_obj.mlp", 4096, Session::exact).unwrap().1);
+}
+
+/// The same on longer raw TrueHD Atmos files (`-f truehd`) the exact render plays to the end:
+/// `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
+#[test]
+fn the_shipped_session_renders_compared_files_exactly() {
+    let Ok(list) = std::env::var("TRUEHD_OBJECTS_COMPARE") else { return };
+    for path in list.split(':').filter(|s| !s.is_empty()) {
+        let data = std::fs::read(path).expect("stream");
+        let run = |mut session: Session| {
+            let mut pcm = Vec::new();
+            let mut sink = |b: &[f32]| {
+                pcm.extend_from_slice(b);
+                Ok(())
+            };
+            for bytes in data.chunks(4096) {
+                session.push(bytes, false, &mut sink).unwrap();
+            }
+            session.push(&[], true, &mut sink).unwrap();
+            (pcm, session.mode())
+        };
+        let (exact, mode) = run(Session::exact());
+        if mode != Mode::Objects {
+            println!("{path}: the exact render fell back ({mode:?}); nothing to compare");
+            continue;
+        }
+        let (shipped, shipped_mode) = run(Session::exact_with_split_fallback());
+        let differs = shipped.iter().zip(&exact).position(|(a, b)| a != b);
+        assert!(shipped.len() == exact.len() && differs.is_none(), "{path}: {shipped_mode:?}, {} vs {} frames, first difference at frame {:?}", shipped.len() / 12, exact.len() / 12, differs.map(|i| i / 12));
+        println!("{path}: {} frames, identical", exact.len() / 12);
+    }
 }
 
 #[test]
