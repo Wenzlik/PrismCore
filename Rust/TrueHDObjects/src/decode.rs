@@ -244,8 +244,9 @@ impl Session {
             if self.held_frames > 0 {
                 self.fall_back("the stream ended before its first object metadata", output)?;
             }
-            // A split still waiting for its first guide played the plain 7.1: say so.
-            if self.mode == Mode::Pending && self.split.is_some() && !self.guided {
+            // A split still waiting for its first guide (or about to take over from the render
+            // at a major sync that never came) played the plain 7.1 or silence: say so.
+            if self.mode == Mode::Pending && !self.exact && !self.guided && self.unit_frames.is_some() {
                 self.mode = Mode::Bed;
                 self.fallback_reason.get_or_insert_with(|| "the stream ended before the split had object metadata".into());
             }
@@ -457,13 +458,17 @@ impl Session {
         }
         {
             let oamd = std::mem::take(&mut self.decoded.oamd);
+            let channels = input.len();
             let result = self.emit_objects(input, frames, &oamd, output);
             self.decoded.oamd = oamd;
             match result {
                 Err(Unsupported(reason)) => {
                     // Nothing of this unit was rendered; it plays as silence and the split (or
-                    // the bed) takes over at the next major sync.
-                    if self.split_fallback {
+                    // the bed) takes over at the next major sync. Metadata the split refuses too
+                    // (ISF, several beds, a count mismatch) goes to the bed at once, not via the
+                    // split's own refusal one major sync later.
+                    let split_takes = self.decoded.oamd.iter().all(|m| point_weights(m, channels).is_some());
+                    if self.split_fallback && split_takes {
                         self.leave_exact(&reason, output)?;
                     } else {
                         self.fall_back(&reason, output)?;
@@ -913,19 +918,46 @@ mod tests {
 
     #[test]
     fn the_shipped_session_leaves_unplaceable_metadata_to_the_split() {
-        // Intermediate spatial format: the exact render does not place it; the shipped session
-        // hands the stream to the split (heights stay), the measurement one to the bed.
-        let mut isf = point([0., 0., 1.]);
-        isf.program_assignment.num_isf_objects = 1;
+        // Bed channel distribution: the exact render does not place it, the split reads past it;
+        // the shipped session hands the stream to the split (heights stay), the measurement one
+        // to the bed.
+        let mut distributed = point([0., 0., 1.]);
+        distributed.program_assignment.b_bed_chan_distribute = true;
         let mut sink = |_: &[f32]| Ok(());
         for (mut session, split) in [(Session::exact_with_split_fallback(), true), (Session::exact(), false)] {
-            session.decoded.oamd = vec![isf.clone()];
+            session.decoded.oamd = vec![distributed.clone()];
             session.emit(vec![vec![0.1; 40]], 40, &mut sink).unwrap();
             assert_eq!(session.exact, !split);
             assert_eq!(session.mode(), if split { Mode::Pending } else { Mode::Bed }, "the split reports once guided");
             assert!(session.switching, "the switch waits for the next major sync");
-            assert!(session.fallback_reason.as_deref().unwrap().contains("intermediate spatial format"));
+            assert!(session.fallback_reason.as_deref().unwrap().contains("bed channel distribution"));
         }
+    }
+
+    #[test]
+    fn metadata_both_layers_refuse_goes_straight_to_the_bed() {
+        // A count mismatch: the render refuses it and so would the split.
+        let mut mismatch = point([0., 0., 1.]);
+        mismatch.object_count = 2;
+        let mut session = Session::exact_with_split_fallback();
+        session.decoded.oamd = vec![mismatch];
+        let mut sink = |_: &[f32]| Ok(());
+        session.emit(vec![vec![0.1; 40]], 40, &mut sink).unwrap();
+        assert_eq!(session.mode(), Mode::Bed);
+    }
+
+    #[test]
+    fn a_session_that_ends_waiting_for_the_split_reports_the_bed() {
+        let mut distributed = point([0., 0., 1.]);
+        distributed.program_assignment.b_bed_chan_distribute = true;
+        let mut session = Session::exact_with_split_fallback();
+        session.decoded.oamd = vec![distributed];
+        let mut sink = |_: &[f32]| Ok(());
+        session.emit(vec![vec![0.1; 40]], 40, &mut sink).unwrap();
+        assert_eq!(session.mode(), Mode::Pending, "bed channel distribution: the split takes it");
+        session.unit_frames = Some(40);
+        session.push(&[], true, &mut sink).unwrap();
+        assert_eq!(session.mode(), Mode::Bed);
     }
 
     #[test]

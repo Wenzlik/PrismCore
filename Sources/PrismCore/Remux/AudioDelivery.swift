@@ -49,9 +49,10 @@ public enum ObjectAudioDelivery: String, Sendable, Equatable {
     case preserved
     /// The source carries objects; the served rendition is their channel bed.
     case notPreserved
-    /// TrueHD Atmos as 7.1.4, served as APAC: heights included, derived from
-    /// the stream's 7.1 presentation by where its objects lie. Lossy where the
-    /// bed bridge can be lossless — the trade the host opted into.
+    /// TrueHD Atmos as 7.1.4, served as APAC: heights included — its objects
+    /// rendered by their metadata, or (for metadata the renderer does not
+    /// place) its 7.1 presentation split by where its objects lie. Lossy where
+    /// the bed bridge can be lossless — the trade the host opted into.
     case renderedHeights
 
     /// Evidence first — the bitstream (`ObjectAudioFinding`, the TrueHD major

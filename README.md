@@ -338,8 +338,9 @@ DTS:X) is untouched.
   (intermediate spatial format, several beds, bed channel distribution, bed
   downmix metadata, objects with a distance, reserved zones or warp, no object
   metadata within half a second) hands the stream, from the next major sync,
-  to the split 3.8 shipped (which takes all of it but the intermediate
-  spatial format and several beds; those go on to the bed): the 7.1 presentation (the bed FFmpeg and
+  to the split 3.8 shipped; what the split cannot read either (the
+  intermediate spatial format, several beds, an object count the metadata
+  does not match) goes straight to the bed. The split: the 7.1 presentation (the bed FFmpeg and
   `.lossless` play) decoded with the Atmos one, and every output a share of the 7.1: per STFT bin (2048-frame Hann
   windows, 512-frame hop) each ear-level channel is divided between itself
   and the four heights by how much of that bin's energy, in that channel,
