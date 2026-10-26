@@ -110,6 +110,51 @@ fn a_stream_without_objects_falls_back_to_its_bed() {
     // Heights stay silent; the bed carries the audio.
     assert!((8..12).all(|c| energy(&pcm, c) == 0.));
     assert!((0..8).map(|c| energy(&pcm, c)).sum::<f64>() > 0.);
+    // From its first sample, with no gap: the bed starts at the first major sync, and the units
+    // after it parse (review r3 of #170: they did not, ~100 ms of silence).
+    for (name, open) in [("fbb_6ch.mlp", Session::exact_with_split_fallback as fn() -> Session), ("fba_spliced.mlp", Session::default), ("fba_spliced.mlp", Session::exact_with_split_fallback)] {
+        let (_, pcm, _) = decode_with(name, 4096, open).unwrap();
+        assert_eq!(silent_windows(&pcm, 0), Vec::<usize>::new(), "{name}");
+    }
+}
+
+/// The starts of the 10 ms windows from frame `from` on that are digital silence.
+fn silent_windows(pcm: &[f32], from: usize) -> Vec<usize> {
+    let frames = pcm.len() / 12;
+    (from / 480..frames / 480).map(|w| w * 480).filter(|w| pcm[w * 12..(w + 480) * 12].iter().all(|x| *x == 0.)).collect()
+}
+
+/// The load guard's bed on longer raw TrueHD Atmos files (`TRUEHD_OBJECTS_COMPARE`): it starts at
+/// the next major sync with no gap, the stream keeping its length.
+#[test]
+fn a_requested_bed_starts_without_a_gap_on_compared_files() {
+    let Ok(list) = std::env::var("TRUEHD_OBJECTS_COMPARE") else { return };
+    for path in list.split(':').filter(|s| !s.is_empty()) {
+        let data = std::fs::read(path).expect("stream");
+        let mut session = Session::exact_with_split_fallback();
+        let mut pcm = Vec::new();
+        let mut asked_at = 0;
+        for (i, bytes) in data.chunks(1024).enumerate() {
+            if i == 2000 {
+                session.request_bed("the chain fell behind");
+                asked_at = pcm.len() / 12;
+            }
+            session.push(bytes, false, &mut |b: &[f32]| {
+                pcm.extend_from_slice(b);
+                Ok(())
+            })
+            .unwrap();
+        }
+        session.push(&[], true, &mut |b: &[f32]| {
+            pcm.extend_from_slice(b);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(session.mode(), Mode::Bed, "{path}");
+        let half_second_on = &pcm[..(asked_at + 24_000) * 12];
+        assert_eq!(silent_windows(half_second_on, asked_at), Vec::<usize>::new(), "{path}");
+        println!("{path}: bed asked for at frame {asked_at}, no gap");
+    }
 }
 
 #[test]

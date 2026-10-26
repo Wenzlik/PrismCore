@@ -18,7 +18,8 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
 - **`.heights` renders the objects** (ETSI TS 103 448 room-coordinate panner:
   size, divergence, snap, zones, trims, ramps — 3.7's renderer, and what 3.8
   measured its split against). Metadata the render does not place hands the
-  stream, from the next major sync, to the 3.8 split, which keeps heights
+  stream, from the next major sync (at once near the start, while the 7.1 is
+  still decoded beside the objects), to the 3.8 split, which keeps heights
   where it can; the split's own bed fallback and every `.notPreserved` case
   are unchanged. A stream without object metadata in its first half second
   (or whose first metadata the render refuses) plays the 3.8 split from its
@@ -52,6 +53,10 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
 - A TrueHD access unit lost while the render held audio for its first object
   metadata played its silence before the held audio, moving that audio by
   the lost unit's length; the silence now takes its place after it.
+- A heights stream whose presentation turned out not to be Atmos (a splice,
+  or a stream mislabelled as Atmos) played its first access unit and then
+  silence up to the next major sync before its bed; the bed now plays from
+  the first sample. The same restart made the load guard's bed gapless.
 - A heights stream ending in a lost access unit kept its last 2 ms (and the
   split's last 32 ms) of audio from before the loss back; they now come out
   before the error is reported.

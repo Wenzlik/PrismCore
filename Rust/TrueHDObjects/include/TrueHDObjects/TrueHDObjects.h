@@ -22,7 +22,9 @@ extern "C" {
 
 /// What a session is delivering (`truehd_objects_mode`).
 enum {
-    /// Nothing decoded yet.
+    /// Nothing decided yet: nothing decoded, audio held for the first object metadata (at most
+    /// 0.5 s, also when the render takes back over from the split), or the split waiting for its
+    /// first metadata. A host keeps what it last reported meanwhile.
     TRUEHD_OBJECTS_PENDING = 0,
     /// Atmos to 7.1.4, heights included (a channel-based immersive presentation plays as itself).
     TRUEHD_OBJECTS_RENDERED = 1,

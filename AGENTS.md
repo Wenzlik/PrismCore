@@ -226,7 +226,8 @@ API surface.
 - **The exact object render is what `.heights` plays; the split is its
   fallback.** `truehd_objects_open` renders the objects (TS 103 448, `render.rs`)
   and hands the stream to the bed split (`split.rs`, what 3.8 shipped) at the
-  next major sync when it meets metadata it does not place; the split has its
+  next major sync (at once while the 7.1 is still decoded beside the objects)
+  when it meets metadata it does not place; the split has its
   own bed fallback. Until its first metadata the render holds the audio and
   decodes the 7.1 beside it, so when no metadata comes within 0.5 s (or the
   first is refused, by the render or by both) the split plays from the first

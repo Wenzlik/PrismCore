@@ -203,9 +203,12 @@ impl Session {
             }
             let restarting = self.lost.take().map(|(error, _)| error);
             self.switching = false;
+            if major_sync {
+                self.apply_bed_request(output)?;
+            }
             let parsed = self.parser.parse(&frame);
             drop(self.parser.take_branches());
-            let au = match parsed {
+            let mut au = match parsed {
                 Ok(au) => au,
                 Err(e) => {
                     self.lose(restarting, format!("TrueHD parsing: {e}"), output)?;
@@ -213,12 +216,22 @@ impl Session {
                 }
             };
             if (self.mode != Mode::Bed || self.split.is_some())
-                && let Some(sync) = &au.major_sync_info
-                && sync.substreams < 4
+                && au.major_sync_info.as_ref().is_some_and(|sync| sync.substreams < 4)
             {
                 self.fall_back("the stream has no Atmos presentation", output)?;
-                // This unit is a major sync: the bed starts right here.
+                // This unit is a major sync: the bed starts right here, parsed again by the
+                // parser `fall_back` restarted (parsed by the old one, the units after it
+                // failed to parse until the next major sync, as silence).
                 self.switching = false;
+                let parsed = self.parser.parse(&frame);
+                drop(self.parser.take_branches());
+                au = match parsed {
+                    Ok(au) => au,
+                    Err(e) => {
+                        self.lose(restarting, format!("TrueHD parsing: {e}"), output)?;
+                        continue;
+                    }
+                };
             }
             if let Some(sync) = &au.major_sync_info {
                 // The widest channel presentation below the object one: 7.1 on Atmos.
@@ -324,15 +337,21 @@ impl Session {
         Ok(())
     }
 
-    /// Every substream restarts at a major sync, so the session changes what it decodes there:
-    /// a requested bed starts, the split hands back to the render, and the render stops decoding
-    /// the 7.1 beside the objects once it no longer holds audio.
-    fn at_major_sync(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
+    /// A requested bed starts at a major sync, before the parser sees it: `fall_back` restarts
+    /// parser and decoder, which start again right at this unit (review r3: restarted after it,
+    /// the next units failed to parse, ~100 ms of silence).
+    fn apply_bed_request(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
         if let Some(reason) = self.bed_request.take() {
             self.fall_back(&reason, output)?;
-            // The bed starts at this very unit.
             self.switching = false;
         }
+        Ok(())
+    }
+
+    /// Every substream restarts at a major sync, so the session changes what it decodes there:
+    /// the split hands back to the render, and the render stops decoding the 7.1 beside the
+    /// objects once it no longer holds audio.
+    fn at_major_sync(&mut self, output: &mut impl FnMut(&[f32]) -> Result<(), String>) -> Result<(), String> {
         if std::mem::take(&mut self.rejoining) && self.split.is_some() {
             // The split's last 32 ms out, then the render, holding audio until the metadata in
             // force (it repeats every few tens of milliseconds) as at the start.
@@ -1157,7 +1176,7 @@ mod tests {
         let mut sink = |_: &[f32]| Ok(());
         session.push(&[], false, &mut sink).unwrap();
         assert_eq!(session.mode(), Mode::Pending, "what plays goes on until the next major sync");
-        session.at_major_sync(&mut sink).unwrap();
+        session.apply_bed_request(&mut sink).unwrap();
         assert_eq!(session.mode(), Mode::Bed);
         assert!(!session.switching, "the bed starts at that major sync, no silence");
         assert!(session.fallback_reason.as_deref().unwrap().contains("fell behind"));
@@ -1222,6 +1241,7 @@ mod tests {
                 session.switching = false;
                 let restarting = session.lost.take().map(|(error, _)| error);
                 if sync {
+                    session.apply_bed_request(&mut sink).unwrap();
                     session.at_major_sync(&mut sink).unwrap();
                 }
                 if lost(unit) {
@@ -1311,10 +1331,12 @@ mod tests {
             let shipped = run(Session::exact_with_split_fallback(), units, from(metadata_from), None);
             let split = run(Session::default(), units, from(metadata_from), None);
             assert_in_place(&shipped, units, None);
-            // Onset: the first click (10 ms in) is in place, and until metadata comes the output
-            // is the 7.1 as 3.8 played it, sample for sample (short of the split's last 2048
-            // samples before the render takes over again: they see silence after them).
-            let until = (metadata_from.min(units) * UNIT - crate::split::FFT) * CHANNELS;
+            // Onset: the first click (10 ms in) is in place, and until the render takes over again
+            // (the major sync after the metadata) the output is the split as 3.8 played it,
+            // sample for sample, short of the split's last 2048 samples there: they see silence
+            // after them.
+            let rejoin = metadata_from.min(units).next_multiple_of(SYNC_EVERY).min(units);
+            let until = (rejoin * UNIT - crate::split::FFT) * CHANNELS;
             assert_same(&shipped.pcm[..until], &split.pcm[..until]);
             // The bed is reported after the same unit: the 601st (24 040 samples > 0.5 s).
             assert_eq!(first(&shipped.modes, Mode::Bed), Some(600));
@@ -1424,6 +1446,8 @@ mod tests {
         let exact = run(Session::exact_with_split_fallback(), units, from(0), None);
         assert_in_place(&exact, units, None);
         assert!(exact.exact_at_end && exact.modes.iter().all(|m| *m == Mode::Objects));
+        // The shipped session's logic against the exact render's (the decoder's PCM is pinned by
+        // `the_shipped_session_renders_*` in tests/vectors.rs, on real streams).
         assert_same(&exact.pcm, &run(Session::exact(), units, from(0), None).pcm);
         let split = run(Session::default(), units, from(0), None);
         assert_in_place(&split, units, None);
