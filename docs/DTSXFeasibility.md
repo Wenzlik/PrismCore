@@ -93,36 +93,45 @@ the way TrueHD's did:
    7.5.3.4, `nuPeakBRCntrlBuffSzkB`;
    FFmpeg's PBR path reassembles them before parsing). A walker therefore
    needs the XLL header, channel-set and NAVI parsing plus PBR reassembly —
-   a real parser, not an offset lookup. Doing it in Swift/Rust, like
-   `TrueHDAtmosScout` and `EAC3Syncframe`, is still preferable to an FFmpeg
-   patch: it keeps the MPVKit fork at "upstream + the `eac3` encoder", it is
-   testable without a rebuild, and it is fuzzable (`FuzzTargets`).
+   a real parser, not an offset lookup. Two ways to get it: a Swift/Rust
+   walker (like `TrueHDAtmosScout` and `EAC3Syncframe`: keeps the MPVKit
+   fork at "upstream + the `eac3` encoder", testable without a rebuild,
+   fuzzable through `FuzzTargets`, but a second implementation of FFmpeg's
+   XLL navigation), or the FFmpeg patch below, which reuses the location
+   logic FFmpeg already gets right.
 2. **Metadata.** Object positions, gains, sizes, update timing, beds — TS
    103 491 clause 7 (3D object metadata, renderer configuration, rendering
    exceptions). A parser in `Rust/TrueHDObjects`' style, Apache-2.0, from the
    spec text alone.
-3. **Object audio.** Decoding the object waveforms: if they are XLL channel
-   sets, FFmpeg's XLL code decodes channel sets but only for the channel
-   presentation it outputs; exporting the extra channel sets would need an
-   FFmpeg patch (`dca_xll.c` decodes per channel set; a patch would add the
-   object channel sets as extra planes or as frame side data). If they are
-   ACE-coded, a whole new decoder (TS 103 491 clauses 8–10).
+3. **Object audio.** The object waveforms are not extra XLL channel sets of
+   the presentation: those are described by the NAVI table and FFmpeg
+   already decodes or skips them; the DTS:X bytes are what is *left over*
+   after them. Under the TS 103 491 assumption the waveforms would be audio
+   chunks inside that leftover — XLL-coded (TS 103 491 can carry XLL audio
+   chunks; FFmpeg's XLL band decoding would have to be reusable on a buffer
+   that is not a whole XLL frame) or ACE-coded (a whole new decoder, TS 103
+   491 clauses 8–10).
 4. **Rendering.** TS 103 584 (point sources) is the matching renderer;
    reusing the TS 103 448 panner in `render.rs` is also possible but would
    need the coordinate mapping (TS 103 491 places sources by azimuth and elevation, e.g. `m_3DSrcAzimuth` / `m_3DSrcElevation`, where TS 103 448 uses room coordinates) and its own
-   measurement against TS 103 584. Output 7.1.4 (or 9.1.6, see the APAC
-   layout work) and the existing APAC path (`HeightsBridge`) unchanged.
+   measurement against TS 103 584. Output 7.1.4 through the existing APAC
+   path (`HeightsBridge`, 12 channels today); 9.1.6 only once a 9.1.6
+   renderer and APAC rendition exist, which they do not yet.
 5. **Fallback.** As for TrueHD: the channel presentation in the same
    rendition with silent heights, `.notPreserved`, never a codec change after
    the master is written.
 
 What a **patch to the `Wenzlik/MPVKit` fork** (FFmpeg n8.1.2) would need, in
-the most likely shape: in `dca_xll.c`, instead of seeking past the payload,
-copy it (from the dword after the syncword to the end of the XLL frame) into
-`AV_FRAME_DATA_*` side data on the output frame, or into packet side data in
-`dca_parser.c`. That is small and mechanical, and only worth carrying if the
-payload is then decoded somewhere — which is steps 2–4. Since PrismCore can
-find the same bytes itself (step 1), the patch is optional.
+the most likely shape: in `dca_xll.c` `parse_frame()`, the one place that
+already knows where the leftover starts (after band data and the dword
+alignment, PBR reassembly done), copy it — from the syncword to the end of
+the XLL frame — into side data on the decoded output frame (a new
+`AV_FRAME_DATA_*` type, or an opaque buffer), instead of seeking past it.
+The parser (`dca_parser.c`) is the wrong place: it reads only the XLL
+common-header prefix for the frame duration and never walks the channel
+sets or NAVI. With the patch, steps 1 and 2 of the walker shrink to reading
+side data, at the cost of carrying the patch on every MPVKit rebuild; it is
+only worth carrying once steps 2–4 have something to decode.
 
 ## Patents and licensing — **for Václav to decide, not decided here**
 
@@ -145,12 +154,12 @@ find the same bytes itself (step 1), the patch is optional.
 
 | Phase | What | Needs | Estimate |
 |---|---|---|---|
-| 0 | Read DTS:X off the bitstream (the XLL trailing syncword, as FFmpeg does) in a bounded scout, so `.notPreserved` and the DTS:X label stop depending on the profile claim | Only TS 102 114 + the syncword FFmpeg publishes; fuzz target | 2–3 days |
+| 0 | Read DTS:X off the stream rather than the probe's claim: a bounded scout (like `TrueHDAtmosScout`) that decodes the first frames with FFmpeg's own `dca` decoder and reads the profile it sets — FFmpeg already locates the leftover correctly (channel sets, NAVI, PBR). A hand-written scan for `0x02000850` is not an option: the dword can occur inside band data, and PBR-split frames hide it until reassembly | FFmpeg as linked; bounded like the TrueHD scout | 2–3 days |
 | 1 | A document for the disc payload (or DTS's statement that it is TS 103 491 syntax); real DTS:X test material; the licensing answer | Václav | — |
 | 2 | Payload walker (XLL header, channel sets, NAVI, PBR reassembly) + metadata parser (TS 103 491 clause 7) with fixtures and fuzzing | Phase 1 | 3–4 weeks |
-| 3 | Object audio decode: XLL channel sets via a small FFmpeg patch, or an ACE decoder | Phase 1; ACE is the large case | 1–2 weeks (XLL) / 2–3 months (ACE) |
-| 4 | Rendering (TS 103 584, or the TS 103 448 panner with a measured mapping) into 7.1.4 / 9.1.6, through `HeightsBridge` | Phases 2–3 | 2–3 weeks |
-| 5 | Measurement against a reference decode (as `docs/ObjectAudioMeasurement.md` does for TrueHD), device runs on a receiver | A licensed reference decoder or DTS-provided reference output | 1 week |
+| 3 | Object audio decode: XLL-coded audio chunks (FFmpeg's XLL band decoding made reusable on the leftover, an FFmpeg patch) or an ACE decoder | Phase 1; ACE is the large case | 2–4 weeks (XLL) / 2–3 months (ACE) |
+| 4 | Rendering (TS 103 584, or the TS 103 448 panner with a measured mapping) into 7.1.4 through `HeightsBridge` | Phases 2–3 | 2–3 weeks |
+| 5 | Measurement against a reference decode (the way TrueHD's heights split is measured against its exact object render), device runs on a receiver | A licensed reference decoder or DTS-provided reference output | 1 week |
 
 DTS-UHD sources (`dtsx` in MP4, ATSC 3.0) are fully specified but rare in
 the files PrismCore opens; they would need a demuxer path, the ACE decoder
@@ -163,5 +172,6 @@ and the renderer: the largest variant, with the same patent question.
    Xperi for a licence or for the payload documentation?
 2. **Specification:** do we have (or can we get) a public document for the
    Blu-ray DTS:X payload? Without one, phases 2–5 do not start.
-3. **Phase 0:** should the bitstream-based DTS:X detection be built now? It
-   is small, public, and makes the `.notPreserved` report trustworthy.
+3. **Phase 0:** should the stream-based DTS:X detection (a bounded decode of
+   the first frames, FFmpeg's own profile) be built now? It is small, uses
+   only what is linked, and makes the `.notPreserved` report trustworthy.
