@@ -341,6 +341,10 @@ impl Session {
             self.dual = true;
             self.mode = Mode::Pending;
             self.fallback_reason = None;
+            // The split that was guided is gone: should the render give way again before its
+            // metadata repeats, a new split starts from no guide (review r2).
+            self.guided = false;
+            self.unguided_frames = 0;
             let sample = self.renderer.sample;
             self.renderer = Renderer::default();
             self.renderer.sample = sample;
@@ -1176,6 +1180,7 @@ mod tests {
         pcm: Vec<f32>,
         modes: Vec<Mode>,
         exact_at_end: bool,
+        mode_at_end: Mode,
         result: Result<(), String>,
     }
 
@@ -1234,7 +1239,7 @@ mod tests {
             modes.push(session.mode());
         }
         let result = session.push(&[], true, &mut sink);
-        Run { pcm, modes, exact_at_end: session.exact, result }
+        Run { pcm, modes, exact_at_end: session.exact, mode_at_end: session.mode(), result }
     }
 
     fn from(units: usize) -> impl Fn(usize) -> Option<ObjectAudioMetadataPayload> {
@@ -1327,6 +1332,18 @@ mod tests {
                 assert!(shipped.exact_at_end, "the render took over again");
             }
         }
+    }
+
+    #[test]
+    fn a_stream_ending_while_the_render_waits_to_take_back_over_reports_the_bed() {
+        // Review r2: metadata once, at unit 900; the render takes over at 928 and holds for
+        // metadata that never repeats; the stream ends at 940. Those units play as the plain 7.1
+        // of a fresh split, so the session must not report heights for them.
+        let once = |unit: usize| (unit == 900).then(|| point([0., 0., 1.]));
+        let ended = run(Session::exact_with_split_fallback(), 940, once, None);
+        assert_in_place(&ended, 940, None);
+        assert_eq!(ended.modes[927], Mode::Objects, "heights from the split until the render takes over");
+        assert_eq!(ended.mode_at_end, Mode::Bed);
     }
 
     #[test]
