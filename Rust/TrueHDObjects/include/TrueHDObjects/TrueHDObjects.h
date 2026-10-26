@@ -47,9 +47,11 @@ TrueHDObjects *truehd_objects_open_exact(void);
 /// For measurement and listening: the split of the 7.1 presentation alone (`.heights` in 3.8).
 TrueHDObjects *truehd_objects_open_split(void);
 
-/// The bed (silent heights, TRUEHD_OBJECTS_BED) from the next push on, whatever was rendering:
-/// for a host whose heights chain cannot keep up. One way; `reason` (NULL allowed) is what
-/// `truehd_objects_message` reports. NULL session is ignored.
+/// The bed (silent heights, TRUEHD_OBJECTS_BED), whatever was rendering: for a host whose heights
+/// chain cannot keep up. Applied at the next push: the split's last 32 ms come out first (heights
+/// included), then silence of the stream's own length up to its next major sync (at most 107 ms),
+/// then the bed. One way; `reason` (NULL allowed) is what `truehd_objects_message` reports. NULL
+/// session is ignored. The mode reads TRUEHD_OBJECTS_BED from that push on.
 void truehd_objects_request_bed(TrueHDObjects *session, const char *reason);
 
 /// Feeds TrueHD bytes of this track only, starting at a major sync. `end` nonzero flushes the

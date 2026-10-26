@@ -138,9 +138,11 @@ impl Session {
         Self { exact: true, split_fallback: true, ..Self::default() }
     }
 
-    /// The bed from the next access unit on, whatever is rendering: for a host whose heights
-    /// chain cannot keep up (the bed decodes one presentation and renders nothing). One way:
-    /// a new session is how heights come back.
+    /// The bed, whatever is rendering, for a host whose heights chain cannot keep up (the bed
+    /// decodes one presentation and renders nothing). At the next `push` what the split still
+    /// holds comes out (its last 32 ms, heights included), and the stream plays silence of its
+    /// own length until its next major sync (at most 107 ms), where the bed starts. One way: a
+    /// new session is how heights come back.
     pub fn request_bed(&mut self, reason: &str) {
         self.bed_request = Some(reason.into());
     }

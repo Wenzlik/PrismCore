@@ -110,11 +110,13 @@ fn heights_keep_the_timeline_and_fall_back_to_the_plain_bed() {
     }
 }
 
+#[cfg(target_vendor = "apple")]
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: u32) -> u64;
 }
 
 /// CPU seconds of this thread (CLOCK_THREAD_CPUTIME_ID): a loaded machine still measures the work.
+#[cfg(target_vendor = "apple")]
 fn cpu() -> f64 {
     unsafe { clock_gettime_nsec_np(16) as f64 / 1e9 }
 }
@@ -122,7 +124,9 @@ fn cpu() -> f64 {
 /// Heights from the bed against the exact object render, on the same stream: how much of the
 /// energy lands on another speaker, per channel and over windows, plus CPU and the input it
 /// takes before the first output. Measurement only (prints; asserts nothing about quality).
-/// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`.
+/// Extra raw TrueHD files (`-f truehd`): `TRUEHD_OBJECTS_COMPARE=/a.thd:/b.thd`. Apple
+/// platforms only (the thread CPU clock).
+#[cfg(target_vendor = "apple")]
 #[test]
 fn compare_heights_with_the_exact_render() {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
