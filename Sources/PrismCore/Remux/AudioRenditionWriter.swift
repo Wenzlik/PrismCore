@@ -415,7 +415,7 @@ final class AudioRenditionWriter {
     /// Demand-driven jump: fresh muxer (and bridge) anchored at plan segment
     /// `segmentIndex`. The old muxer's partial fragment is abandoned — that
     /// segment gets reproduced if anything ever asks for it.
-    func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int) throws {
+    func reanchor(input: UnsafeMutablePointer<AVFormatContext>, segmentIndex: Int, startSeconds: Double? = nil) throws {
         writer = FMP4SegmentWriter()
         // A re-anchor is a boundary too: a suspension asked for while the
         // producer was parked takes effect here instead of rebuilding a
@@ -449,6 +449,11 @@ final class AudioRenditionWriter {
         }
         self.segmentIndex = segmentIndex
         pendingDuration = 0
+        // A held slot is "silence is coming", not "never coming": dropped
+        // unmarked, a fetch of it re-anchors production onto it.
+        silentSlots.removeAll()
+        lastBoundarySeconds = startSeconds
+        emittedSinceCut = false
     }
 
     /// Push one source packet for this track through copy or bridge.
@@ -468,6 +473,79 @@ final class AudioRenditionWriter {
             return
         } else {
             try emit(packet, from: sourceTimeBase)
+        }
+    }
+
+    /// The newest planned slot cut empty, with its span on the source clock,
+    /// while it waits to be filled (`fillSilentSlots`); and the last boundary
+    /// passed.
+    private var silentSlots: [(index: Int, start: Double, end: Double)] = []
+    private var lastBoundarySeconds: Double?
+    /// Whether anything has been muxed since the last cut.
+    private var emittedSinceCut = false
+
+    /// Silence for planned slots of a bridged rendition that carried no audio:
+    /// a listed segment that answers 404 fails the player — at the end of a
+    /// film whose audio track ends early, or across a gap in it. A slot is
+    /// filled only once the next one has passed without audio too (an
+    /// interleave never lags a whole segment, so nothing late can still land
+    /// in it), or at the end of the source; the resumed audio re-anchors the
+    /// bridge's clock after the silence (`BridgeClock`), so nothing drifts.
+    /// Each slot is cut on its own index.
+    /// ponytail: written outside `cut`, so retention does not count these (small) files.
+    private func fillSilentSlots(_ slots: [(index: Int, start: Double, end: Double)], final: Bool) throws {
+        guard !slots.isEmpty, let bridge = bridge as? AudioBridge else { return }
+        let tick = av_q2d(bridge.timeBase)
+        let emit: AudioBridge.Emit = { try self.emit($0, from: bridge.timeBase) }
+        for slot in slots {
+            let start = Int64((slot.start / tick).rounded())
+            if bridge.padOpensNewTimeline(from: start) { writer.markDiscontinuity() }
+            try bridge.padSilence(from: start, until: Int64((slot.end / tick).rounded()), final: final, emit: emit)
+            let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
+            if let initSegment, !initSegment.isEmpty {
+                try writeInitSegment(initSegment)
+            }
+            guard !media.isEmpty else {
+                onPlannedSegment?(slot.index, false)
+                continue
+            }
+            try media.write(
+                to: directory.appendingPathComponent(String(format: "seg%05d.m4s", slot.index)), options: .atomic
+            )
+            onPlannedSegment?(slot.index, true)
+        }
+        // Audio that resumes after the silence is its own fragment at its own time:
+        // left continuous, movenc would close the gap between the two.
+        if !final { writer.markDiscontinuity() }
+    }
+
+
+    /// The end of the source: the held slot gets its silence, and the time up to
+    /// the video's end (`endSeconds`) joins the final segment — an audio track
+    /// shorter than its video plays out silent instead of stalling the player.
+    /// Planned shape and bridged renditions only: a stream copy has no encoder
+    /// to make its silence, and the heights bridge pads its own timeline.
+    /// Call before `flushBridge`.
+    func fillTail(untilSeconds endSeconds: Double) throws {
+        // Not producing (left by the player): the hold is dropped unmarked, so a
+        // later fetch re-anchors onto the slot instead of meeting a 404.
+        guard plannedMode, isProducing, let bridge = bridge as? AudioBridge else { return silentSlots.removeAll() }
+        if emittedSinceCut {
+            // Audio came back after the held slot was cut: it belongs to the final
+            // segment, and the held slot stays empty, as at any cut that brings audio.
+            for slot in silentSlots { onPlannedSegment?(slot.index, false) }
+            silentSlots.removeAll()
+        }
+        let slots = silentSlots
+        silentSlots.removeAll()
+        try fillSilentSlots(slots, final: true)
+        guard let startSeconds = slots.last?.end ?? lastBoundarySeconds else { return }
+        let tick = av_q2d(bridge.timeBase)
+        let start = Int64((startSeconds / tick).rounded())
+        if bridge.padOpensNewTimeline(from: start) { writer.markDiscontinuity() }
+        try bridge.padSilence(from: start, until: Int64((endSeconds / tick).rounded()), final: true) {
+            try self.emit($0, from: bridge.timeBase)
         }
     }
 
@@ -576,6 +654,7 @@ final class AudioRenditionWriter {
         packet.pointee.stream_index = outputIndex
         packet.pointee.pos = -1
         try writer.write(packet)
+        emittedSinceCut = true
     }
 
     /// Cut a segment at the boundary the *video* just chose.
@@ -595,7 +674,10 @@ final class AudioRenditionWriter {
     /// `superseded`: this index's earlier output was muxed with an audio
     /// offset that is no longer in force (`ResidentSegmentStore`).
     @discardableResult
-    func cut(durationSeconds: Double, superseded: Bool = false) throws -> Int {
+    ///
+    /// `endSeconds`: the boundary on the source clock, for `fillTail`.
+    func cut(durationSeconds: Double, endSeconds: Double? = nil, superseded: Bool = false) throws -> Int {
+        if let endSeconds { lastBoundarySeconds = endSeconds }
         guard isProducing else {
             // Dormant: the boundary still passes. The planned slot keeps its
             // index (the playlist maps it to this time) but is NOT declared
@@ -611,6 +693,7 @@ final class AudioRenditionWriter {
             return 0
         }
         let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
         // The first cut mints the init segment; write it BEFORE the playlist
         // entry that references it.
         if let initSegment, !initSegment.isEmpty {
@@ -624,6 +707,16 @@ final class AudioRenditionWriter {
                 // late-starting track, or an interleave lagging the shorter
                 // 2 s head) would otherwise write its first audio as
                 // segment 0 and shift every later segment against the video.
+                if let endSeconds, bridge is AudioBridge {
+                    // Held, neither served nor declared empty: silence fills it
+                    // once a whole further slot passes without audio
+                    // (`fillSilentSlots`), or at the end of the source.
+                    let passed = silentSlots
+                    silentSlots = [(segmentIndex, endSeconds - durationSeconds, endSeconds)]
+                    segmentIndex += 1
+                    try fillSilentSlots(passed, final: false)
+                    return 0
+                }
                 onPlannedSegment?(segmentIndex, false)
                 segmentIndex += 1
                 return 0
@@ -636,6 +729,10 @@ final class AudioRenditionWriter {
         }
         let file = String(format: "seg%05d.m4s", segmentIndex)
         try media.write(to: directory.appendingPathComponent(file), options: .atomic)
+        // Audio came back within a slot: the one held before it may have been
+        // that audio's late interleave, so it stays empty, as it always did.
+        for slot in silentSlots { onPlannedSegment?(slot.index, false) }
+        silentSlots.removeAll()
         if plannedMode {
             onPlannedSegment?(segmentIndex, true)
         } else {
@@ -678,6 +775,7 @@ final class AudioRenditionWriter {
             return
         }
         let (initSegment, media) = try writer.cutSegment()
+        emittedSinceCut = false
         if let initSegment, !initSegment.isEmpty {
             try writeInitSegment(initSegment)
         }

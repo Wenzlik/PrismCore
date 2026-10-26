@@ -71,8 +71,8 @@ table: the app's name, a link, and its platforms.
 | Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.1 and converted Profile 7 play as their HDR10 base, 8.4 as its HLG base |
 | HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
-| Audio (copy) | AAC (non-LATM), AC3, EAC3, FLAC, ALAC — bit-for-bit |
-| Audio (bridge) | AAC-LATM / TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1) |
+| Audio (copy) | AAC (non-LATM), AC3, EAC3, FLAC, ALAC — bit-for-bit. A FLAC whose STREAMINFO declares blocks under 192 samples, which CoreMedia refuses to open, is bridged instead |
+| Audio (bridge) | AAC-LATM / TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM (and FLAC that CoreMedia refuses) → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1). A bridged track that ends before the video plays silence to the video's end (planned shape; a stream-copied one still ends early) |
 | TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **Opt-in for TrueHD only:** `objectAudioRendering: .heights` renders its objects to 7.1.4 (or, where the render cannot place the metadata, derives 7.1.4 from the stream's 7.1, guided by its objects) and serves APAC, so the heights play (see *TrueHD Atmos with heights*; `.renderedHeights`). Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
 | Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. `preferredAudioLanguage:` decides which one is `DEFAULT`, so playback starts in the right language instead of switching visibly after it. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
 | Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
@@ -90,7 +90,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.6")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.7")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -366,7 +366,9 @@ DTS:X) is untouched.
   a height object share a channel and a frequency bin its height feeds are not
   the objects' waveforms (on synthetic scenes they correlate 0.875–0.937 with
   the render's), and it costs 2.4 to 3.4 times the render's CPU
-  (decode included, M2: 50–63 against 18–21 ms per second of audio).
+  (decode included, M2: 50–63 against 18–21 ms per second of audio). Method
+  and full results: `docs/ObjectAudioMeasurement.md`
+  (`Rust/TrueHDObjects/scripts/measure-heights.sh`).
 - **The encoder.** `AVAudioConverter` APAC (OS 26), 3.07 Mbit/s, no DRC
   (every other DRC setting holds 1.5–20 s of audio before its first packet,
   which a segmenter that cuts on video boundaries cannot absorb; Apple's
@@ -1128,7 +1130,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.6")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.8.7")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
@@ -1183,7 +1185,7 @@ Shipping, and stable under semantic versioning since 1.0.0 (see *Stability and
 versioning*). Two headline claims are still proven by construction rather than by a
 lab.
 
-The test suite is 857 tests across 122 suites, hermetic apart from an opt-in
+The test suite is 866 tests across 123 suites, hermetic apart from an opt-in
 real-media harness. It exercises the playlists, the loopback server, the subtitle
 renditions and the audio bridge's decode → resample → FIFO → encode chain, plus
 end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces)

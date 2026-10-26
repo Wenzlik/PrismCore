@@ -64,6 +64,10 @@ struct FuzzSmokeTests {
             TrueHDMajorSync.carriesObjectAudio(in: FuzzSeeds.trueHDAtmosUnits) == true,
             "the TrueHD seed must step over its first unit and read Atmos off the second"
         )
+        #expect(
+            FuzzSeeds.flacMatroskaPrivate.withUnsafeBufferPointer { FLACStreamInfo.blockSizes(extradata: $0) }?.min == 128,
+            "the FLAC seed must pass the fLaC header and reach the STREAMINFO"
+        )
         #expect(ISOBMFFPatch.locate("hvcC", in: Data(FuzzSeeds.videoInitSegment)) != nil)
         #expect(HEVCNALUnits.units(in: FuzzSeeds.hevcPacket, lengthSize: 4)?.count == 3)
         // The hvcC seed needs normalizing (array_completeness = 0, SEI array,
