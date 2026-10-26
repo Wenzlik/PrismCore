@@ -46,6 +46,15 @@ TrueHD Atmos heights are rendered from the objects again; the split of the
   `PRISMCORE_EXACT_HEIGHTS` is gone. The Cargo feature `exact-render` is a
   no-op kept for old commands.
 
+### Fixed
+
+- A TrueHD access unit lost while the render held audio for its first object
+  metadata played its silence before the held audio, moving that audio by
+  the lost unit's length; the silence now takes its place after it.
+- A heights stream ending in a lost access unit kept its last 2 ms (and the
+  split's last 32 ms) of audio from before the loss back; they now come out
+  before the error is reported.
+
 ### Added
 
 - C API (`TrueHDObjects.h`): `truehd_objects_open_split`,

@@ -263,9 +263,9 @@ impl Session {
             return Err("no TrueHD sync within 64 KiB".into());
         }
         if end {
-            if let Some((error, _)) = self.lost.take() {
-                return Err(error);
-            }
+            // A stream ending in a loss is an error, but what is held, in the split and in the
+            // limiter is audio from before the loss: it comes out first.
+            let lost = self.lost.take();
             // Audio still held for metadata that never came plays as the split of its 7.1 (or,
             // without it, keeps its time as silence).
             if self.held_frames > 0 {
@@ -284,6 +284,9 @@ impl Session {
             self.drain_split(output)?;
             self.limiter.finish(&mut self.limited);
             self.flush(output)?;
+            if let Some((error, _)) = lost {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -394,6 +397,19 @@ impl Session {
         }
         // Before any unit decoded, a TrueHD access unit at 48 kHz is 40 samples.
         let frames = self.unit_frames.unwrap_or(40);
+        if self.held_frames > 0 {
+            // Audio held for its first metadata comes out later: the gap joins it, as silence
+            // (with silent 7.1 beside it), so nothing overtakes it.
+            let channels = self.held.last().map_or(0, Vec::len);
+            if self.held_beds.len() == self.held.len()
+                && let Some((bed, labels)) = self.held_beds.last()
+            {
+                self.held_beds.push((vec![vec![0.; frames]; bed.len()], labels.clone()));
+            }
+            self.held.push(vec![vec![0.; frames]; channels]);
+            self.held_frames += frames;
+            return Ok(());
+        }
         self.silence(frames, output)
     }
 
@@ -1132,12 +1148,26 @@ mod tests {
         pcm: Vec<f32>,
         modes: Vec<Mode>,
         exact_at_end: bool,
+        result: Result<(), String>,
     }
 
     /// `units` access units through `session`, as `push` hands decoded ones on (the render gets
     /// the objects, with the 7.1 beside them while `dual`; the split and the bed get the 7.1):
     /// `metadata(unit)` says whether a unit carries OAMD, `bed_at` asks for the bed before a unit.
-    fn run(mut session: Session, units: usize, metadata: impl Fn(usize) -> Option<ObjectAudioMetadataPayload>, bed_at: Option<usize>) -> Run {
+    fn run(session: Session, units: usize, metadata: impl Fn(usize) -> Option<ObjectAudioMetadataPayload>, bed_at: Option<usize>) -> Run {
+        let run = run_losing(session, units, metadata, bed_at, |_| false);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        run
+    }
+
+    /// `run`, where `lost(unit)` makes a unit fail to decode (`lose`, as `push` does).
+    fn run_losing(
+        mut session: Session,
+        units: usize,
+        metadata: impl Fn(usize) -> Option<ObjectAudioMetadataPayload>,
+        bed_at: Option<usize>,
+        lost: impl Fn(usize) -> bool,
+    ) -> Run {
         let mut pcm = Vec::new();
         let mut modes = Vec::new();
         let mut sink = |block: &[f32]| {
@@ -1157,10 +1187,13 @@ mod tests {
                 session.conceal(&mut sink).unwrap();
             } else {
                 session.switching = false;
+                let restarting = session.lost.take().map(|(error, _)| error);
                 if sync {
                     session.at_major_sync(&mut sink).unwrap();
                 }
-                if !session.renders_objects() && (session.mode != Mode::Bed || session.split.is_some()) {
+                if lost(unit) {
+                    session.lose(restarting, "lost".into(), &mut sink).unwrap();
+                } else if !session.renders_objects() && (session.mode != Mode::Bed || session.split.is_some()) {
                     session.play_split(bed, default_speakers(8), objects, UNIT, oamd.as_ref(), false, &mut sink).unwrap();
                 } else {
                     let bed_mode = session.mode == Mode::Bed;
@@ -1172,8 +1205,8 @@ mod tests {
             }
             modes.push(session.mode());
         }
-        session.push(&[], true, &mut sink).unwrap();
-        Run { pcm, modes, exact_at_end: session.exact }
+        let result = session.push(&[], true, &mut sink);
+        Run { pcm, modes, exact_at_end: session.exact, result }
     }
 
     fn from(units: usize) -> impl Fn(usize) -> Option<ObjectAudioMetadataPayload> {
@@ -1210,6 +1243,28 @@ mod tests {
         assert_eq!(a.len(), b.len());
         if let Some(i) = a.iter().zip(b).position(|(x, y)| x != y) {
             panic!("differs from frame {} (channel {}): {} vs {}", i / CHANNELS, i % CHANNELS, a[i], b[i]);
+        }
+    }
+
+    #[test]
+    fn a_loss_while_audio_is_held_keeps_its_place() {
+        // Units 20–22 lost while the first 20 are held for metadata (which comes at unit 32, a
+        // major sync): the held audio comes out first, the loss as silence after it.
+        let lost = run_losing(Session::exact_with_split_fallback(), 100, from(32), None, |u| u == 20);
+        assert!(lost.result.is_ok());
+        assert!(lost.exact_at_end);
+        assert_in_place(&lost, 100, Some(20 * UNIT..32 * UNIT));
+        assert!(lost.pcm[20 * UNIT * CHANNELS..32 * UNIT * CHANNELS].iter().all(|x| x.abs() < 0.02));
+    }
+
+    #[test]
+    fn a_stream_ending_in_a_loss_still_releases_what_came_before() {
+        // The last unit fails: an error, but the limiter's 2 ms (and the split's 32 ms) before it
+        // come out, so the audio keeps its length.
+        for open in [Session::exact_with_split_fallback as fn() -> Session, Session::default] {
+            let lost = run_losing(open(), 100, from(0), None, |u| u == 99);
+            assert!(lost.result.is_err());
+            assert_in_place(&lost, 100, Some(99 * UNIT..100 * UNIT));
         }
     }
 
