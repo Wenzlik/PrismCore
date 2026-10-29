@@ -483,9 +483,11 @@ struct TrueHDHeightsTests {
 
     @Test("LPCM needs no encoder, and its bitrate is 48 kHz x 24 bits a channel")
     func lpcmAvailability() {
+        var os26 = false
+        if #available(macOS 26.0, *) { os26 = true }
         for layout in HeightsLayout.allCases {
             #expect(HeightsOutput.apac.isAvailable(for: layout) == layout.isAvailable)
-            #expect(HeightsOutput.lpcm.isAvailable(for: layout) == ObjectAudioRendering.rendererIsLinked)
+            #expect(HeightsOutput.lpcm.isAvailable(for: layout) == (ObjectAudioRendering.rendererIsLinked && os26))
         }
         #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true, layout: .atmos7_1_4, output: .lpcm)
             .hasPrefix("heights lpcm"))

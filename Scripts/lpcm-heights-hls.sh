@@ -19,7 +19,9 @@ cli=${PRISMCORE_CLI:-.build/release/prismcore-cli}
 mirror() {
     local base=$1 rel=$2 dir=$3 body uri
     mkdir -p "$dir/$(dirname "$rel")"
-    while body=$(curl -sf "$base/$rel"); grep -q '#EXTINF' <<<"$body" && ! grep -q '#EXT-X-ENDLIST' <<<"$body"; do
+    while :; do
+        body=$(curl -sf "$base/$rel") || { echo "failed to fetch $base/$rel" >&2; return 1; }
+        grep -q '#EXTINF' <<<"$body" && ! grep -q '#EXT-X-ENDLIST' <<<"$body" || break
         sleep 1
     done
     printf '%s\n' "$body" >"$dir/$rel"
