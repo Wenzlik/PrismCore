@@ -1633,7 +1633,11 @@ public actor PrismCoreSession {
                 dolbyVisionConversion: dolbyVisionConversion.map {
                     .init(convertedRPUs: $0.convertedRPUs, failedRPUs: $0.failedRPUs,
                           droppedEnhancementLayerNALs: $0.droppedEnhancementLayerNALs,
-                          staleUnconvertedPackets: $0.staleUnconvertedPackets, isClean: $0.isClean)
+                          staleUnconvertedPackets: $0.staleUnconvertedPackets, isClean: $0.isClean,
+                          picturesWithoutRPU: $0.picturesWithoutRPU, rpusBeforePicture: $0.rpusBeforePicture,
+                          mappingsReplacedByIdentity: $0.mappingsReplacedByIdentity,
+                          rpusWithoutDisplayMetadata: $0.rpusWithoutDisplayMetadata,
+                          fullEnhancementLayerRPUs: $0.fullEnhancementLayerRPUs)
                 },
                 retention: .init(budgetBytes: options.segmentCacheBytes,
                                  evictedSegments: remuxer.residentSegments.evictedCount),

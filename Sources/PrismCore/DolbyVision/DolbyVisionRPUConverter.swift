@@ -80,6 +80,17 @@ final class DolbyVisionRPUConverter {
     /// it makes `isClean` false rather than passing silently.
     private(set) var staleUnconvertedPackets = 0
 
+    /// Per-frame RPU health, for the black-screen question (see
+    /// `DolbyVisionConversionStats`): pictures that left with no RPU, RPUs that
+    /// left ahead of their picture, RPUs whose mapping the conversion replaced
+    /// with the identity, RPUs without display-management metadata, and RPUs
+    /// that came from a full enhancement layer stream.
+    private(set) var picturesWithoutRPU = 0
+    private(set) var rpusBeforePicture = 0
+    private(set) var mappingsReplacedByIdentity = 0
+    private(set) var rpusWithoutDisplayMetadata = 0
+    private(set) var fullEnhancementLayerRPUs = 0
+
     /// Per-packet tallies, committed to the counters above only once the
     /// rewrite has actually landed.
     ///
@@ -92,6 +103,13 @@ final class DolbyVisionRPUConverter {
     private var pendingConverted = 0
     private var pendingFailed = 0
     private var pendingDropped = 0
+    /// What this packet's walk saw: a base-layer picture, an RPU kept ahead of
+    /// one, and the converted RPUs' findings.
+    private var pendingPicture = false
+    private var pendingRPUBeforePicture = false
+    private var pendingMappingsReplaced = 0
+    private var pendingWithoutDisplayMetadata = 0
+    private var pendingFullEnhancementLayer = 0
 
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
@@ -143,6 +161,11 @@ final class DolbyVisionRPUConverter {
         pendingConverted = 0
         pendingFailed = 0
         pendingDropped = 0
+        pendingPicture = false
+        pendingRPUBeforePicture = false
+        pendingMappingsReplaced = 0
+        pendingWithoutDisplayMetadata = 0
+        pendingFullEnhancementLayer = 0
     }
 
     /// `rewrote == false` means one of two things, and only one of them is
@@ -158,13 +181,23 @@ final class DolbyVisionRPUConverter {
             // before it calls `dispose`, so nothing was ever decided and the
             // original went to the muxer unexamined — enhancement layer and
             // unconverted RPU included.
-            if decidedAChange || !framed { staleUnconvertedPackets += 1 }
+            if decidedAChange || !framed {
+                staleUnconvertedPackets += 1
+            } else if pendingPicture {
+                // Framed and untouched: no RPU and no enhancement layer in it.
+                picturesWithoutRPU += 1
+            }
             resetPending()
             return
         }
         convertedRPUs += pendingConverted
         failedRPUs += pendingFailed
         droppedEnhancementLayerNALs += pendingDropped
+        if pendingPicture, pendingConverted == 0 { picturesWithoutRPU += 1 }
+        if pendingRPUBeforePicture { rpusBeforePicture += 1 }
+        mappingsReplacedByIdentity += pendingMappingsReplaced
+        rpusWithoutDisplayMetadata += pendingWithoutDisplayMetadata
+        fullEnhancementLayerRPUs += pendingFullEnhancementLayer
         resetPending()
     }
 
@@ -194,8 +227,14 @@ final class DolbyVisionRPUConverter {
             pendingDropped += 1
             return .drop
         }
+        if unit.type < 32 {
+            // A base-layer picture (VCL). One already followed by a kept RPU
+            // means the RPU sits ahead of a picture of its access unit.
+            pendingPicture = true
+            if pendingConverted > 0 { pendingRPUBeforePicture = true }
+        }
         guard unit.type == 62 else { return .keep }
-        guard let converted = Self.convertRPU(Array(unit.bytes)) else {
+        guard let conversion = Self.convertRPU(Array(unit.bytes)) else {
             pendingFailed += 1
             // Drop it. The old code kept the unconverted RPU, on the reasoning
             // that the 8.1 claim is only made when conversion succeeded — which
@@ -214,7 +253,10 @@ final class DolbyVisionRPUConverter {
             return .drop
         }
         pendingConverted += 1
-        return .replace(converted)
+        if conversion.replacedMapping { pendingMappingsReplaced += 1 }
+        if !conversion.hasDisplayMetadata { pendingWithoutDisplayMetadata += 1 }
+        if conversion.fullEnhancementLayer { pendingFullEnhancementLayer += 1 }
+        return .replace(conversion.bytes)
     }
 
     /// Whether this NAL is enhancement layer, and so must not reach a stream
@@ -227,25 +269,88 @@ final class DolbyVisionRPUConverter {
         type == nalTypeEnhancementLayer || layerID != 0
     }
 
+    /// One converted RPU, and what the conversion did to it.
+    struct Conversion {
+        /// The 8.1 RPU NAL, header included.
+        let bytes: [UInt8]
+        /// The source's mapping was not already the identity: libdovi's mode 2
+        /// replaced it (its documented 8.1 conversion — "both luma and chroma
+        /// mapping curves are set to no-op"), so this frame's 8.1 RPU maps the
+        /// base layer as it is. Read off the source's own curves
+        /// (`isIdentity`): libdovi's mode 4, "preserving" the mapping, writes a
+        /// curve of its own rather than the source's (measured, libdovi 3.3.2),
+        /// so comparing the two conversions says nothing.
+        let replacedMapping: Bool
+        /// The converted RPU carries display-management metadata (its L1, L2,
+        /// L6 … extension blocks).
+        let hasDisplayMetadata: Bool
+        /// libdovi's reading of the source RPU: a full enhancement layer stream.
+        let fullEnhancementLayer: Bool
+    }
+
     /// One RPU NAL (including its two-byte HEVC header) through libdovi.
-    private static func convertRPU(_ nal: [UInt8]) -> [UInt8]? {
+    static func convertRPU(_ nal: [UInt8]) -> Conversion? {
         #if canImport(Libdovi)
-        return nal.withUnsafeBufferPointer { buffer -> [UInt8]? in
+        return nal.withUnsafeBufferPointer { buffer -> Conversion? in
             guard let base = buffer.baseAddress,
                   let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
             else { return nil }
             defer { dovi_rpu_free(rpu) }
+            var fullEnhancementLayer = false
+            if let header = dovi_rpu_get_header(rpu) {
+                fullEnhancementLayer = header.pointee.el_type.map { String(cString: $0) == "FEL" } ?? false
+                dovi_rpu_free_header(header)
+            }
+            // nil (no mapping of its own: a `use_prev_vdr_rpu` RPU) is not counted.
+            var replacedMapping = false
+            if let mapping = dovi_rpu_get_data_mapping(rpu) {
+                replacedMapping = !isIdentity(mapping.pointee)
+                dovi_rpu_free_data_mapping(mapping)
+            }
 
             guard dovi_convert_rpu_with_mode(rpu, convertToProfile81) == 0 else { return nil }
+            var hasDisplayMetadata = false
+            if let header = dovi_rpu_get_header(rpu) {
+                hasDisplayMetadata = header.pointee.vdr_dm_metadata_present_flag
+                dovi_rpu_free_header(header)
+            }
             guard let written = dovi_write_unspec62_nalu(rpu) else { return nil }
             defer { dovi_data_free(written) }
             guard let data = written.pointee.data, written.pointee.len > 0 else { return nil }
-            return Array(UnsafeBufferPointer(start: data, count: Int(written.pointee.len)))
+            return Conversion(
+                bytes: Array(UnsafeBufferPointer(start: data, count: Int(written.pointee.len))),
+                replacedMapping: replacedMapping,
+                hasDisplayMetadata: hasDisplayMetadata,
+                fullEnhancementLayer: fullEnhancementLayer
+            )
         }
         #else
         return nil
         #endif
     }
+
+    #if canImport(Libdovi)
+    /// Whether every component maps the base layer as it is: one piece, a
+    /// first-order polynomial y = 0 + 1·x — the curves mode 2 writes.
+    private static func isIdentity(_ mapping: DoviRpuDataMapping) -> Bool {
+        withUnsafePointer(to: mapping.curves) { tuple in
+            tuple.withMemoryRebound(to: DoviReshapingCurve.self, capacity: Int(DoviNUM_COMPONENTS)) { curves in
+                (0..<Int(DoviNUM_COMPONENTS)).allSatisfy { index in
+                    let curve = curves[index]
+                    guard curve.num_pivots_minus2 == 0, curve.mapping_idc == 0,
+                          let polynomial = curve.polynomial?.pointee,
+                          polynomial.poly_order_minus1.len == 1, polynomial.poly_order_minus1.data[0] == 0,
+                          polynomial.poly_coef_int.len == 1, polynomial.poly_coef.len == 1,
+                          let integers = polynomial.poly_coef_int.list[0]?.pointee,
+                          let fractions = polynomial.poly_coef.list[0]?.pointee,
+                          integers.len == 2, fractions.len == 2
+                    else { return false }
+                    return integers.data[0] == 0 && integers.data[1] == 1 && fractions.data[0] == 0 && fractions.data[1] == 0
+                }
+            }
+        }
+    }
+    #endif
 }
 
 /// What a Profile 7 → 8.1 conversion did over the course of a session.
@@ -275,18 +380,53 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// Anything here is the black-screen mismatch on a rarer path.
     public let staleUnconvertedPackets: Int
 
-    /// `staleUnconvertedPackets` defaults so that 2.0.x stays source
-    /// compatible for anyone constructing this.
+    /// Pictures (packets with a base-layer VCL NAL) that reached the muxer with
+    /// no RPU: their access unit carried none, or libdovi refused it
+    /// (`failedRPUs`) and it was dropped. In a stream declared 8.1 every picture
+    /// should carry one; how a Dolby Vision decoder treats a picture without
+    /// one is not specified publicly, which is why it is counted.
+    public let picturesWithoutRPU: Int
+    /// Packets whose converted RPU sits ahead of a base-layer picture of the
+    /// same packet. Dolby Vision streams put the RPU after the access unit's
+    /// pictures; a decoder that expects it there may not apply it.
+    public let rpusBeforePicture: Int
+    /// Converted RPUs whose source mapping was not already the identity and
+    /// which the conversion replaced with it — libdovi's documented 8.1
+    /// conversion (mode 2) does this to every RPU, so on a Profile 7 source this
+    /// counts the frames whose 8.1 RPU maps the base layer as it is rather than
+    /// as the source's mapping (written for base + enhancement layer) would.
+    /// The display-management metadata (L1, L2, L6 …) is kept either way.
+    public let mappingsReplacedByIdentity: Int
+    /// Converted RPUs that carry no display-management metadata: a Dolby
+    /// Vision display has nothing to tone-map those frames by.
+    public let rpusWithoutDisplayMetadata: Int
+    /// Converted RPUs libdovi read as coming from a full enhancement layer
+    /// (FEL) stream — whose base layer alone is not the picture the source
+    /// mastered, unlike a minimal enhancement layer's (MEL).
+    public let fullEnhancementLayerRPUs: Int
+
+    /// Every field after `droppedEnhancementLayerNALs` defaults, so that
+    /// earlier releases stay source compatible for anyone constructing this.
     public init(
         convertedRPUs: Int,
         failedRPUs: Int,
         droppedEnhancementLayerNALs: Int,
-        staleUnconvertedPackets: Int = 0
+        staleUnconvertedPackets: Int = 0,
+        picturesWithoutRPU: Int = 0,
+        rpusBeforePicture: Int = 0,
+        mappingsReplacedByIdentity: Int = 0,
+        rpusWithoutDisplayMetadata: Int = 0,
+        fullEnhancementLayerRPUs: Int = 0
     ) {
         self.convertedRPUs = convertedRPUs
         self.failedRPUs = failedRPUs
         self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
         self.staleUnconvertedPackets = staleUnconvertedPackets
+        self.picturesWithoutRPU = picturesWithoutRPU
+        self.rpusBeforePicture = rpusBeforePicture
+        self.mappingsReplacedByIdentity = mappingsReplacedByIdentity
+        self.rpusWithoutDisplayMetadata = rpusWithoutDisplayMetadata
+        self.fullEnhancementLayerRPUs = fullEnhancementLayerRPUs
     }
 
     /// Every RPU converted, none refused, and the enhancement layer actually

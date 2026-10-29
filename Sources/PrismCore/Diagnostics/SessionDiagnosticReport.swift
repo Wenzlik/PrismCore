@@ -388,6 +388,13 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var droppedEnhancementLayerNALs: Int
             public var staleUnconvertedPackets: Int
             public var isClean: Bool
+            /// Per-frame RPU health (`DolbyVisionConversionStats`). Optional so a
+            /// report written by an earlier version still decodes.
+            public var picturesWithoutRPU: Int?
+            public var rpusBeforePicture: Int?
+            public var mappingsReplacedByIdentity: Int?
+            public var rpusWithoutDisplayMetadata: Int?
+            public var fullEnhancementLayerRPUs: Int?
         }
 
         public struct Retention: Sendable, Equatable, Codable {
