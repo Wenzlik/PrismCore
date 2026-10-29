@@ -17,14 +17,20 @@ source-compatible.)
   `r_frame_rate` is 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60 within 1e-4 is
   now muxed in a timescale where a frame is a whole number of ticks (24000,
   30000 or 60000 with 1001 a frame for the NTSC rates; 90 kHz, as before, for
-  the others), and every PTS, DTS and duration within one source tick of a
-  frame becomes that frame's exact time. The grid is anchored on the stream's
-  start time and the mapping is a pure function of the timestamp, so a
-  re-anchored muxer maps every packet exactly as the head did; nothing moves
-  further than one source tick, so audio cannot drift against it. Segment
+  the others), and every PTS and DTS that is a frame rounded to the source
+  tick (within half a tick of it) becomes that frame's exact time, durations
+  within a tick of whole frames too. The window holds one source timestamp
+  at most, so two distinct timestamps (a variable-rate stretch 1 ms apart in
+  a stream labelled 25 fps) never share a tick; a muxer that truncates
+  instead of rounding leaves some of its frames off the grid, at their own
+  time. The grid is anchored on the stream's start time and the mapping is a
+  pure function of the timestamp, so a re-anchored muxer maps every packet
+  exactly as the head did; nothing moves further than half a source tick, so
+  audio cannot drift against it. Segment
   cuts, the plan, the keyframe cache and `#EXTINF` stay on the source's
-  ticks. Non-standard and variable rates, and an `r_frame_rate` naming a
-  different standard rate than the average, are served as before.
+  ticks. Non-standard rates, and an `r_frame_rate` naming a different
+  standard rate than the average, are served as before; so is every
+  timestamp of a variable-rate stream that is not on its labelled grid.
   Measured on a 23.976 fps Matroska with three B-frames (new fixture
   `grid_23976_bframes.mkv`): served at timescale 24000, every frame 1001
   ticks; before, 90 kHz with 3690/3780-tick frames.

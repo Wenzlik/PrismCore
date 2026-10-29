@@ -67,13 +67,20 @@ struct FrameGridTests {
     @Test("41/42 ms steps land on the exact 1001-tick grid, with no drift over three hours")
     func ntscMillisecondsSnapWithoutDrift() {
         let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)
-        for truncate in [false, true] {
-            // 3 h at 23.976: every frame, not a sample.
-            for n in Int64(0)..<259_000 {
-                let source = Self.milliseconds(frame: n, rate: Self.ntsc24, truncate: truncate)
-                #expect(grid.timestamp(source) == n * 1001)
-                if grid.timestamp(source) != n * 1001 { return }
-            }
+        // 3 h at 23.976: every frame, not a sample.
+        for n in Int64(0)..<259_000 {
+            let source = Self.milliseconds(frame: n, rate: Self.ntsc24)
+            #expect(grid.timestamp(source) == n * 1001)
+            if grid.timestamp(source) != n * 1001 { return }
+        }
+        // A muxer that truncates: the frames it rounded down by under half a
+        // millisecond snap, the others keep their own time; none moves a tick.
+        var last = Int64.min
+        for n in Int64(0)..<10_000 {
+            let source = Self.milliseconds(frame: n, rate: Self.ntsc24, truncate: true)
+            let mapped = grid.timestamp(source)
+            #expect(mapped > last && abs(mapped - source * 24) < 24, "frame \(n)")
+            last = mapped
         }
         #expect(grid.duration(41) == 1001 && grid.duration(42) == 1001)
         #expect(grid.duration(83) == 2002)
@@ -123,6 +130,24 @@ struct FrameGridTests {
         #expect(grid.timestamp(swift_AV_NOPTS_VALUE()) == swift_AV_NOPTS_VALUE())
         #expect(grid.duration(0) == 0)
         #expect(grid.duration(20) == 480)
+    }
+
+    @Test("Distinct timestamps never share a tick, whatever the rate claims")
+    func injective() {
+        // A variable-rate stretch in a stream labelled 25 fps: 39 and 40 ms are
+        // both within a tick of frame 1, and must stay 1 ms apart.
+        let pal = FrameGrid(rate: StandardFrameRate(25, 1), sourceTimeBase: Self.milliseconds, startTime: 0)
+        #expect(pal.timestamp(39) == 3510 && pal.timestamp(40) == 3600 && pal.timestamp(41) == 3690)
+        for rate in StandardFrameRate.all {
+            let grid = FrameGrid(rate: rate, sourceTimeBase: Self.milliseconds, startTime: 0)
+            var last = grid.timestamp(-1)
+            for t in Int64(0)..<20_000 {
+                let mapped = grid.timestamp(t)
+                #expect(mapped > last, "\(rate) at \(t) ms")
+                if mapped <= last { break }
+                last = mapped
+            }
+        }
     }
 
     @Test("B-frames: DTS stays monotonic and never passes its PTS")
