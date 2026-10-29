@@ -8,6 +8,41 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- **Experimental — `HeightsOutput`: TrueHD Atmos heights as lossless linear
+  PCM** (public API, additive, opt-in; may change once tried on a device,
+  issue #176): `PrismCoreSession.Options.heightsOutput` and a
+  `heightsOutput:` parameter on the initializers, default `.apac` (today's
+  behaviour, unchanged). `.lpcm` muxes the rendered layout (`HeightsLayout`)
+  as 24-bit integer PCM — no encoder, no priming — in an ISO/IEC 23003-5
+  `ipcm` sample entry with `pcmC` (24 bits, little-endian) and a `chnl` box
+  (ISO/IEC 14496-12) of explicit ISO/IEC 23091-3 speaker positions in the
+  channel order of the layout's `kAudioChannelLayoutTag_Atmos_*` (5.1.2:
+  0 1 2 3 4 5 23 24; 5.1.4: … 17 18 20 21; 7.1.2: … 8 9 23 24; 7.1.4:
+  … 8 9 17 18 20 21), which CoreMedia reads back as exactly that tag.
+  `CODECS="ipcm"`: Apple's HLS authoring spec lists no PCM format, so the
+  sample entry's code is the only value there is. 48 kHz × 24 bits × the
+  layout's channels: 9.2 Mbit/s (5.1.2), 11.5 (5.1.4, 7.1.2), 13.8 (7.1.4).
+  Meant for HDMI and other local outputs, with `.apac` for AirPlay; the host
+  decides, PrismCore cannot reliably tell the route.
+  `HeightsOutput.isAvailable(for:)`: `.lpcm` needs the renderer, not an
+  encoder.
+  **Playback is not verified.** Measured on macOS 27 (Mac mini, stereo
+  output): AVFoundation opens every layout's `ipcm` rendition, reads its
+  layout and decodes each channel in place (round-trip test per layout), but
+  AVPlayer refuses LPCM whose layout has height channels (`'fmt?'` — 5.1.2 at
+  8 channels, while the same 8 channels described as 7.1 play) and anything
+  above 8 channels, in HLS, `.mp4` and `.caf` alike; 32-bit float (`fpcm`)
+  changes nothing, so the integer form stays. HDMI carries at most 8 channels
+  of LPCM; whether tvOS hands such a track to an AV receiver (Dolby MAT) has
+  not been tried on a device — it needs an Apple TV and an AVR. Until then
+  `.lpcm` is for that test. AirPlay stays on the lossy path (`.apac`).
+- `prismcore-cli`: `--heights-layout 5.1.2|5.1.4|7.1.2|7.1.4` and
+  `--heights-output apac|lpcm`; `Scripts/lpcm-heights-hls.sh` writes a static
+  `ipcm` HLS per layout for the device test
+  (`docs/LPCMHeightsDeviceTest.md`).
+
 ## [3.9.1] — 2026-10-29
 
 Standard-rate video is served on its exact frame grid — 23.976 fps from a

@@ -51,9 +51,12 @@ final class AudioRenditionWriter {
     private(set) var rendersHeights: Bool
     /// The loudspeaker layout a heights rendition renders into.
     let heightsLayout: HeightsLayout
+    /// How a heights rendition delivers its layout: APAC, or LPCM in an `ipcm` track.
+    let heightsOutput: HeightsOutput
     /// The renderer's report of what is playing. Set by the remuxer.
     var onObjectAudio: ((ObjectAudioDelivery, String?) -> Void)?
-    /// The APAC encoder's cookie, for the sample entry the init segment gets.
+    /// The APAC encoder's cookie, for the sample entry the init segment gets (`.apac` only:
+    /// movenc writes the `ipcm` entry itself).
     private var heightsCookie: Data?
     /// Set once the master has read this rendition's description: from then on its codec is
     /// a promise to the player, and `rendersHeights` may no longer fall back to another one.
@@ -161,10 +164,12 @@ final class AudioRenditionWriter {
         suspendable: Bool = false,
         bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec,
         rendersHeights: Bool = false,
-        heightsLayout: HeightsLayout = .atmos7_1_4
+        heightsLayout: HeightsLayout = .atmos7_1_4,
+        heightsOutput: HeightsOutput = .apac
     ) {
         self.route = route
         self.heightsLayout = heightsLayout
+        self.heightsOutput = heightsOutput
         self.rendersHeights = rendersHeights && route.mode == .bridge
         self.bridgeTarget = route.mode == .bridge ? bridgeTarget : AudioBridge.defaultTargetCodec
         self.track = track
@@ -339,9 +344,10 @@ final class AudioRenditionWriter {
                     throw HeightsUnavailable.operatingSystem
                 }
                 let heights = try HeightsBridge(
-                    codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base, layout: heightsLayout
+                    codecpar: inStream.pointee.codecpar, timeBase: inStream.pointee.time_base, layout: heightsLayout,
+                    output: heightsOutput
                 )
-                heightsCookie = heights.magicCookie
+                if heightsOutput == .apac { heightsCookie = heights.magicCookie }
                 heights.onObjectAudio = { [weak self] delivery, why in self?.onObjectAudio?(delivery, why) }
                 return heights
             } catch where codecDeclared {
@@ -384,7 +390,11 @@ final class AudioRenditionWriter {
             // A declared heights rendition without its encoder: the same stand-in stream, so
             // the muxer still describes the entry the served init carries.
             plan = .init(inputIndex: index, language: sourceLanguage) { outStream in
-                try APACSampleEntry.configureStandIn(outputStream: outStream, channelCount: self.heightsLayout.channelCount)
+                if self.heightsOutput == .lpcm {
+                    try LPCMSampleEntry.configure(outputStream: outStream, layout: self.heightsLayout)
+                } else {
+                    try APACSampleEntry.configureStandIn(outputStream: outStream, channelCount: self.heightsLayout.channelCount)
+                }
             }
         } else {
             plan = .init(inputIndex: index, language: sourceLanguage)
@@ -887,7 +897,9 @@ final class AudioRenditionWriter {
             )
         case .bridge, .boost:
             if rendersHeights {
-                return APACSampleEntry.codecsString(channelCount: heightsLayout.channelCount)
+                // Apple's HLS authoring spec names no PCM format; `ipcm` is the sample entry's code.
+                return heightsOutput == .lpcm
+                    ? "ipcm" : APACSampleEntry.codecsString(channelCount: heightsLayout.channelCount)
             }
             // Whichever encoder the bridge negotiated — FLAC when the host
             // asked for lossless, else EAC3 where the build has it, AAC

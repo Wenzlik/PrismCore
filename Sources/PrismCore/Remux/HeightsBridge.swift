@@ -30,7 +30,8 @@ extension AudioBridge: RenditionEncoder {}
 /// TrueHD Atmos with its heights: the objects rendered to 7.1.4 by the Rust `TrueHDObjects`
 /// library (truehdd's decoder; the ETSI TS 103 448 room-coordinate panner, and the split of the
 /// stream's 7.1 presentation where the render meets metadata it does not place), encoded to
-/// Apple Positional Audio with `AVAudioConverter`, muxed as an `apac` track.
+/// Apple Positional Audio with `AVAudioConverter`, muxed as an `apac` track — or, with
+/// `HeightsOutput.lpcm`, muxed as they are, 24-bit linear PCM in an `ipcm` track.
 ///
 /// ## Why APAC
 ///
@@ -98,6 +99,7 @@ final class HeightsBridge: RenditionEncoder {
     static func bitRate(_ layout: HeightsLayout) -> Int { layout.channelCount * 256_000 }
 
     let layout: HeightsLayout
+    let output: HeightsOutput
     let channelCount: Int
 
     var onProgress: ((AudioBridgeProgress) -> Void)?
@@ -107,13 +109,12 @@ final class HeightsBridge: RenditionEncoder {
     private(set) var progress = AudioBridgeProgress()
 
     /// The `dapa` box the `apac` sample entry carries: the encoder's magic cookie as it is.
+    /// Empty for `.lpcm`, whose entry movenc writes itself.
     let magicCookie: Data
 
     private let sourceTimeBase: AVRational
-    private let encoder: AVAudioConverter
-    private let pcmFormat: AVAudioFormat
-    private let staging: AVAudioPCMBuffer
-    private let compressed: AVAudioCompressedBuffer
+    /// The APAC chain; nil for `.lpcm`, which muxes the renderer's samples as they are.
+    private let apac: (encoder: AVAudioConverter, staging: AVAudioPCMBuffer, compressed: AVAudioCompressedBuffer)?
     private let priming: Int64
     private var packet: UnsafeMutablePointer<AVPacket>?
 
@@ -189,7 +190,10 @@ final class HeightsBridge: RenditionEncoder {
         }
     }
 
-    init(codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, layout: HeightsLayout = .atmos7_1_4) throws {
+    init(
+        codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, layout: HeightsLayout = .atmos7_1_4,
+        output: HeightsOutput = .apac
+    ) throws {
         guard ObjectAudioRendering.rendererIsLinked else { throw Failure.notLinked }
         guard codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD else {
             throw Failure.sourceUnsupported("not TrueHD")
@@ -201,20 +205,25 @@ final class HeightsBridge: RenditionEncoder {
         }
         sourceTimeBase = timeBase
         self.layout = layout
+        self.output = output
         channelCount = layout.channelCount
-        let (encoder, pcmFormat) = try Self.makeEncoder(layout)
-        self.pcmFormat = pcmFormat
-        guard let cookie = encoder.magicCookie, !cookie.isEmpty,
-              let staging = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(Self.framesPerPacket))
-        else { throw Failure.encoderUnavailable }
-        self.encoder = encoder
-        self.staging = staging
-        magicCookie = cookie
-        priming = Int64(encoder.primeInfo.leadingFrames)
-        compressed = AVAudioCompressedBuffer(
-            format: encoder.outputFormat, packetCapacity: 16,
-            maximumPacketSize: max(encoder.maximumOutputPacketSize, 1)
-        )
+        if output == .lpcm {
+            apac = nil
+            magicCookie = Data()
+            priming = 0
+        } else {
+            let (encoder, pcmFormat) = try Self.makeEncoder(layout)
+            guard let cookie = encoder.magicCookie, !cookie.isEmpty,
+                  let staging = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(Self.framesPerPacket))
+            else { throw Failure.encoderUnavailable }
+            let compressed = AVAudioCompressedBuffer(
+                format: encoder.outputFormat, packetCapacity: 16,
+                maximumPacketSize: max(encoder.maximumOutputPacketSize, 1)
+            )
+            apac = (encoder, staging, compressed)
+            magicCookie = cookie
+            priming = Int64(encoder.primeInfo.leadingFrames)
+        }
         packet = av_packet_alloc()
         progress.encoderFrameSamples = Self.framesPerPacket
     }
@@ -228,15 +237,20 @@ final class HeightsBridge: RenditionEncoder {
 
     var isDrained: Bool { drained }
     var timeBase: AVRational { AVRational(num: 1, den: Self.sampleRate) }
-    var outputCodecName: String? { "apac" }
+    var outputCodecName: String? { output == .lpcm ? "ipcm" : "apac" }
     var outputChannelCount: Int? { channelCount }
 
     /// movenc has no Apple Positional Audio (libavformat's `apac` id is an unrelated codec), so
     /// the muxer is handed an ALAC stream — whose sample entry it builds from these parameters
     /// alone and whose packets it never parses — and the init segment's entry is replaced with
     /// the real one (`APACSampleEntry`). Fragments name no codec and need nothing.
+    /// `.lpcm` needs no stand-in: movenc writes the `ipcm` entry, its `pcmC` and its `chnl`.
     func configure(outputStream: UnsafeMutablePointer<AVStream>) throws {
-        try APACSampleEntry.configureStandIn(outputStream: outputStream, channelCount: channelCount)
+        if output == .lpcm {
+            try LPCMSampleEntry.configure(outputStream: outputStream, layout: layout)
+        } else {
+            try APACSampleEntry.configureStandIn(outputStream: outputStream, channelCount: channelCount)
+        }
     }
 
     // MARK: - Feeding
@@ -346,7 +360,7 @@ final class HeightsBridge: RenditionEncoder {
         load = (0, 0)
         bedRequest = nil
         closeSession()
-        encoder.reset()
+        apac?.encoder.reset()
         pending.removeAll(keepingCapacity: true)
         anchor = nil
         expectedPTS = nil
@@ -430,6 +444,8 @@ final class HeightsBridge: RenditionEncoder {
     /// to the packet length (at most 21 ms, after the last real sample).
     private func encodePending(final: Bool, emit: AudioBridge.Emit) throws {
         let packetSamples = Self.framesPerPacket * channelCount
+        guard let apac else { return try emitLPCM(final: final, emit: emit) }
+        let staging = apac.staging
         if final, !pending.isEmpty, pending.count % packetSamples != 0 {
             pending.append(contentsOf: repeatElement(0, count: packetSamples - pending.count % packetSamples))
         }
@@ -460,6 +476,7 @@ final class HeightsBridge: RenditionEncoder {
 
     /// `false` when the encoder failed. Only `emit` (the muxer) throws.
     private func convert(_ input: AVAudioPCMBuffer?, endOfStream: Bool, emit: AudioBridge.Emit) throws -> Bool {
+        guard let (encoder, _, compressed) = apac else { return true }
         var supplied = input == nil
         while true {
             compressed.packetCount = 0
@@ -485,7 +502,8 @@ final class HeightsBridge: RenditionEncoder {
     }
 
     private func emitPackets(_ emit: AudioBridge.Emit) throws {
-        guard let packet, let anchor, let descriptions = compressed.packetDescriptions else { return }
+        guard let packet, let anchor, let compressed = apac?.compressed,
+              let descriptions = compressed.packetDescriptions else { return }
         for index in 0..<Int(compressed.packetCount) {
             let description = descriptions[index]
             try FFmpegError.check(av_new_packet(packet, Int32(description.mDataByteSize)), "av_new_packet(apac)")
@@ -508,7 +526,41 @@ final class HeightsBridge: RenditionEncoder {
             progress.outputPackets += 1
         }
     }
+
+    // MARK: - LPCM
+
+    /// `.lpcm`: whole packets of the rendered layout straight to the muxer as 24-bit integer
+    /// PCM, and at the end the remainder as one short packet (nothing to pad: PCM has no frame
+    /// size). Stamped from the anchor by sample count with no priming: these are the source's
+    /// own samples.
+    private func emitLPCM(final: Bool, emit: AudioBridge.Emit) throws {
+        let packetSamples = Self.framesPerPacket * channelCount
+        var offset = 0
+        while pending.count - offset >= packetSamples || (final && pending.count > offset) {
+            let count = min(packetSamples, pending.count - offset)
+            let frames = count / channelCount
+            progress.resampledSamples += frames
+            if let packet, let anchor {
+                try FFmpegError.check(av_new_packet(packet, Int32(count * 3)), "av_new_packet(ipcm)")
+                defer { av_packet_unref(packet) }
+                pending.withUnsafeBufferPointer { all in
+                    LPCMSampleEntry.pack(UnsafeBufferPointer(rebasing: all[offset..<(offset + count)]), into: packet.pointee.data)
+                }
+                packet.pointee.pts = anchor + samplesIn
+                packet.pointee.dts = packet.pointee.pts
+                packet.pointee.duration = Int64(frames)
+                packet.pointee.flags |= AV_PKT_FLAG_KEY
+                packet.pointee.pos = -1
+                try emit(packet)
+                progress.outputPackets += 1
+            }
+            samplesIn += Int64(frames)
+            offset += count
+        }
+        pending.removeFirst(offset)
+    }
 }
+
 
 /// The heights rendition's shape, readable on any OS (the master is written before anything
 /// else knows whether the encoder will open).
@@ -624,5 +676,66 @@ enum APACSampleEntry {
         let tiers = [2, 6, 8, 12, 24, 32, 64]
         let level = tiers.firstIndex { channelCount <= $0 } ?? tiers.count - 1
         return String(format: "apac.31.%02d", level)
+    }
+}
+
+/// The heights rendition as linear PCM (`HeightsOutput.lpcm`): what the muxer is told, so that
+/// movenc writes the ISO/IEC 23003-5 `ipcm` entry with its `pcmC` (24 bits, little-endian) and a
+/// `chnl` box of explicit ISO/IEC 23091-3 speaker positions in the channel order the renderer
+/// emits — the order of the layout's `kAudioChannelLayoutTag_Atmos_*`.
+enum LPCMSampleEntry {
+
+    /// The layout's channels, in the renderer's (Core Audio's) order, as FFmpeg channels — the
+    /// ones movenc writes as the ISO/IEC 23091-3 positions CoreMedia reads back as Core Audio's
+    /// labels (measured on macOS 27): FL/FR/FC/LFE → L R C LFE (positions 0–3), SL/SR → Ls Rs
+    /// (4, 5), BL/BR → Rls Rrs (8, 9), TFL/TFR → Vhl Vhr (17, 18), TBL/TBR → Ltr Rtr (20, 21),
+    /// TSL/TSR → Ltm Rtm (23, 24).
+    static func channels(_ layout: HeightsLayout) -> [AVChannel] {
+        let front: [AVChannel] = [AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY,
+                                  AV_CHAN_SIDE_LEFT, AV_CHAN_SIDE_RIGHT]
+        let rear: [AVChannel] = [AV_CHAN_BACK_LEFT, AV_CHAN_BACK_RIGHT]
+        let middle: [AVChannel] = [AV_CHAN_TOP_SIDE_LEFT, AV_CHAN_TOP_SIDE_RIGHT]
+        let four: [AVChannel] = [AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT, AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT]
+        switch layout {
+        case .atmos5_1_2: return front + middle            // L R C LFE Ls Rs Ltm Rtm
+        case .atmos5_1_4: return front + four              // L R C LFE Ls Rs Vhl Vhr Ltr Rtr
+        case .atmos7_1_2: return front + rear + middle     // L R C LFE Ls Rs Rls Rrs Ltm Rtm
+        case .atmos7_1_4: return front + rear + four       // L R C LFE Ls Rs Rls Rrs Vhl Vhr Ltr Rtr
+        }
+    }
+
+    static func configure(outputStream: UnsafeMutablePointer<AVStream>, layout: HeightsLayout) throws {
+        let par = outputStream.pointee.codecpar!
+        par.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        par.pointee.codec_id = AV_CODEC_ID_PCM_S24LE
+        par.pointee.codec_tag = 0
+        par.pointee.sample_rate = HeightsBridgeConstants.sampleRate
+        par.pointee.bits_per_coded_sample = 24
+        par.pointee.bits_per_raw_sample = 24
+        let channels = channels(layout)
+        par.pointee.block_align = Int32(channels.count * 3)
+        par.pointee.bit_rate = Int64(channels.count) * 24 * Int64(HeightsBridgeConstants.sampleRate)
+        // A custom-order layout: the native order (by mask bit) would put the rear surrounds
+        // before the sides and lose the renderer's order.
+        av_channel_layout_uninit(&par.pointee.ch_layout)
+        try FFmpegError.check(
+            av_channel_layout_custom_init(&par.pointee.ch_layout, Int32(channels.count)), "av_channel_layout_custom_init"
+        )
+        for (index, channel) in channels.enumerated() {
+            par.pointee.ch_layout.u.map[index].id = channel
+        }
+        outputStream.pointee.time_base = AVRational(num: 1, den: HeightsBridgeConstants.sampleRate)
+    }
+
+    /// Interleaved float samples → 24-bit little-endian integers, clipped to full scale (+1.0
+    /// is one step under it; a NaN, which would trap the conversion, is silence).
+    static func pack(_ samples: UnsafeBufferPointer<Float>, into bytes: UnsafeMutablePointer<UInt8>) {
+        for (index, sample) in samples.enumerated() {
+            let scaled = sample.isNaN ? 0 : (Double(max(-1, min(1, sample))) * 8_388_608).rounded()
+            let value = Int32(min(scaled, 8_388_607))
+            bytes[index * 3] = UInt8(truncatingIfNeeded: value)
+            bytes[index * 3 + 1] = UInt8(truncatingIfNeeded: value >> 8)
+            bytes[index * 3 + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        }
     }
 }

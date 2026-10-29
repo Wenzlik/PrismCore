@@ -344,6 +344,8 @@ final class HLSRemuxer: @unchecked Sendable {
     private let objectAudioRendering: ObjectAudioRendering
     /// The loudspeaker layout heights render into (`PrismCoreSession.Options.heightsLayout`).
     private let heightsLayout: HeightsLayout
+    /// How heights are delivered (`PrismCoreSession.Options.heightsOutput`).
+    private let heightsOutput: HeightsOutput
     private let allowsAtmosOutput: Bool
     /// Cross-session keyframe map (issue #34): consulted before the plan's
     /// index-load seek, fed by the sequential producer of a source whose own
@@ -707,6 +709,7 @@ final class HLSRemuxer: @unchecked Sendable {
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
+        heightsOutput: HeightsOutput = .apac,
         probed: ProbedSource? = nil,
         input: PrismCoreInputFactory? = nil,
         keyframeCacheDirectory: URL? = nil,
@@ -746,6 +749,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.objectAudioRendering = objectAudioRendering
         self.allowsAtmosOutput = allowsAtmosOutput
         self.heightsLayout = heightsLayout
+        self.heightsOutput = heightsOutput
     }
 
     func cancel() {
@@ -1010,7 +1014,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // (`TrueHDAtmosScout`). Only when heights can engage at all; reads only, the head
         // rewind below happens either way.
         var trueHDAtmosEvidence: [Int: Bool] = [:]
-        if objectAudioRendering == .heights, allowsAtmosOutput, heightsLayout.isAvailable,
+        if objectAudioRendering == .heights, allowsAtmosOutput, heightsOutput.isAvailable(for: heightsLayout),
            let pb = input.pointee.pb, pb.pointee.seekable != 0 {
             // A `true` claim needs no asking (see `TrueHDAtmosScout`); only the silent ones.
             let unclaimed = Set(info.audioTracks.filter { $0.codecName == "truehd" && !$0.isObjectAudio }.map(\.streamIndex))
@@ -1352,9 +1356,10 @@ final class HLSRemuxer: @unchecked Sendable {
                     rendersHeights: Self.rendersHeights(
                         track: track, carriesObjects: trueHDAtmosEvidence[track.streamIndex] ?? track.isObjectAudio,
                         mode: route.mode, rendering: objectAudioRendering,
-                        allowsAtmosOutput: allowsAtmosOutput, available: heightsLayout.isAvailable
+                        allowsAtmosOutput: allowsAtmosOutput, available: heightsOutput.isAvailable(for: heightsLayout)
                     ),
-                    heightsLayout: heightsLayout
+                    heightsLayout: heightsLayout,
+                    heightsOutput: heightsOutput
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
@@ -1501,6 +1506,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     // selectable; the preference moves the flag, not the menu.
                     rendition.rendition(groupID: Self.audioGroupID, isDefault: ordinal == 0)
                 }
+                // LPCM heights outweigh the TrueHD they replace (13.8 Mbit/s for 7.1.4) and the
+                // source's own rate cannot know it: add the largest in full. Over-stating only
+                // grows AVPlayer's buffer (see `sourceBandwidth`).
+                variant.bandwidth += renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
+                    .map { $0.heightsLayout.channelCount * 24 * Int(HeightsBridgeConstants.sampleRate) }.max() ?? 0
                 // The WebVTT renditions `prepare` set up above. Declaring them
                 // here is what makes them exist for AVPlayer: the segments are
                 // produced either way, but only the master's SUBTITLES group
