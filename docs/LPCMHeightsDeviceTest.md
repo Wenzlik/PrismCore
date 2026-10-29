@@ -12,8 +12,9 @@ default, and AirPlay stays on it.
   allowed.
 - A Mac on the same network, this branch built
   (`swift build -c release --product prismcore-cli`).
-- A TrueHD **Atmos** source, cut to a minute
-  (`ffmpeg -ss 600 -t 60 -i film.mkv -map 0 -c copy clip.mkv`). A channel-check
+- A TrueHD **Atmos** source, cut to a minute with the Atmos track as its only
+  audio, so the player picks it by default
+  (`ffmpeg -ss 600 -t 60 -i film.mkv -map 0:v:0 -map 0:a:N -c copy clip.mkv`, N = the Atmos track). A channel-check
   clip with overhead content makes the result unambiguous. The test fixtures
   in `Tests/` are TrueHD without objects and produce no `ipcm` rendition.
 - A tvOS app that plays an HLS URL with AVPlayer (a minimal
@@ -23,8 +24,8 @@ default, and AirPlay stays on it.
 
 1. Generate the four layouts:
    `Scripts/lpcm-heights-hls.sh clip.mkv out`
-   Each prints `5.1.2: out/5.1.2/master.m3u8` (… 5.1.4, 7.1.2, 7.1.4); its
-   audio playlist must carry `CODECS="…ipcm"`. A line on stderr means that
+   Each prints `5.1.2: out/5.1.2/master.m3u8` (… 5.1.4, 7.1.2, 7.1.4) once its
+   audio init segment carries `ipcm`. A line on stderr means that
    layout produced no `ipcm` rendition; its `out/<layout>.report.json` says why.
 2. Serve the tree: `cd out && python3 -m http.server 8000`.
 3. On the Apple TV open `http://<mac-ip>:8000/<layout>/master.m3u8` for each

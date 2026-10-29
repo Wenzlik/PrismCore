@@ -1506,6 +1506,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     // selectable; the preference moves the flag, not the menu.
                     rendition.rendition(groupID: Self.audioGroupID, isDefault: ordinal == 0)
                 }
+                // LPCM heights outweigh the TrueHD they replace (13.8 Mbit/s for 7.1.4) and the
+                // source's own rate cannot know it: add the largest in full. Over-stating only
+                // grows AVPlayer's buffer (see `sourceBandwidth`).
+                variant.bandwidth += renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
+                    .map { $0.heightsLayout.channelCount * 24 * Int(HeightsBridgeConstants.sampleRate) }.max() ?? 0
                 // The WebVTT renditions `prepare` set up above. Declaring them
                 // here is what makes them exist for AVPlayer: the segments are
                 // produced either way, but only the master's SUBTITLES group

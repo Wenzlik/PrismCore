@@ -6,7 +6,8 @@
 #
 #   Scripts/lpcm-heights-hls.sh SOURCE.mkv [OUT]   (OUT defaults to ./lpcm-heights-hls)
 #
-# Use a short clip (a minute: `ffmpeg -ss 600 -t 60 -i film.mkv -map 0 -c copy clip.mkv`):
+# Use a short clip with the Atmos track as its only audio, so it is the default rendition
+# (a minute: `ffmpeg -ss 600 -t 60 -i film.mkv -map 0:v:0 -map 0:a:N -c copy clip.mkv`):
 # every segment is produced, and the copy waits for each playlist's ENDLIST.
 set -euo pipefail
 source=${1:?usage: $0 SOURCE [OUT]}
@@ -40,6 +41,7 @@ for layout in 5.1.2 5.1.4 7.1.2 7.1.4; do
     "$cli" serve "$source" --heights --heights-output lpcm --heights-layout "$layout" \
         --report "$out/$layout.report.json" >"$log" 2>&1 </dev/null &
     pid=$!
+    trap 'kill -INT $pid 2>/dev/null' EXIT
     until url=$(grep -o 'serving: http[^ ]*' "$log" | cut -c10-); [ -n "$url" ]; do
         kill -0 $pid 2>/dev/null || { cat "$log"; exit 1; }
         sleep 0.5
@@ -47,7 +49,9 @@ for layout in 5.1.2 5.1.4 7.1.2 7.1.4; do
     rm -rf "${out:?}/$layout"
     mirror "${url%/*}" "${url##*/}" "$out/$layout"
     kill -INT $pid; wait $pid || true
-    grep -q 'CODECS="[^"]*ipcm' "$out/$layout/master.m3u8" \
+    trap - EXIT
+    # The rendition's own init segment, not the master: CODECS names only the default track.
+    grep -rlq --include=init.mp4 ipcm "$out/$layout" \
         && echo "$layout: $out/$layout/master.m3u8" \
         || echo "$layout: no ipcm rendition (not TrueHD Atmos? see $out/$layout.report.json)" >&2
     rm -f "$log"

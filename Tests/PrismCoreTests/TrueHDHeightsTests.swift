@@ -610,6 +610,17 @@ struct TrueHDHeightsTests {
         }
         #expect(session.audioTrackDeliveries.first?.objectAudio == .renderedHeights)
         await session.stop()
+
+        // The same source as LPCM: `ipcm`, and a BANDWIDTH that carries its 13.8 Mbit/s.
+        let lpcm = try PrismCoreSession(
+            url: source, display: .init(isHDRReady: false, isDolbyVisionCapable: false),
+            objectAudioRendering: .heights, allowsAtmosOutput: true, heightsOutput: .lpcm
+        )
+        let lpcmMaster = try String(contentsOf: try await lpcm.start(), encoding: .utf8)
+        await lpcm.stop()
+        #expect(lpcmMaster.contains("ipcm"))
+        let bandwidth = lpcmMaster.firstMatch(of: /BANDWIDTH=(\d+)/).flatMap { Int($0.1) } ?? 0
+        #expect(bandwidth > 13_824_000, "\(bandwidth)")
     }
 
     /// Throughput of the whole heights chain (decode, render, limit, APAC encode, packetize) on
