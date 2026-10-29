@@ -8,6 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.9.1] — 2026-10-29
+
+Standard-rate video is served on its exact frame grid — 23.976 fps from a
+Matroska's millisecond timestamps leaves as even 1001-tick frames instead of
+41/42 ms steps — and the display criteria ask for the source's exact rate
+(24 Hz for 24.000 fps, 23.976 Hz for 23.976). No public API change.
+Source-compatible.
+
 ### Changed
 
 - **Standard-rate video is served on its exact frame grid.** Matroska stores
@@ -3761,7 +3769,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.9.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.9.1...HEAD
+[3.9.1]: https://github.com/Wenzlik/PrismCore/compare/3.9.0...3.9.1
 [3.9.0]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...3.9.0
 [3.8.7]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...3.8.7
 [3.8.6]: https://github.com/Wenzlik/PrismCore/compare/3.8.5...3.8.6
