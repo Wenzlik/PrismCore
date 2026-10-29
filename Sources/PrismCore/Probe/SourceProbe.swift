@@ -1143,13 +1143,19 @@ public enum SourceProbe {
         // time, so a nil here has to be treated as "do not serve a master".
         let average = stream.pointee.avg_frame_rate
         let real = stream.pointee.r_frame_rate
+        // A standard rate is reported as its exact rational: this is what the
+        // display criteria ask the panel for, and a measured 23.99 must ask for
+        // 24 Hz, never whichever mode a rounded float happens to sit closest to.
+        let standard = StandardFrameRate.detect(
+            average: average, real: real, tolerance: StandardFrameRate.displayTolerance
+        )?.value
         let frameRate: Double?
         let frameRateSource: VideoTrackInfo.FrameRateSource
         if average.num > 0, average.den > 0 {
-            frameRate = av_q2d(average)
+            frameRate = standard ?? av_q2d(average)
             frameRateSource = .averageFrameRate
         } else if real.num > 0, real.den > 0 {
-            frameRate = av_q2d(real)
+            frameRate = standard ?? av_q2d(real)
             frameRateSource = .realFrameRate
         } else {
             frameRate = nil

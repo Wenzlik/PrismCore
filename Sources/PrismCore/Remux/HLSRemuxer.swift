@@ -944,6 +944,10 @@ final class HLSRemuxer: @unchecked Sendable {
             throw Failure.videoCodecNotNativelyPlayable(videoTrack.codecName, streamIndex: videoTrack.streamIndex)
         }
         let videoIndex = Int32(videoTrack.streamIndex)
+        // Millisecond (or 90 kHz) timestamps of a standard-rate stream, served on
+        // that rate's exact frame grid (`FrameGrid`). Fixed for the session, so
+        // every writer — head and re-anchored restarts — maps a packet alike.
+        let videoGrid = FrameGrid(stream: input.pointee.streams[Int(videoIndex)]!)
 
         // Closed captions ride inside the video, so the only way to know they
         // exist is to look at packets — and it has to happen now, because the
@@ -1305,6 +1309,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     // sent a `dvvC` box, whatever the manifest says.
                     stripDolbyVisionRecord: !displayIsDolbyVisionCapable
                 )
+                // movenc takes the track timescale from the stream's time base.
+                if let videoGrid { outStream.pointee.time_base = videoGrid.outputTimeBase }
             }
         ]
 
@@ -2344,7 +2350,7 @@ final class HLSRemuxer: @unchecked Sendable {
                         }
                     }
                     if let mapped = streamMap[streamIndex] {
-                        try write(packet, to: mapped, from: sourceTimeBase, writer: writer)
+                        try write(packet, to: mapped, from: sourceTimeBase, writer: writer, grid: videoGrid)
                     }
                     continue
                 }
@@ -2553,11 +2559,16 @@ final class HLSRemuxer: @unchecked Sendable {
         _ packet: UnsafeMutablePointer<AVPacket>,
         to outputIndex: Int32,
         from sourceTimeBase: AVRational,
-        writer: FMP4SegmentWriter
+        writer: FMP4SegmentWriter,
+        grid: FrameGrid? = nil
     ) throws {
         guard let output = writer.context else { return }
         let outStream = output.pointee.streams[Int(outputIndex)]!
-        av_packet_rescale_ts(packet, sourceTimeBase, outStream.pointee.time_base)
+        if let grid {
+            grid.apply(to: packet)
+        } else {
+            av_packet_rescale_ts(packet, sourceTimeBase, outStream.pointee.time_base)
+        }
         packet.pointee.stream_index = outputIndex
         packet.pointee.pos = -1
         try writer.write(packet)

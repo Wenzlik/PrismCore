@@ -8,6 +8,37 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- **Standard-rate video is served on its exact frame grid.** Matroska stores
+  milliseconds, so 23.976 fps arrived as 41/42 ms steps and was served as
+  such (at 90 kHz), and no cadence at 59.94 Hz could be even. A video stream
+  whose `avg_frame_rate` (a Matroska DefaultDuration lands there) or, unset,
+  `r_frame_rate` is 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60 within 1e-4 is
+  now muxed in a timescale where a frame is a whole number of ticks (24000,
+  30000 or 60000 with 1001 a frame for the NTSC rates; 90 kHz, as before, for
+  the others), and every PTS, DTS and duration within one source tick of a
+  frame becomes that frame's exact time. The grid is anchored on the stream's
+  start time and the mapping is a pure function of the timestamp, so a
+  re-anchored muxer maps every packet exactly as the head did; nothing moves
+  further than one source tick, so audio cannot drift against it. Segment
+  cuts, the plan, the keyframe cache and `#EXTINF` stay on the source's
+  ticks. Non-standard and variable rates, and an `r_frame_rate` naming a
+  different standard rate than the average, are served as before.
+  Measured on a 23.976 fps Matroska with three B-frames (new fixture
+  `grid_23976_bframes.mkv`): served at timescale 24000, every frame 1001
+  ticks; before, 90 kHz with 3690/3780-tick frames.
+
+### Fixed
+
+- **The display criteria ask for the source's exact rate.** A standard rate is
+  reported (`VideoTrackInfo.frameRate`, and so the criteria and the master's
+  `FRAME-RATE`) as its exact rational — 24000/1001, not a measured 23.98 —
+  and an average measured from timestamps (no DefaultDuration) within 4.5e-4
+  of one standard rate, under half the 24 / 23.976 gap, is reported as that
+  rate: 24.000 fps content asks for 24 Hz and 23.976 for 23.976 Hz. Anything
+  else is reported as measured, as before.
+
 ## [3.9.0] — 2026-10-26
 
 TrueHD Atmos heights are rendered from the objects again; the 3.8 split of the
