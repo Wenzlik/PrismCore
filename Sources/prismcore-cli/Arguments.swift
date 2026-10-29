@@ -42,6 +42,10 @@ struct SourceOptions: Sendable {
     var bridgedAudio = BridgedAudioFormat.compressed
     /// `--heights`: render TrueHD Atmos heights as if the host allowed Atmos output.
     var heights = false
+    /// `--heights-layout`: the layout `--heights` renders into (default 7.1.4).
+    var heightsLayout = HeightsLayout.atmos7_1_4
+    /// `--heights-output`: how `--heights` delivers it (default APAC).
+    var heightsOutput = HeightsOutput.apac
     /// Everything after a bare `--`, verbatim (validate passes it on).
     var passthrough: [String] = []
 }
@@ -93,6 +97,18 @@ struct ArgumentReader {
                 options.bridgedAudio = format
             case "--heights":
                 options.heights = true
+            case "--heights-layout":
+                let raw = try value(for: argument)
+                guard let layout = HeightsLayout(rawValue: raw) else {
+                    throw usage("--heights-layout takes 5.1.2, 5.1.4, 7.1.2 or 7.1.4, not \"\(raw)\"")
+                }
+                options.heightsLayout = layout
+            case "--heights-output":
+                let raw = try value(for: argument)
+                guard let output = HeightsOutput(rawValue: raw) else {
+                    throw usage("--heights-output takes apac or lpcm, not \"\(raw)\"")
+                }
+                options.heightsOutput = output
             default:
                 if try extra(argument, &self) { continue }
                 if argument.hasPrefix("-"), argument.count > 1 {

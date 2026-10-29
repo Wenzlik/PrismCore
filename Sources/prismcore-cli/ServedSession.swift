@@ -58,7 +58,9 @@ func withServedSession<T>(
         coordinatedHTTP: options.coordinatedHTTP,
         bridgedAudio: options.bridgedAudio,
         objectAudioRendering: options.heights ? .heights : .off,
-        allowsAtmosOutput: options.heights
+        allowsAtmosOutput: options.heights,
+        heightsLayout: options.heightsLayout,
+        heightsOutput: options.heightsOutput
     )
     await beforeStart(session)
     func finish() async {
