@@ -383,6 +383,134 @@ struct TrueHDHeightsTests {
         }
     }
 
+    /// ISO/IEC 23091-3 speaker positions of each layout, in Core Audio's `Atmos_*` order, and
+    /// the labels CoreMedia reads them back as.
+    private static let lpcmPositions: [HeightsLayout: [UInt8]] = [
+        .atmos5_1_2: [0, 1, 2, 3, 4, 5, 23, 24],
+        .atmos5_1_4: [0, 1, 2, 3, 4, 5, 17, 18, 20, 21],
+        .atmos7_1_2: [0, 1, 2, 3, 4, 5, 8, 9, 23, 24],
+        .atmos7_1_4: [0, 1, 2, 3, 4, 5, 8, 9, 17, 18, 20, 21],
+    ]
+
+    @Test("Rendered to LPCM in each layout: ipcm + pcmC + chnl, Core Audio's channel order, decoded by AVFoundation on time",
+          arguments: HeightsLayout.allCases)
+    func lpcmRoundTrip(layout: HeightsLayout) async throws {
+        guard HeightsOutput.lpcm.isAvailable(for: layout) else { return }
+        let parent = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let (writer, _) = try renderFixture(into: parent, layout: layout, output: .lpcm)
+        #expect(writer.rendersHeights)
+        let rendition = writer.rendition(groupID: "aud", isDefault: true)
+        let channels = layout.channelCount
+        #expect(rendition.codecString == "ipcm")
+        #expect(rendition.channels == "\(channels)")
+
+        let directory = parent.appendingPathComponent("audio0")
+        let initSegment = try Data(contentsOf: directory.appendingPathComponent("init.mp4"))
+        let bytes = [UInt8](initSegment)
+        #expect(ISOBMFFPatch.locate("apac", in: initSegment) == nil && ISOBMFFPatch.locate("alac", in: initSegment) == nil)
+        // ipcm: AudioSampleEntry with the layout's channel count.
+        let entry = try #require(ISOBMFFPatch.locate("ipcm", in: initSegment))
+        let channelCount = Int(bytes[entry.boxStart + 8 + 16]) << 8 | Int(bytes[entry.boxStart + 8 + 17])
+        #expect(channelCount == channels)
+        // pcmC (ISO/IEC 23003-5): version/flags, format_flags 1 = little-endian, 24 bits.
+        let pcmC = try #require(initSegment.range(of: Data("pcmC".utf8)))
+        #expect(Array(bytes[pcmC.upperBound..<(pcmC.upperBound + 6)]) == [0, 0, 0, 0, 1, 24])
+        // chnl (ISO/IEC 14496-12): stream_structure 1 (channels), definedLayout 0, then one
+        // explicit speaker position per channel in Core Audio's order.
+        let chnl = try #require(initSegment.range(of: Data("chnl".utf8)))
+        let size = Int(bytes[chnl.lowerBound - 2]) << 8 | Int(bytes[chnl.lowerBound - 1])
+        #expect(size == 4 + 4 + 4 + 2 + channels)
+        #expect(Array(bytes[chnl.upperBound..<(chnl.upperBound + 6)]) == [0, 0, 0, 0, 1, 0])
+        let positions = Array(bytes[(chnl.upperBound + 6)..<(chnl.upperBound + 6 + channels)])
+        #expect(positions == Self.lpcmPositions[layout])
+
+        var file = initSegment
+        for index in 0... {
+            let url = directory.appendingPathComponent(String(format: "seg%05d.m4s", index))
+            guard let segment = try? Data(contentsOf: url) else { break }
+            file.append(segment)
+        }
+        let joined = parent.appendingPathComponent("joined.mp4")
+        try file.write(to: joined)
+
+        // CoreMedia reads the chnl back as the layout's own `kAudioChannelLayoutTag_Atmos_*`
+        // (measured on macOS 27; a list of the same labels in the same order would do too).
+        let asset = AVURLAsset(url: joined)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let description = try #require(try await track.load(.formatDescriptions).first)
+        let format = try #require(CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee)
+        #expect(format.mFormatID == kAudioFormatLinearPCM && format.mBitsPerChannel == 24)
+        #expect(Int(format.mChannelsPerFrame) == channels && format.mSampleRate == 48_000)
+        var layoutSize = 0
+        let served = try #require(CMAudioFormatDescriptionGetChannelLayout(description, sizeOut: &layoutSize))
+        #expect(served.pointee.mChannelLayoutTag == layout.layoutTag || Self.labels(served) == Self.atmosLabels[layout],
+                "\(layout): tag \(served.pointee.mChannelLayoutTag >> 16)/\(served.pointee.mChannelLayoutTag & 0xFFFF) labels \(Self.labels(served))")
+
+        // Every source sample, from source time 0, each bed channel on its speaker.
+        let (pcm, firstTime) = try await decode(joined, layout: layout)
+        let frames = pcm.count / channels
+        #expect(abs(frames - 144_000) <= 1024, "\(frames) frames")
+        let onset = (0..<frames).first { abs(pcm[$0 * channels]) > 0.01 } ?? -1
+        #expect(abs(firstTime + Double(onset) / 48_000) < 0.002, "first sample of L at \(firstTime) + \(onset)")
+        let tones: [Int: Double] = [0: 330, 1: 440, 2: 220, 3: 55, 4: 550, 5: 660]
+        let window = 24_000..<120_000
+        for channel in 0..<channels {
+            let energy = window.reduce(0.0) { $0 + Double(pcm[$1 * channels + channel] * pcm[$1 * channels + channel]) }
+            guard let tone = tones[channel] else {
+                #expect(energy < 1e-3, "channel \(channel) should be silent, energy \(energy)")
+                continue
+            }
+            let own = goertzel(pcm, channels: channels, channel: channel, frequency: tone, window: window)
+            for (other, frequency) in tones where other != channel {
+                let leak = goertzel(pcm, channels: channels, channel: channel, frequency: frequency, window: window)
+                #expect(own > 30 * leak, "channel \(channel): \(tone) Hz \(own) vs \(frequency) Hz \(leak)")
+            }
+        }
+    }
+
+    @Test("LPCM samples are packed as 24-bit little-endian integers, clipped at full scale")
+    func lpcmPacking() {
+        let samples: [Float] = [0, 0.5, -0.5, 1, -1, 2, -2, 1 / 8_388_608, .nan]
+        var bytes = [UInt8](repeating: 0xAA, count: samples.count * 3)
+        samples.withUnsafeBufferPointer { LPCMSampleEntry.pack($0, into: &bytes) }
+        let values = stride(from: 0, to: bytes.count, by: 3).map {
+            Int32(bitPattern: UInt32(bytes[$0]) << 8 | UInt32(bytes[$0 + 1]) << 16 | UInt32(bytes[$0 + 2]) << 24) >> 8
+        }
+        #expect(values == [0, 4_194_304, -4_194_304, 8_388_607, -8_388_608, 8_388_607, -8_388_608, 1, 0])
+        #expect(Array(bytes[3..<6]) == [0x00, 0x00, 0x40], "little-endian")
+    }
+
+    @Test("LPCM needs no encoder, and its bitrate is 48 kHz x 24 bits a channel")
+    func lpcmAvailability() {
+        for layout in HeightsLayout.allCases {
+            #expect(HeightsOutput.apac.isAvailable(for: layout) == layout.isAvailable)
+            #expect(HeightsOutput.lpcm.isAvailable(for: layout) == ObjectAudioRendering.rendererIsLinked)
+        }
+        #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true, layout: .atmos7_1_4, output: .lpcm)
+            .hasPrefix("heights lpcm"))
+        // 12 x 24 x 48 000 = 13.824 Mbit/s.
+        #expect(HeightsLayout.atmos7_1_4.channelCount * 24 * 48_000 == 13_824_000)
+    }
+
+    private static func labels(_ layout: UnsafePointer<AudioChannelLayout>) -> [AudioChannelLabel] {
+        let count = Int(layout.pointee.mNumberChannelDescriptions)
+        let offset = MemoryLayout<AudioChannelLayout>.offset(of: \AudioChannelLayout.mChannelDescriptions)!
+        let descriptions = (UnsafeRawPointer(layout) + offset).assumingMemoryBound(to: AudioChannelDescription.self)
+        return (0..<count).map { descriptions[$0].mChannelLabel }
+    }
+
+    /// Each layout's labels as `CoreAudioBaseTypes.h` lists them for its `Atmos_*` tag.
+    private static let atmosLabels: [HeightsLayout: [AudioChannelLabel]] = {
+        let bed = [kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center, kAudioChannelLabel_LFEScreen,
+                   kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround]
+        let rear = [kAudioChannelLabel_RearSurroundLeft, kAudioChannelLabel_RearSurroundRight]
+        let middle = [kAudioChannelLabel_LeftTopMiddle, kAudioChannelLabel_RightTopMiddle]
+        let four = [kAudioChannelLabel_VerticalHeightLeft, kAudioChannelLabel_VerticalHeightRight,
+                    kAudioChannelLabel_LeftTopRear, kAudioChannelLabel_RightTopRear]
+        return [.atmos5_1_2: bed + middle, .atmos5_1_4: bed + four, .atmos7_1_2: bed + rear + middle, .atmos7_1_4: bed + rear + four]
+    }()
+
     @Test("After a seek the renderer starts at a major sync and stamps from it")
     func seekStartsAtAMajorSync() throws {
         guard #available(macOS 26.0, *), ObjectAudioRendering.isAvailable else { return }
@@ -612,13 +740,13 @@ struct TrueHDHeightsTests {
 
     /// The tones fixture's TrueHD through a heights rendition, cut every second.
     private func renderFixture(
-        into parent: URL, layout: HeightsLayout = .atmos7_1_4
+        into parent: URL, layout: HeightsLayout = .atmos7_1_4, output: HeightsOutput = .apac
     ) throws -> (AudioRenditionWriter, [ObjectAudioDelivery]) {
         let (context, close) = try open("h264_truehd51_tones_3s.mkv")
         defer { close() }
         let writer = AudioRenditionWriter(
             route: .init(index: 1, mode: .bridge), track: Self.atmosTrack, ordinal: 0, parent: parent, rendersHeights: true,
-            heightsLayout: layout
+            heightsLayout: layout, heightsOutput: output
         )
         var deliveries: [ObjectAudioDelivery] = []
         writer.onObjectAudio = { delivery, _ in deliveries.append(delivery) }

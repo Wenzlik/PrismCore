@@ -317,7 +317,8 @@ let session = try PrismCoreSession(
     bridgedAudio: .lossless,                   // what every other bridged track gets
     objectAudioRendering: .heights,            // default .off
     allowsAtmosOutput: userAllowsDolbyAtmos,   // the host's word that the route plays Atmos
-    heightsLayout: .atmos7_1_4                 // default; .atmos7_1_2, .atmos5_1_4, .atmos5_1_2
+    heightsLayout: .atmos7_1_4,                // default; .atmos7_1_2, .atmos5_1_4, .atmos5_1_2
+    heightsOutput: .apac                       // default; .lpcm for HDMI (see below)
 )
 // after start(): audioTrackDeliveries[…].objectAudio == .renderedHeights
 ```
@@ -392,6 +393,26 @@ DTS:X) is untouched.
 - **Muxing.** movenc has no APAC, so the rendition is muxed as an ALAC
   stand-in and the init segment's sample entry is replaced by the real
   `apac` + `dapa` one (`APACSampleEntry`, over `ISOBMFFPatch`).
+- **Lossless output (`heightsOutput: .lpcm`, additive; `.apac` stays the
+  default).** The rendered layout as 24-bit linear PCM, muxed by movenc as an
+  ISO/IEC 23003-5 `ipcm` sample entry with `pcmC` (24 bits, little-endian) and
+  a `chnl` box (ISO/IEC 14496-12) of explicit ISO/IEC 23091-3 speaker
+  positions in the order of the layout's `kAudioChannelLayoutTag_Atmos_*` —
+  which CoreMedia reads back as exactly that tag (macOS 27, all four
+  layouts). `CODECS="ipcm"`: Apple's HLS authoring spec lists no PCM format,
+  so the sample entry's own code is the only value there is. No priming, no
+  encoder: 48 kHz × 24 bits × channels — 9.2 Mbit/s for 5.1.2, 11.5 for
+  5.1.4 and 7.1.2, **13.8 Mbit/s for 7.1.4**. Meant for HDMI and other local
+  outputs; keep `.apac` for AirPlay. **The host decides**: PrismCore cannot
+  reliably tell the route. **Playback is not verified anywhere.** Measured on
+  macOS 27 (Mac mini, stereo output): AVFoundation opens and decodes every
+  layout's `ipcm` rendition with each channel in place, but AVPlayer refuses
+  LPCM whose layout has height channels (`'fmt?'` — 5.1.2 at 8 channels,
+  while the same 8 channels described as 7.1 play) and anything above 8
+  channels, in HLS, `.mp4` and `.caf` alike; 32-bit float (`fpcm`) changes
+  nothing. HDMI carries at most 8 channels of LPCM; whether tvOS passes such
+  a track to an AV receiver (as Dolby MAT) is **not verified on a device** —
+  it needs an Apple TV and an AVR. Until then `.lpcm` is for that test.
 - **Seeking.** Decoding restarts at the first major sync after the demanded
   position (at most 107 ms later), the encoder is reset, and the timeline
   is re-anchored on that access unit — the same re-anchor every bridged

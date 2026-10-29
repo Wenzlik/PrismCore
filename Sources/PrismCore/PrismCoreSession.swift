@@ -349,6 +349,9 @@ public actor PrismCoreSession {
         /// The loudspeaker layout `.heights` renders into: 7.1.4 (the default),
         /// 7.1.2, 5.1.4 or 5.1.2. See the initializer's doc.
         public var heightsLayout: HeightsLayout = .atmos7_1_4
+        /// How `.heights` delivers the layout: `.apac` (the default) or `.lpcm`. See the
+        /// initializer's doc.
+        public var heightsOutput: HeightsOutput = .apac
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -685,7 +688,8 @@ public actor PrismCoreSession {
         bridgedAudio: BridgedAudioFormat = .compressed,
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
-        heightsLayout: HeightsLayout = .atmos7_1_4
+        heightsLayout: HeightsLayout = .atmos7_1_4,
+        heightsOutput: HeightsOutput = .apac
     ) throws {
         try self.init(
             url: url,
@@ -714,7 +718,8 @@ public actor PrismCoreSession {
             bridgedAudio: bridgedAudio,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
-            heightsLayout: heightsLayout
+            heightsLayout: heightsLayout,
+            heightsOutput: heightsOutput
         )
     }
 
@@ -840,6 +845,14 @@ public actor PrismCoreSession {
     ///   rather than folded down from 7.1.4. A layout this OS's APAC encoder
     ///   does not take (`HeightsLayout.isAvailable`) keeps the track on
     ///   `bridgedAudio`, as an unavailable `.heights` does.
+    /// - Parameter heightsOutput: how `.heights` delivers the layout. `.apac`
+    ///   (the default, as before) or `.lpcm`: the rendered layout lossless,
+    ///   24-bit PCM in an `ipcm` track (`CODECS` `ipcm`, 13.8 Mbit/s for
+    ///   7.1.4), for HDMI and other local outputs — keep `.apac` for
+    ///   AirPlay. The host decides: PrismCore cannot tell the route.
+    ///   Playback is not verified: AVPlayer on macOS 27 refuses LPCM with
+    ///   height channels, and tvOS toward an AV receiver has not been tried
+    ///   on a device; see `HeightsOutput`.
     /// - Parameter inBandClosedCaptions: what the master says about the
     ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
     ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
@@ -877,7 +890,8 @@ public actor PrismCoreSession {
         bridgedAudio: BridgedAudioFormat = .compressed,
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
-        heightsLayout: HeightsLayout = .atmos7_1_4
+        heightsLayout: HeightsLayout = .atmos7_1_4,
+        heightsOutput: HeightsOutput = .apac
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -902,7 +916,8 @@ public actor PrismCoreSession {
             bridgedAudio: bridgedAudio,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
-            heightsLayout: heightsLayout
+            heightsLayout: heightsLayout,
+            heightsOutput: heightsOutput
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -950,6 +965,7 @@ public actor PrismCoreSession {
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
+            heightsOutput: heightsOutput,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -1037,7 +1053,8 @@ public actor PrismCoreSession {
         bridgedAudio: BridgedAudioFormat = .compressed,
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
-        heightsLayout: HeightsLayout = .atmos7_1_4
+        heightsLayout: HeightsLayout = .atmos7_1_4,
+        heightsOutput: HeightsOutput = .apac
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -1063,7 +1080,8 @@ public actor PrismCoreSession {
             bridgedAudio: bridgedAudio,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
-            heightsLayout: heightsLayout
+            heightsLayout: heightsLayout,
+            heightsOutput: heightsOutput
         )
     }
 
@@ -1079,13 +1097,19 @@ public actor PrismCoreSession {
 
     /// The diagnostic report's `objectAudioRendering`: what was asked, and why it cannot run.
     static func describe(
-        _ rendering: ObjectAudioRendering, allowsAtmosOutput: Bool, layout: HeightsLayout = .atmos7_1_4
+        _ rendering: ObjectAudioRendering, allowsAtmosOutput: Bool, layout: HeightsLayout = .atmos7_1_4,
+        output: HeightsOutput = .apac
     ) -> String {
         guard rendering == .heights else { return rendering.rawValue }
-        // 7.1.4 is what every earlier version rendered; only another layout is named.
-        let name = layout == .atmos7_1_4 ? "heights" : "heights \(layout.rawValue)"
+        // 7.1.4 APAC is what every earlier version rendered; only another layout or output is named.
+        var name = layout == .atmos7_1_4 ? "heights" : "heights \(layout.rawValue)"
+        if output == .lpcm { name += " lpcm" }
         if !ObjectAudioRendering.rendererIsLinked { return "\(name) (unavailable: TrueHDObjects not linked)" }
-        if !layout.isAvailable { return "\(name) (unavailable: no APAC encoder for the layout, OS 26 needed)" }
+        if !output.isAvailable(for: layout) {
+            return output == .lpcm
+                ? "\(name) (unavailable: OS 26 needed)"
+                : "\(name) (unavailable: no APAC encoder for the layout, OS 26 needed)"
+        }
         if !allowsAtmosOutput { return "\(name) (off: the host did not allow Atmos output)" }
         return name
     }
@@ -1201,7 +1225,8 @@ public actor PrismCoreSession {
             bridgedAudio: options.bridgedAudio,
             objectAudioRendering: options.objectAudioRendering,
             allowsAtmosOutput: options.allowsAtmosOutput,
-            heightsLayout: options.heightsLayout
+            heightsLayout: options.heightsLayout,
+            heightsOutput: options.heightsOutput
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
@@ -1575,7 +1600,8 @@ public actor PrismCoreSession {
                 bridgedAudio: options.bridgedAudio.isAvailable
                     ? options.bridgedAudio.rawValue : "compressed (lossless unavailable: no flac encoder)",
                 objectAudioRendering: Self.describe(
-                    options.objectAudioRendering, allowsAtmosOutput: options.allowsAtmosOutput, layout: options.heightsLayout
+                    options.objectAudioRendering, allowsAtmosOutput: options.allowsAtmosOutput, layout: options.heightsLayout,
+                    output: options.heightsOutput
                 ),
                 preferredAudioStreamIndex: options.preferredAudioStreamIndex,
                 preferredSubtitleStreamIndex: options.preferredSubtitleStreamIndex,
