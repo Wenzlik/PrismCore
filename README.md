@@ -90,7 +90,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.1")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.2")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -1165,7 +1165,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.1")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.2")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
@@ -1220,7 +1220,7 @@ Shipping, and stable under semantic versioning since 1.0.0 (see *Stability and
 versioning*). Two headline claims are still proven by construction rather than by a
 lab.
 
-The test suite is 878 tests across 124 suites, hermetic apart from an opt-in
+The test suite is 882 tests across 124 suites, hermetic apart from an opt-in
 real-media harness. It exercises the playlists, the loopback server, the subtitle
 renditions and the audio bridge's decode → resample → FIFO → encode chain, plus
 end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces)
