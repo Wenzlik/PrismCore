@@ -17,7 +17,10 @@ source-compatible.)
   `r_frame_rate` is 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60 within 1e-4 is
   now muxed in a timescale where a frame is a whole number of ticks (24000,
   30000 or 60000 with 1001 a frame for the NTSC rates; 90 kHz, as before, for
-  the others), and every PTS and DTS that is a frame rounded to the source
+  the others — raised to the least common multiple with the source's time
+  base, so every source tick stays a whole number of ticks too: 360 kHz for a
+  90 kHz source at 23.976; a time base that would need more than 32 bits gets
+  no grid), and every PTS and DTS that is a frame rounded to the source
   tick (within half a tick of it) becomes that frame's exact time, durations
   within a tick of whole frames too. The window holds one source timestamp
   at most, so two distinct timestamps (a variable-rate stretch 1 ms apart in

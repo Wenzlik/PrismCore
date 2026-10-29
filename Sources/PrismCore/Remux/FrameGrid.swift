@@ -24,13 +24,12 @@ struct StandardFrameRate: Sendable, Equatable {
 
     var value: Double { Double(numerator) / Double(denominator) }
 
-    /// The track timescale in which one frame is a whole number of ticks:
-    /// 24000/30000/60000 (1001 a frame) for the NTSC rates, and 90 kHz — what
-    /// movenc gives an output video stream with no time base of its own, so
-    /// these sources keep their timescale — for the integer ones.
+    /// The smallest track timescale this grid uses, one in which a frame is a
+    /// whole number of ticks: 24000/30000/60000 (1001 a frame) for the NTSC
+    /// rates, and 90 kHz — what movenc gives an output video stream with no
+    /// time base of its own, so these sources keep their timescale — for the
+    /// integer ones. `FrameGrid` raises it to hold every source tick whole too.
     var timescale: Int32 { denominator == 1001 ? Int32(numerator) : 90_000 }
-
-    var ticksPerFrame: Int64 { Int64(timescale) * denominator / numerator }
 
     /// Within this relative distance a measured rate is taken as the standard
     /// one for the frame grid: only container metadata is that exact (a
@@ -83,6 +82,13 @@ struct StandardFrameRate: Sendable, Equatable {
 /// muxer that truncates instead of rounding leaves some of its frames off the
 /// grid, each still within a tick of its own time.
 ///
+/// The output timescale is the least common multiple of the rate's
+/// (`StandardFrameRate.timescale`) and the source time base's denominator, so a
+/// source tick is a whole number of output ticks as well as a frame: a 90 kHz
+/// source at 23.976 is muxed at 360 kHz (15015 a frame), never at 24 kHz, where
+/// three 90 kHz ticks would share one output tick. A time base that would need
+/// a timescale past 32 bits gets no grid.
+///
 /// A pure function of the timestamp, with the grid anchored on the stream's
 /// `start_time`: every writer of a session — the head and each re-anchored
 /// restart — maps a packet to the same tick, so timeline bases, edit lists and
@@ -94,26 +100,34 @@ struct FrameGrid {
     let rate: StandardFrameRate
     let sourceTimeBase: AVRational
     let outputTimeBase: AVRational
+    /// One frame, in output ticks.
+    let ticksPerFrame: Int64
     /// The grid's frame 0, in output ticks.
     let origin: Int64
-    /// One source tick, in output ticks (at least one): the duration tolerance.
+    /// One source tick, in output ticks (a whole number of them).
     let tolerance: Int64
 
-    init(rate: StandardFrameRate, sourceTimeBase: AVRational, startTime: Int64?) {
+    init?(rate: StandardFrameRate, sourceTimeBase: AVRational, startTime: Int64?) {
+        guard sourceTimeBase.num > 0, sourceTimeBase.den > 0 else { return nil }
+        func gcd(_ a: Int64, _ b: Int64) -> Int64 { b == 0 ? a : gcd(b, a % b) }
+        let sourceDenominator = Int64(sourceTimeBase.den) / gcd(Int64(sourceTimeBase.num), Int64(sourceTimeBase.den))
+        let base = Int64(rate.timescale)
+        let timescale = base / gcd(base, sourceDenominator) * sourceDenominator
+        guard timescale <= Int64(Int32.max) else { return nil }
         self.rate = rate
         self.sourceTimeBase = sourceTimeBase
-        let output = AVRational(num: 1, den: rate.timescale)
+        ticksPerFrame = timescale * rate.denominator / rate.numerator
+        let output = AVRational(num: 1, den: Int32(timescale))
         outputTimeBase = output
         origin = startTime.map { av_rescale_q($0, sourceTimeBase, output) } ?? 0
-        tolerance = max(1, av_rescale_q(1, sourceTimeBase, output))
+        tolerance = av_rescale_q(1, sourceTimeBase, output)
     }
 
     /// The grid for a stream, or `nil` when it has no confidently standard rate.
     init?(stream: UnsafeMutablePointer<AVStream>) {
         guard let rate = StandardFrameRate.detect(
             average: stream.pointee.avg_frame_rate, real: stream.pointee.r_frame_rate
-        ), stream.pointee.time_base.num > 0, stream.pointee.time_base.den > 0
-        else { return nil }
+        ) else { return nil }
         let start = stream.pointee.start_time
         self.init(
             rate: rate, sourceTimeBase: stream.pointee.time_base,
@@ -124,17 +138,16 @@ struct FrameGrid {
     /// A PTS or DTS, source ticks → output ticks.
     func timestamp(_ ticks: Int64) -> Int64 {
         guard ticks != swift_AV_NOPTS_VALUE() else { return ticks }
+        // Exact: a source tick is a whole number of output ticks.
         let exact = av_rescale_q(ticks, sourceTimeBase, outputTimeBase)
-        let step = rate.ticksPerFrame
+        let step = ticksPerFrame
         let frames = Self.floorDivide(exact - origin + step / 2, step)
         let snapped = origin + frames * step
-        // −½ ≤ (snapped − exact) / one source tick < ½, in integers (a source tick is
-        // timescale × num / den output ticks). Closed below because a muxer rounds a
-        // frame that falls half-way between two ticks up (libavformat's rescale
-        // does): its timestamp sits half a tick above the frame.
-        let twice = 2 * (snapped - exact) * Int64(sourceTimeBase.den)
-        let tick = Int64(rate.timescale) * Int64(sourceTimeBase.num)
-        return twice >= -tick && twice < tick ? snapped : exact
+        // −½ ≤ (snapped − exact) / one source tick < ½. Closed below because a
+        // muxer rounds a frame that falls half-way between two ticks up
+        // (libavformat's rescale does): its timestamp sits half a tick above it.
+        let twice = 2 * (snapped - exact)
+        return twice >= -tolerance && twice < tolerance ? snapped : exact
     }
 
     /// A packet duration, source ticks → output ticks: whole frames when it is
@@ -144,7 +157,7 @@ struct FrameGrid {
     func duration(_ ticks: Int64) -> Int64 {
         guard ticks > 0 else { return ticks }
         let exact = av_rescale_q(ticks, sourceTimeBase, outputTimeBase)
-        let step = rate.ticksPerFrame
+        let step = ticksPerFrame
         let snapped = (exact + step / 2) / step * step
         return snapped > 0 && abs(snapped - exact) <= tolerance ? snapped : exact
     }

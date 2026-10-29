@@ -57,16 +57,28 @@ struct FrameGridTests {
         for rate in StandardFrameRate.all {
             #expect(Int64(rate.timescale) * rate.denominator % rate.numerator == 0, "\(rate)")
         }
-        #expect(Self.ntsc24.timescale == 24000 && Self.ntsc24.ticksPerFrame == 1001)
-        #expect(StandardFrameRate(60000, 1001).timescale == 60000)
-        #expect(StandardFrameRate(24, 1).timescale == 90_000 && StandardFrameRate(24, 1).ticksPerFrame == 3750)
+        func grid(_ rate: StandardFrameRate, _ den: Int32) -> FrameGrid? {
+            FrameGrid(rate: rate, sourceTimeBase: AVRational(num: 1, den: den), startTime: 0)
+        }
+        #expect(grid(Self.ntsc24, 1000)?.outputTimeBase.den == 24000 && grid(Self.ntsc24, 1000)?.ticksPerFrame == 1001)
+        #expect(grid(StandardFrameRate(60000, 1001), 1000)?.outputTimeBase.den == 60000)
+        #expect(grid(StandardFrameRate(24, 1), 1000)?.outputTimeBase.den == 90_000)
+        #expect(grid(StandardFrameRate(24, 1), 1000)?.ticksPerFrame == 3750)
+        // A 90 kHz source keeps every one of its ticks whole: the timescale is
+        // the least common multiple, not the rate's own.
+        #expect(grid(Self.ntsc24, 90_000)?.outputTimeBase.den == 360_000 && grid(Self.ntsc24, 90_000)?.ticksPerFrame == 15015)
+        #expect(grid(StandardFrameRate(30000, 1001), 90_000)?.outputTimeBase.den == 90_000)
+        #expect(grid(StandardFrameRate(60000, 1001), 90_000)?.outputTimeBase.den == 180_000)
+        #expect(grid(StandardFrameRate(24, 1), 90_000)?.outputTimeBase.den == 90_000)
+        // A time base that would need a timescale past 32 bits gets no grid.
+        #expect(grid(Self.ntsc24, 1_000_000_007) == nil)
     }
 
     // MARK: - Timestamp mapping
 
     @Test("41/42 ms steps land on the exact 1001-tick grid, with no drift over three hours")
     func ntscMillisecondsSnapWithoutDrift() {
-        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)
+        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)!
         // 3 h at 23.976: every frame, not a sample.
         for n in Int64(0)..<259_000 {
             let source = Self.milliseconds(frame: n, rate: Self.ntsc24)
@@ -94,7 +106,7 @@ struct FrameGridTests {
             (StandardFrameRate(60000, 1001), 60000, 1001),
             (StandardFrameRate(30, 1), 90_000, 3000),
         ] {
-            let grid = FrameGrid(rate: rate, sourceTimeBase: Self.milliseconds, startTime: 0)
+            let grid = FrameGrid(rate: rate, sourceTimeBase: Self.milliseconds, startTime: 0)!
             #expect(grid.outputTimeBase.den == scale)
             for n in Int64(0)..<20_000 {
                 let source = Self.milliseconds(frame: n, rate: rate)
@@ -108,7 +120,7 @@ struct FrameGridTests {
     func startOffset() {
         // A cut whose first frame sits 7 ms in: every frame is 7 ms off a
         // zero-based grid, which would snap none of them.
-        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 7)
+        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 7)!
         for n in Int64(0)..<10_000 {
             let source = 7 + Self.milliseconds(frame: n, rate: Self.ntsc24)
             #expect(grid.timestamp(source) == 168 + n * 1001)
@@ -118,7 +130,7 @@ struct FrameGridTests {
 
     @Test("Timestamps off the grid keep their own time, only rescaled")
     func offGridIsUntouched() {
-        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)
+        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)!
         // A variable-rate stretch: 20 ms steps, mostly far from any frame.
         var unchanged = 0
         for t in stride(from: Int64(0), to: 2000, by: 20) {
@@ -136,23 +148,29 @@ struct FrameGridTests {
     func injective() {
         // A variable-rate stretch in a stream labelled 25 fps: 39 and 40 ms are
         // both within a tick of frame 1, and must stay 1 ms apart.
-        let pal = FrameGrid(rate: StandardFrameRate(25, 1), sourceTimeBase: Self.milliseconds, startTime: 0)
+        let pal = FrameGrid(rate: StandardFrameRate(25, 1), sourceTimeBase: Self.milliseconds, startTime: 0)!
         #expect(pal.timestamp(39) == 3510 && pal.timestamp(40) == 3600 && pal.timestamp(41) == 3690)
-        for rate in StandardFrameRate.all {
-            let grid = FrameGrid(rate: rate, sourceTimeBase: Self.milliseconds, startTime: 0)
-            var last = grid.timestamp(-1)
-            for t in Int64(0)..<20_000 {
-                let mapped = grid.timestamp(t)
-                #expect(mapped > last, "\(rate) at \(t) ms")
-                if mapped <= last { break }
-                last = mapped
+        for (timeBase, span) in [(Self.milliseconds, Int64(20_000)), (AVRational(num: 1, den: 90_000), 200_000)] {
+            for rate in StandardFrameRate.all {
+                let grid = FrameGrid(rate: rate, sourceTimeBase: timeBase, startTime: 0)!
+                var last = grid.timestamp(-1)
+                for t in Int64(0)..<span {
+                    let mapped = grid.timestamp(t)
+                    #expect(mapped > last, "\(rate) at \(t) / \(timeBase.den)")
+                    if mapped <= last { break }
+                    last = mapped
+                }
             }
         }
+        // 90 kHz timestamps of 23.976 fps land on the grid; their neighbours do not.
+        let ts = FrameGrid(rate: Self.ntsc24, sourceTimeBase: AVRational(num: 1, den: 90_000), startTime: 0)!
+        #expect(ts.timestamp(3754) == 15015)
+        #expect(ts.timestamp(3753) == 15012 && ts.timestamp(3755) == 15020)
     }
 
     @Test("B-frames: DTS stays monotonic and never passes its PTS")
     func bFrames() {
-        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)
+        let grid = FrameGrid(rate: Self.ntsc24, sourceTimeBase: Self.milliseconds, startTime: 0)!
         // Decode order I P B B B …, three B-frames: presentation index per
         // decode slot; DTS is the presentation time of the slot's rank, minus
         // the two-frame reorder delay this pyramid needs (what libavformat
