@@ -8,6 +8,12 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.9.2] — 2026-10-29
+
+An opt-in, experimental `HeightsOutput.lpcm` for TrueHD Atmos heights, kept
+for a device test (issue #176); the default stays `.apac`. Additive and
+source-compatible.
+
 ### Added
 
 - **Experimental — `HeightsOutput`: TrueHD Atmos heights as lossless linear
