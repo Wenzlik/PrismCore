@@ -131,6 +131,52 @@ public enum HeightsLayout: String, Sendable, Equatable, CaseIterable {
     }
 }
 
+/// How `ObjectAudioRendering.heights` delivers the rendered layout: Apple Positional Audio (the
+/// default, what every earlier version served) or linear PCM.
+///
+/// **`.lpcm` is experimental** (issue #176): opt-in only, and it may change or go away once it
+/// has been tried on a device.
+///
+/// - `.apac`: lossy, 256 kbps a channel (3.07 Mbit/s for 7.1.4), the codec Apple's HLS
+///   authoring spec lists for channels with heights. The choice for AirPlay and any route
+///   that is not a local multichannel output.
+/// - `.lpcm` (experimental): lossless, the renderer's output as 24-bit integer PCM in an ISO/IEC 23003-5
+///   `ipcm` sample entry with its `pcmC` box and a `chnl` box (ISO/IEC 14496-12) naming each
+///   channel's ISO/IEC 23091-3 speaker position, in the order of the layout's
+///   `kAudioChannelLayoutTag_Atmos_*` — what CoreMedia reads back as that layout's channel
+///   labels. `CODECS` is `ipcm`, the sample entry's own code: Apple's HLS authoring spec lists
+///   no PCM format at all, so there is no other value to use. 48 kHz × 24 bits × the layout's
+///   channels: 9.2 Mbit/s for 5.1.2, 11.5 for 5.1.4 and 7.1.2, 13.8 for 7.1.4. Meant for HDMI
+///   and other local outputs.
+///
+/// **The host decides.** PrismCore cannot reliably tell which route the audio will take, so it
+/// never picks `.lpcm` itself. **Playback is not verified anywhere.** Measured on macOS 27 (a
+/// Mac mini, stereo output): AVFoundation opens every layout's `ipcm` media, reads the
+/// `chnl` back as exactly the layout's `Atmos_*` tag and decodes every channel in place — but
+/// AVPlayer refuses to play LPCM whose layout has height channels at all (`'fmt?'`: 5.1.2 at 8
+/// channels, while the same 8 channels described as 7.1 play), and anything above 8 channels,
+/// in HLS, `.mp4` and `.caf` alike, and 32-bit float (`fpcm`) the same. HDMI carries at most 8
+/// channels of LPCM; whether tvOS hands such a track to an AV receiver (as Dolby MAT) or
+/// refuses it as macOS does needs an Apple TV and an AVR, and has not been tried. Until it
+/// has, `.lpcm` is for that device test, not for users.
+public enum HeightsOutput: String, Sendable, Equatable, CaseIterable {
+    case apac
+    case lpcm
+
+    /// Whether this build and OS can deliver `layout` this way: the `TrueHDObjects` library is
+    /// linked, and for `.apac` this OS's encoder takes the layout (`HeightsLayout.isAvailable`).
+    /// `.lpcm` needs no encoder.
+    public func isAvailable(for layout: HeightsLayout) -> Bool {
+        switch self {
+        case .apac: return layout.isAvailable
+        case .lpcm:
+            guard ObjectAudioRendering.rendererIsLinked else { return false }
+            guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return false }
+            return true
+        }
+    }
+}
+
 /// What the audio bridge encodes TrueHD, DTS, PCM and the other codecs HLS
 /// cannot carry into.
 public enum BridgedAudioFormat: String, Sendable, Equatable {
