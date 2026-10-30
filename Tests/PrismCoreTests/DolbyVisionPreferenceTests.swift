@@ -643,6 +643,40 @@ struct DolbyVisionRecordAuditScanTests {
         av_packet_unref(reader)
     }
 
+    /// Behind a host's range proxy every new Range request waits for a whole
+    /// forwarded bite (8 MB, over a second on a slow link), longer than the
+    /// audit's budget. An audit that always rewound spent the budget on that
+    /// one request, read no RPU, and served a relabelled Profile 7 Blu-ray as
+    /// Profile 5 — corrupt colours on a Dolby Vision display. Mid-file, the
+    /// next packets answer without a new request.
+    @Test("mid-file, the audit reads on without a new Range request")
+    func auditReadsForwardWithoutSeeking() async throws {
+        let url = try fixture("hevc_eac3.mkv")
+        let video = try #require(try SourceProbe.open(url: url).info.video)
+        let server = try RangeFixtureServer(media: try Data(contentsOf: url))
+        let served = try await server.start()
+        defer { server.stop() }
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, served.absoluteString, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let reader = try #require(packet)
+        // Where a scout leaves the session: a few packets past the head.
+        for _ in 0..<4 {
+            #expect(av_read_frame(context, reader) >= 0)
+            av_packet_unref(reader)
+        }
+        let requestsBefore = server.ranges.count
+        let positionBefore = avio_tell(try #require(context.pointee.pb))
+
+        #expect(DolbyVisionRecordAudit.scan(input: context, video: video) == nil)
+        #expect(server.ranges.count == requestsBefore, "the audit sought: \(server.ranges)")
+        #expect(avio_tell(try #require(context.pointee.pb)) >= positionBefore, "the audit went back to the head")
+    }
+
     @Test("a stalled source cannot hold the audit past its time budget")
     func auditIsBounded() async throws {
         let url = try fixture("hevc_eac3.mkv")

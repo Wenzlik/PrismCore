@@ -130,14 +130,25 @@ enum DolbyVisionRecordAudit {
     /// packet; this only covers a head interleaved with large audio packets.
     static let byteBudget: Int64 = 4 << 20
 
-    /// Rewind to the head and consume video packets until the first parseable
-    /// RPU. The rewind is not optional: the caption and TrueHD scouts run
-    /// first and may have read to EOF on a short source, and an audit starting
-    /// there would read nothing and leave a relabelled record standing.
-    /// **Leaves the read position where it stopped** and the AVIO error clear;
-    /// the caller rewinds to the head again, as after every other scout. `nil`
-    /// for an input that cannot rewind, a read failure, an exhausted budget,
-    /// or no RPU within the packet budget.
+    /// Consume video packets until the first parseable RPU: forward from
+    /// wherever the scouts before it stopped, and from the head only when that
+    /// read reaches the end.
+    ///
+    /// Forward first because every Dolby Vision access unit carries an RPU, so
+    /// any packet answers, and because a seek is the expensive read: over HTTP
+    /// it is a new Range request, and behind a host's range proxy that request
+    /// waits for a whole forwarded bite before its first byte (8 MB — over a
+    /// second at 8 MB/s). An audit that always rewound spent its budget on that
+    /// wait, read nothing, and served a relabelled Profile 7 as Profile 5:
+    /// the corrupt-colour picture, on a Dolby Vision display too. Reading on
+    /// costs no request; the bytes are already on their way.
+    ///
+    /// The rewind stays for the end: the caption and TrueHD scouts may have
+    /// read to EOF on a short source, and an audit starting there would read
+    /// nothing. **Leaves the read position where it stopped** and the AVIO
+    /// error clear; the caller rewinds to the head again, as after every other
+    /// scout. `nil` for a read failure, an end it cannot rewind from, an
+    /// exhausted budget, or no RPU within the packet budget.
     static func scan(
         input: UnsafeMutablePointer<AVFormatContext>,
         video: VideoTrackInfo,
@@ -152,6 +163,8 @@ enum DolbyVisionRecordAudit {
                   codecID: stream.pointee.codecpar.pointee.codec_id,
                   nalUnitLengthSize: video.nalUnitLengthSize
               ), carriage.codec == .hevc,
+              // Seekable even for the forward read: the caller rewinds to
+              // the head after it, and the packets read here are otherwise lost.
               let pb = input.pointee.pb, pb.pointee.seekable != 0,
               let packet = av_packet_alloc()
         else { return nil }
@@ -161,7 +174,7 @@ enum DolbyVisionRecordAudit {
         let started = ContinuousClock.now
         // Without a guard nothing can interrupt a read that blocks, so the
         // clock is also checked between reads; production passes the
-        // context's own guard. Armed before the seek: over HTTP the rewind is
+        // context's own guard. Armed before any read: over HTTP the rewind is
         // a Range request too.
         interruptGuard?.arm(budget: timeBudget)
         defer {
@@ -171,17 +184,25 @@ enum DolbyVisionRecordAudit {
             // loop need it gone (as `TrueHDAtmosScout.scan` does).
             if interruptGuard != nil, pb.pointee.error < 0 { pb.pointee.error = 0 }
         }
-        guard av_seek_frame(input, -1, 0, AVSEEK_FLAG_BACKWARD) >= 0 else { return nil }
-        avformat_flush(input)
-        let startByte = avio_tell(pb)
 
         let packetCap = videoPacketBudget * HDR10PlusScout.packetsPerVideoPacket
         var videoPackets = 0
         var packets = 0
+        var startByte = avio_tell(pb)
+        var rewound = false
         while videoPackets < videoPacketBudget, packets < packetCap,
               ContinuousClock.now - started < timeBudget,
               avio_tell(pb) - startByte < byteBudget {
-            guard av_read_frame(input, packet) >= 0 else { return nil }
+            let read = av_read_frame(input, packet)
+            if read == swift_AVERROR_EOF(), !rewound {
+                // The scouts left us at the end: the head, once.
+                rewound = true
+                guard av_seek_frame(input, -1, 0, AVSEEK_FLAG_BACKWARD) >= 0 else { return nil }
+                avformat_flush(input)
+                startByte = avio_tell(pb)
+                continue
+            }
+            guard read >= 0 else { return nil }
             defer { av_packet_unref(packet) }
             packets += 1
             guard packet.pointee.stream_index == streamIndex,

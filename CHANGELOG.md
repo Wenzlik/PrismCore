@@ -89,11 +89,19 @@ source-compatible.
   rewritten to match. An RPU that reads 5, cannot be read, or names anything
   else leaves the record standing, served as P5 under either preference (and
   the `dv-diag` line says so). A genuine
-  P5 reads no packet. The audit rewinds to the head first (the caption and
-  TrueHD scouts before it may have read to EOF on a short source) and is
-  bounded by 500 ms and 4 MB through the context's read-interrupt guard, so
-  a stalled read cannot hold the master back; an exhausted budget leaves the
-  record standing.
+  P5 reads no packet. The audit reads forward from where the scouts before
+  it stopped — any Dolby Vision access unit carries an RPU — and rewinds to
+  the head only when that read reaches the end (a short source the caption
+  or TrueHD scout read to EOF). It must not seek first: behind a host's range
+  proxy a new Range request waits for a whole forwarded bite, and on a
+  `Transformers (2007)` UHD Blu-ray remux (a P7 FEL RPU under a P5 record)
+  served through an 8 MB-bite proxy at 8 MB/s that one wait (1.06 s) used up
+  the budget, the record stood, and the stream went out as `dvh1.05.06` —
+  the corrupt picture on a Dolby Vision display. Reading forward it answers
+  `rpu=7` with no extra request at 8 MB/s and at 2 MB/s. Bounded by 500 ms
+  and 4 MB through the context's read-interrupt guard, so a stalled read
+  cannot hold the master back; an exhausted budget leaves the record
+  standing.
 - **Profile 5's sample entry always carries its `colr` box** (BT.2020 / PQ /
   BT.2020nc, the source's range or limited). movenc writes `colr` only from
   the stream's colour fields, and P5 encoders routinely leave the VUI
