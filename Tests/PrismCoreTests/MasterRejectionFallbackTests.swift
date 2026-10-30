@@ -117,8 +117,8 @@ struct MasterRejectionFallbackTests {
 
     /// P5's record is not an upgrade over a base layer, it is the description
     /// of a picture that has no base layer at all. Strip it and IPT-PQc2 is
-    /// read as YCbCr — the green-and-purple misread. A non-DV display is
-    /// refused a master a level up instead.
+    /// read as YCbCr — the green-and-purple misread. A non-DV display gets
+    /// the same `dvh1.05` master and record, which the system decoder maps.
     @Test("profile 5 keeps its record on any display")
     func profile5NeverStripped() {
         #expect(!HLSRemuxer.shouldStripDolbyVisionRecord(
@@ -186,5 +186,11 @@ struct MasterRejectionFallbackTests {
         defer { Task { await fallback.stop() } }
         // Muxed shape: media playlist served directly, no master on disk.
         #expect(fallbackPlaylist.lastPathComponent == HLSRemuxer.mediaPlaylistFileName)
+
+        // Refused again: the media playlist was the last tier, so the chain
+        // ends with an error instead of another identical session.
+        await #expect(throws: PrismCoreSession.NoMasterToFallBackFrom.self) {
+            _ = try await fallback.makeMasterRejectionFallbackSession()
+        }
     }
 }

@@ -177,6 +177,15 @@ API surface.
 - Dolby Vision Profile 5 needs the `dvh1` fourcc — an `hvc1` entry over P5
   decodes to green-and-purple. Profile 8.x deliberately keeps `hvc1`, because
   its base layer *is* the fallback.
+- **A user's "Dolby Vision off" is `dolbyVisionPreference`, never a lie in
+  `DisplayCapabilities`.** Profile 5 has no base layer, ignores the
+  preference, and gets its `dvh1.05.LL` master on any HDR display; a refused
+  P5 master falls back once to the media playlist, never to a DV-less master
+  (there is no claim to drop), and a refused media playlist ends the chain
+  (`PrismCoreSession.NoMasterToFallBackFrom`).
+- A Profile 5 record over a BT.2020 YCbCr PQ/HLG VUI contradicts itself; the
+  first RPU decides (`DolbyVisionRecordAudit`). No `dvh1`/`colr`/playlist
+  detail can fix a picture whose record is wrong, so don't look for one there.
 
 ### TrueHD Atmos heights (`HeightsBridge`, `Rust/TrueHDObjects`)
 

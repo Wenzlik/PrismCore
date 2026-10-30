@@ -174,7 +174,10 @@ public enum MasterPlaylistBuilder {
         /// Whether the *display this session is going to* can present Dolby
         /// Vision. Not a source property and not cacheable: the same file gets
         /// a different manifest on a DV panel and on an HDR10 one, and
-        /// claiming DV to a non-DV display fails the item outright.
+        /// claiming DV to a non-DV display fails the item outright. Gates the
+        /// `SUPPLEMENTAL-CODECS` claim only: Profile 5's `dvh1` primary is
+        /// printed either way, because it describes the picture rather than
+        /// upgrading a base layer, and there is nothing else to declare it as.
         public var displayIsDolbyVisionCapable: Bool
         /// Every selectable audio rendition, in the order they are offered.
         /// Empty for a silent source (no `EXT-X-MEDIA`, no `AUDIO` attribute).
@@ -222,11 +225,15 @@ public enum MasterPlaylistBuilder {
         /// source whose frame rate the demuxer couldn't determine therefore
         /// must not be served a master at all — it plays media-direct.
         case frameRateRequiredForHDR(DynamicRange)
-        /// Profile 5 has no base layer: `dvh1` is the only correct declaration
-        /// (without it the IPT-PQ chroma is read as YCbCr and the picture goes
-        /// green/purple), and a `dvh1` variant offered to a non-DV display is
-        /// rejected with `-11868`. So P5 + non-DV display has no valid master;
-        /// it plays media-direct.
+        /// No longer thrown (since 4.0.0); kept so code that matches on it
+        /// still compiles.
+        ///
+        /// It used to refuse a Profile 5 master for a display that cannot
+        /// present Dolby Vision, sending P5 media-direct instead. A
+        /// well-formed bare `dvh1.05.LL` master is accepted on an HDR10 panel
+        /// and the system's Dolby Vision decoder maps it there, and the
+        /// media-direct route is now the one-shot fallback for a panel that
+        /// refuses it (`PrismCoreSession.makeMasterRejectionFallbackSession`).
         case dolbyVisionProfile5RequiresCapableDisplay
     }
 
@@ -235,10 +242,6 @@ public enum MasterPlaylistBuilder {
     public static func build(_ variant: VariantDescription) throws -> String {
         if variant.dynamicRange != .sdr, variant.frameRate == nil {
             throw SignalingError.frameRateRequiredForHDR(variant.dynamicRange)
-        }
-        if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly,
-           !variant.displayIsDolbyVisionCapable {
-            throw SignalingError.dolbyVisionProfile5RequiresCapableDisplay
         }
 
         var lines = [
@@ -343,21 +346,7 @@ public enum MasterPlaylistBuilder {
             attributes.append("AVERAGE-BANDWIDTH=\(average)")
         }
 
-        var codecs = [primaryVideoCodecString(for: variant)]
-        // Only the DEFAULT rendition's codec is declared, even when the group
-        // holds renditions of other codecs. Apple's authoring rules want one
-        // group (and one variant) per audio codec, which for a remux proxy
-        // would mean N near-identical variants AVPlayer would treat as bitrate
-        // alternatives of each other. Listing the union instead is the worse
-        // trade: a single codec this platform can't decode gets the whole
-        // variant filtered at master-parse time (`-1002`), so an exotic
-        // secondary track would take the playable ones down with it. The
-        // alternates still play when selected — `EXT-X-MEDIA` carries its own
-        // media playlist and init segment.
-        if let audioCodec = defaultRendition(of: variant)?.codecString, !audioCodec.isEmpty {
-            codecs.append(audioCodec)
-        }
-        attributes.append("CODECS=\(quoted(codecs.joined(separator: ",")))")
+        attributes.append("CODECS=\(quoted(codecsAttribute(for: variant)))")
 
         if let supplemental = supplementalCodecsString(for: variant) {
             attributes.append("SUPPLEMENTAL-CODECS=\(quoted(supplemental))")
@@ -394,6 +383,27 @@ public enum MasterPlaylistBuilder {
             attributes.append("CLOSED-CAPTIONS=NONE")
         }
         return "#EXT-X-STREAM-INF:" + attributes.joined(separator: ",")
+    }
+
+    /// The `CODECS` value, unquoted: the video's primary tag, then the
+    /// DEFAULT audio rendition's. Also what the `dv-diag` line prints, so a
+    /// field log shows the string AVPlayer validated, not a paraphrase of it.
+    static func codecsAttribute(for variant: VariantDescription) -> String {
+        var codecs = [primaryVideoCodecString(for: variant)]
+        // Only the DEFAULT rendition's codec is declared, even when the group
+        // holds renditions of other codecs. Apple's authoring rules want one
+        // group (and one variant) per audio codec, which for a remux proxy
+        // would mean N near-identical variants AVPlayer would treat as bitrate
+        // alternatives of each other. Listing the union instead is the worse
+        // trade: a single codec this platform can't decode gets the whole
+        // variant filtered at master-parse time (`-1002`), so an exotic
+        // secondary track would take the playable ones down with it. The
+        // alternates still play when selected — `EXT-X-MEDIA` carries its own
+        // media playlist and init segment.
+        if let audioCodec = defaultRendition(of: variant)?.codecString, !audioCodec.isEmpty {
+            codecs.append(audioCodec)
+        }
+        return codecs.joined(separator: ",")
     }
 
     /// The rendition whose codec the variant declares: the one flagged
