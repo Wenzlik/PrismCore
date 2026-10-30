@@ -25,12 +25,13 @@ source-compatible.
   `.baseLayerOnly` presents the base layer of a source that has one — 7, 8.1,
   8.4 — as plain `hvc1` with the `dvcC`/`dvvC` record stripped, no
   `SUPPLEMENTAL-CODECS` and HDR10 / HLG display criteria, the shape a non-DV
-  display already got. A genuine Profile 5 ignores it (it has no base layer);
-  the one Profile 5 it applies to is a record whose VUI declares a BT.2020
-  YCbCr PQ / HLG base, which a genuine P5 cannot (declared with the range
-  that VUI states) and whose RPU does not read 5: those colour fields can
-  come from a container `colr` box, and an RPU reading 5 is a genuine P5,
-  kept as one under either preference. `DisplayCapabilities`
+  display already got. Every record that still says Profile 5 ignores it (it
+  has no base layer), whatever its colour fields: those are codec parameters
+  a container `colr` box can fill, so only the RPU proves a base layer, and
+  an RPU authored as 7 or 8 has already turned the record into that profile
+  (see Fixed), which then honours the preference. An RPU that reads 5, or an
+  audit that runs out of budget, keeps the P5 under either preference.
+  `DisplayCapabilities`
   stays the honest display read: map a user setting to the preference, not
   to `isDolbyVisionCapable: false`. Carried by `makeSession(changing:)` and
   both rejection fallbacks.
@@ -86,7 +87,8 @@ source-compatible.
   through the existing routes: the 8.1 conversion for a 7, `hvc1` + 8.1 / 8.4
   record + `SUPPLEMENTAL-CODECS` for an 8, with the sample entry's record
   rewritten to match. An RPU that reads 5, cannot be read, or names anything
-  else leaves the record standing (and the `dv-diag` line says so). A genuine
+  else leaves the record standing, served as P5 under either preference (and
+  the `dv-diag` line says so). A genuine
   P5 reads no packet. The audit rewinds to the head first (the caption and
   TrueHD scouts before it may have read to EOF on a short source) and is
   bounded by 500 ms and 4 MB through the context's read-interrupt guard, so

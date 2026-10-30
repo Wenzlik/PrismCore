@@ -1120,8 +1120,7 @@ final class HLSRemuxer: @unchecked Sendable {
         let presentsBaseLayer = dolbyVisionPreference.presentsBaseLayer(
             of: sourceDolbyVision,
             colorTransferName: videoTrack.colorTransferName,
-            colorSpaceName: videoTrack.colorSpaceName,
-            rpuProfile: auditedRPUProfile
+            colorSpaceName: videoTrack.colorSpaceName
         )
         let dolbyVisionServing = Self.dolbyVisionServing(
             source: sourceDolbyVision,
@@ -1712,15 +1711,10 @@ final class HLSRemuxer: @unchecked Sendable {
                 + " record=\(record)"
                 + " colr=\(Self.colrDescription(primaries: colour.0, transfer: colour.1, matrix: colour.2, range: colour.3))"
                 + " criteria=\(criteriaChoice.target.rawValue)"
-            // The contradicted record the RPU could not settle: still served as
-            // P5, and if the picture is wrong the record is — the host's
-            // `.baseLayerOnly` serves the YCbCr base the VUI declares. Not
-            // when the RPU read 5: that is a genuine P5 under a container
-            // `colr`, and `.baseLayerOnly` keeps it as P5 anyway.
-            if recordAudited, !recordCorrected, auditedRPUProfile == nil, !presentsBaseLayer {
-                line += "; Profile 5 record over a BT.2020 YCbCr HDR VUI (a genuine P5 leaves it"
-                    + " unspecified): if colours are wrong, dolbyVisionPreference .baseLayerOnly serves its base layer"
-            }
+            // The contradicted record the RPU could not settle is still served
+            // as P5 under either preference: its colour fields alone prove no
+            // base layer, so there is no stripping to advise. The `rpu=` field
+            // above is what tells the next log apart.
             PrismCoreLog.notice(line)
         }
 

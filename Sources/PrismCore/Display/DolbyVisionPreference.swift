@@ -23,14 +23,15 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
     /// Applies only to sources that **have** a usable base layer: Profile 7
     /// and 8.x (and AV1 10.1 / 10.4). For a genuine Profile 5 it is ignored —
     /// there is no base layer, and serving its IPT picture as plain HEVC is
-    /// the solarised misread, not a fallback. The one Profile 5 it does apply
-    /// to is a record whose own VUI declares a BT.2020 YCbCr base with a PQ or
-    /// HLG transfer: IPT has no VUI code point, so a genuine Profile 5 leaves
-    /// both unspecified, and a record over a YCbCr VUI is a container
-    /// contradicting the bitstream the decoder actually consumes. Those colour
-    /// fields are the codec parameters, which a container `colr` box can fill
-    /// as well as the SPS, so they are no proof on their own: an RPU that
-    /// reads 5 overrules them, and the record is kept.
+    /// the solarised misread, not a fallback. That holds for every record
+    /// that still says 5 when the session decides — including one over a
+    /// BT.2020 YCbCr PQ / HLG VUI. Those colour fields are the codec
+    /// parameters, which a container `colr` box can fill as well as the SPS,
+    /// so they prove no base layer on their own; only the record's first RPU
+    /// does, and an RPU authored as 7 or 8 has already turned the record into
+    /// that profile (`DolbyVisionRecordAudit`), which this preference then
+    /// honours. An RPU that reads 5, cannot be read in its budget, or cannot
+    /// be read at all leaves a Profile 5 — kept as one.
     case baseLayerOnly
 
     /// Whether a source with this Dolby Vision record (and this VUI) is
@@ -41,13 +42,10 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
     ///     libavutil names it (`VideoTrackInfo.colorTransferName`).
     ///   - colorSpaceName: its matrix coefficients, likewise
     ///     (`VideoTrackInfo.colorSpaceName`).
-    ///   - rpuProfile: the profile the stream's own RPU was authored for, when
-    ///     it has been read; `nil` when it has not.
     public func presentsBaseLayer(
         of dolbyVision: DolbyVisionConfiguration?,
         colorTransferName: String?,
-        colorSpaceName: String?,
-        rpuProfile: UInt8? = nil
+        colorSpaceName: String?
     ) -> Bool {
         guard self == .baseLayerOnly, let dolbyVision else { return false }
         switch dolbyVision.profile {
@@ -55,11 +53,13 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
             return true
         case 10 where dolbyVision.baseLayerSignalCompatibilityID != 0:
             return true
-        case 5 where rpuProfile == 5:
-            // The picture is IPT, whatever a `colr` box claims: stripping the
-            // record would serve it as plain HEVC, the solarised misread.
+        case 5:
+            // No proof of a base layer short of the RPU, and that proof has
+            // already relabelled the record. Stripping an unproven P5 would
+            // serve its IPT picture as plain HEVC — the solarised misread —
+            // and whether the audit answered can hinge on startup speed alone.
             return false
-        case 5, 10:
+        case 10:
             return Self.vuiDeclaresYCbCrHDRBase(
                 colorTransferName: colorTransferName, colorSpaceName: colorSpaceName
             )

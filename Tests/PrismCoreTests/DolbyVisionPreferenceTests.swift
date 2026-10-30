@@ -63,12 +63,11 @@ private struct Served {
         vui: (transfer: String?, matrix: String?) = unspecifiedVUI,
         preference: DolbyVisionPreference,
         display: Panel,
-        converting: Bool = false,
-        rpuProfile: UInt8? = nil
+        converting: Bool = false
     ) {
         let capabilities = display.capabilities
         let presentsBaseLayer = preference.presentsBaseLayer(
-            of: source, colorTransferName: vui.transfer, colorSpaceName: vui.matrix, rpuProfile: rpuProfile
+            of: source, colorTransferName: vui.transfer, colorSpaceName: vui.matrix
         )
         let serving = HLSRemuxer.dolbyVisionServing(
             source: source,
@@ -150,30 +149,20 @@ struct DolbyVisionPreferenceTests {
         ))
     }
 
-    @Test("baseLayerOnly applies to a Profile 5 record over a BT.2020 YCbCr PQ or HLG VUI")
-    func relabelledProfile5HonoursPreference() {
+    /// The colour fields are codec parameters, which a container `colr` box
+    /// fills as well as the SPS: a genuine P5 muxed with `colr` 9/16/9 looks
+    /// exactly like a relabelled one. Only an RPU proves a base layer, and an
+    /// RPU that does has already turned the record into a 7 or an 8.
+    @Test("baseLayerOnly keeps a Profile 5 record whatever its colour fields say")
+    func profile5RecordIgnoresContainerColour() throws {
         for (transfer, matrix) in [("smpte2084", "bt2020nc"), ("arib-std-b67", "bt2020nc"), ("smpte2084", "bt2020c")] {
-            #expect(DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
+            #expect(!DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
                 of: p5, colorTransferName: transfer, colorSpaceName: matrix
             ))
         }
-    }
-
-    /// The colour fields are codec parameters, which a container `colr` box
-    /// fills as well as the SPS: a genuine P5 muxed with `colr` 9/16/9 looks
-    /// exactly like a relabelled one until its RPU is read.
-    @Test("an RPU that reads 5 keeps a Profile 5 record whatever its colour fields say")
-    func confirmedProfile5IgnoresContainerColour() {
-        #expect(!DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
-            of: p5, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: 5
-        ))
-        // Unread, the colour fields are all there is.
+        let corrected = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "smpte2084"))
         #expect(DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
-            of: p5, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: nil
-        ))
-        // The RPU protects only a P5 record; a base-layer profile is unaffected.
-        #expect(DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
-            of: p81, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: 5
+            of: corrected, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix
         ))
     }
 
@@ -269,35 +258,41 @@ struct DolbyVisionServingMatrixTests {
         #expect(served.criteria == .sdr)
     }
 
-    @Test("a Profile 5 record over an HDR10 VUI with baseLayerOnly: plain hvc1, record stripped")
-    func relabelledProfile5BaseLayerOnly() {
-        let served = Served(
-            p5, range: .pq, vui: hdr10VUI, preference: .baseLayerOnly, display: .dolbyVision
-        )
+    /// Whether the audit answered can hinge on startup speed alone: a record
+    /// it left as 5 — RPU read as 5, budget spent, no libdovi — is served as
+    /// P5 under either preference.
+    @Test("a Profile 5 record over an HDR10 VUI the audit left standing stays Profile 5 under baseLayerOnly")
+    func unsettledProfile5KeepsItsRecord() {
+        for preference in [DolbyVisionPreference.automatic, .baseLayerOnly] {
+            let served = Served(p5, range: .pq, vui: hdr10VUI, preference: preference, display: .dolbyVision)
+            #expect(served.declared == p5)
+            #expect(!served.stripsRecord)
+            #expect(served.codecs == "dvh1.05.06")
+            #expect(served.supplemental == nil)
+            #expect(served.videoRange == .pq)
+            #expect(served.criteria == .dolbyVision)
+        }
+    }
+
+    @Test("a Profile 5 record the RPU corrected to 8 honours baseLayerOnly, PQ or HLG")
+    func correctedProfile5BaseLayerOnly() throws {
+        let pq = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "smpte2084"))
+        let served = Served(pq, range: .pq, vui: hdr10VUI, preference: .baseLayerOnly, display: .dolbyVision)
         #expect(served.declared == nil)
         #expect(served.stripsRecord)
         #expect(served.codecs == "hvc1.2.4.L153.B0")
         #expect(served.supplemental == nil)
         #expect(served.videoRange == .pq)
         #expect(served.criteria == .hdr10)
-        // …and automatic keeps serving it as Profile 5.
-        let automatic = Served(p5, range: .pq, vui: hdr10VUI, preference: .automatic, display: .dolbyVision)
-        #expect(automatic.codecs == "dvh1.05.06")
-        #expect(!automatic.stripsRecord)
-    }
 
-    /// The probe reads every P5 as PQ; a base layer presented alone is
-    /// declared with the range its own VUI states, or an HLG base would go
-    /// out as `VIDEO-RANGE=PQ`.
-    @Test("a Profile 5 record over an HLG VUI with baseLayerOnly is declared HLG")
-    func relabelledProfile5HLGBase() {
-        let served = Served(
-            p5, range: .pq, vui: ("arib-std-b67", "bt2020nc"),
+        let hlg = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "arib-std-b67"))
+        let hlgServed = Served(
+            hlg, range: DolbyVisionRecordAudit.dynamicRange(of: hlg), vui: ("arib-std-b67", "bt2020nc"),
             preference: .baseLayerOnly, display: .dolbyVision
         )
-        #expect(served.declared == nil)
-        #expect(served.videoRange == .hlg)
-        #expect(served.criteria == .hlg)
+        #expect(hlgServed.declared == nil)
+        #expect(hlgServed.videoRange == .hlg)
+        #expect(hlgServed.criteria == .hlg)
         // Nothing moves without the preference, or for profiles whose range
         // the record already names.
         #expect(HLSRemuxer.servedDynamicRange(
@@ -515,8 +510,7 @@ struct DolbyVisionRecordAuditTests {
     func confirmedProfile5KeepsItsRecord() {
         #expect(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 5, colorTransferName: "smpte2084") == nil)
         for preference in [DolbyVisionPreference.automatic, .baseLayerOnly] {
-            let served = Served(p5, range: .pq, vui: hdr10VUI, preference: preference,
-                                display: .dolbyVision, rpuProfile: 5)
+            let served = Served(p5, range: .pq, vui: hdr10VUI, preference: preference, display: .dolbyVision)
             #expect(served.declared == p5)
             #expect(!served.stripsRecord)
             #expect(served.codecs == "dvh1.05.06")
