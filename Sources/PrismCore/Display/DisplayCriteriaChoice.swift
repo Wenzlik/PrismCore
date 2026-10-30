@@ -61,13 +61,18 @@ public struct DisplayCriteriaChoice: Sendable, Equatable {
     ///   Profile 8.2's Rec.709 base is signaled plain SDR (the same honesty
     ///   rule the playlist follows), and a DV-incapable display gets the base
     ///   layer's own range — HDR10
-    ///   for 8.1, HLG for 8.4, and for profile 5 (no base layer) the PQ its
-    ///   bitstream carries, which AVPlayer tone-maps from the `dvh1` sample
-    ///   entry on the media-direct route.
+    ///   for 8.1, HLG for 8.4, and for profile 5 (no base layer) the PQ the
+    ///   system's Dolby Vision decoder maps its `dvh1` picture to.
+    /// - The host's `DolbyVisionPreference` reaches this only through
+    ///   `declaredDolbyVision`: a source presented as its base layer declares
+    ///   none and gets its base range, while a genuine Profile 5 — which the
+    ///   preference never applies to — still asks for Dolby Vision whenever
+    ///   the display read says it can.
     ///
     /// - Parameter declaredDolbyVision: the configuration the session
     ///   *declares* — the converted 8.1 record when a P7 conversion is
-    ///   running, the source's own otherwise. Mirrors `MasterPlaylistBuilder`.
+    ///   running, `nil` when the base layer is presented alone, the source's
+    ///   own otherwise. Mirrors `MasterPlaylistBuilder`.
     public static func forSource(
         dynamicRange: DynamicRange,
         declaredDolbyVision: DolbyVisionConfiguration?,

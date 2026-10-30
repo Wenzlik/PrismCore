@@ -352,6 +352,10 @@ public actor PrismCoreSession {
         /// How `.heights` delivers the layout: `.apac` (the default) or `.lpcm` (experimental). See the
         /// initializer's doc.
         public var heightsOutput: HeightsOutput = .apac
+        /// Dolby Vision, or the base layer alone — the user's choice, kept
+        /// apart from `display`. `.automatic` (the default) is the behaviour
+        /// before the option existed. See `DolbyVisionPreference`.
+        public var dolbyVisionPreference: DolbyVisionPreference = .automatic
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -689,7 +693,8 @@ public actor PrismCoreSession {
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
-        heightsOutput: HeightsOutput = .apac
+        heightsOutput: HeightsOutput = .apac,
+        dolbyVisionPreference: DolbyVisionPreference = .automatic
     ) throws {
         try self.init(
             url: url,
@@ -719,7 +724,8 @@ public actor PrismCoreSession {
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
-            heightsOutput: heightsOutput
+            heightsOutput: heightsOutput,
+            dolbyVisionPreference: dolbyVisionPreference
         )
     }
 
@@ -853,6 +859,13 @@ public actor PrismCoreSession {
     ///   Playback is not verified: AVPlayer on macOS 27 refuses LPCM with
     ///   height channels, and tvOS toward an AV receiver has not been tried
     ///   on a device; see `HeightsOutput`.
+    /// - Parameter dolbyVisionPreference: `.automatic` (the default) presents
+    ///   Dolby Vision whenever `display` can; `.baseLayerOnly` serves the
+    ///   HDR10 / HLG base layer of a source that has one (7, 8.1, 8.4) as
+    ///   plain HEVC, with HDR10 / HLG display criteria. Map a user's "Dolby
+    ///   Vision off" setting here, and keep `display` the honest read: a
+    ///   genuine Profile 5 has no base layer, ignores the preference, and is
+    ///   still served the `dvh1.05.LL` master it needs, whatever the display.
     /// - Parameter inBandClosedCaptions: what the master says about the
     ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
     ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
@@ -891,7 +904,8 @@ public actor PrismCoreSession {
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
-        heightsOutput: HeightsOutput = .apac
+        heightsOutput: HeightsOutput = .apac,
+        dolbyVisionPreference: DolbyVisionPreference = .automatic
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -917,7 +931,8 @@ public actor PrismCoreSession {
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
-            heightsOutput: heightsOutput
+            heightsOutput: heightsOutput,
+            dolbyVisionPreference: dolbyVisionPreference
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -951,6 +966,7 @@ public actor PrismCoreSession {
             // empty, so the certain signal rescues the conservative one.
             displayIsHDRReady: display.offersHDR,
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
+            displaySource: display.source,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             sequentialPlaylist: sequentialPlaylist,
@@ -966,6 +982,7 @@ public actor PrismCoreSession {
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
             heightsOutput: heightsOutput,
+            dolbyVisionPreference: dolbyVisionPreference,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -1054,7 +1071,8 @@ public actor PrismCoreSession {
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
-        heightsOutput: HeightsOutput = .apac
+        heightsOutput: HeightsOutput = .apac,
+        dolbyVisionPreference: DolbyVisionPreference = .automatic
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -1081,7 +1099,8 @@ public actor PrismCoreSession {
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
-            heightsOutput: heightsOutput
+            heightsOutput: heightsOutput,
+            dolbyVisionPreference: dolbyVisionPreference
         )
     }
 
@@ -1226,7 +1245,8 @@ public actor PrismCoreSession {
             objectAudioRendering: options.objectAudioRendering,
             allowsAtmosOutput: options.allowsAtmosOutput,
             heightsLayout: options.heightsLayout,
-            heightsOutput: options.heightsOutput
+            heightsOutput: options.heightsOutput,
+            dolbyVisionPreference: options.dolbyVisionPreference
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
@@ -1296,8 +1316,32 @@ public actor PrismCoreSession {
     ///
     /// A master that never claimed DV skips straight to the muxed shape,
     /// exactly as before.
-    public func makeMasterRejectionFallbackSession() async throws -> PrismCoreSession {
-        guard remuxer.masterDeclaresDolbyVision else {
+    ///
+    /// A **Profile 5** master goes straight to the media playlist: its `dvh1`
+    /// primary is the only way to declare it, so there is no claim to drop,
+    /// and the media playlist still carries the `dvh1` sample entry and its
+    /// record. Seek the new item to where playback was, as with any successor.
+    ///
+    /// - Parameter error: the `AVPlayerItem` error that triggered the
+    ///   fallback, logged with its rejection code (`MasterRejection.code(of:)`)
+    ///   so a field log shows which refusal it was. Optional and never
+    ///   consulted for the decision.
+    public func makeMasterRejectionFallbackSession(
+        after error: (any Error)? = nil
+    ) async throws -> PrismCoreSession {
+        let tier = MasterRejection.fallbackTier(
+            masterDeclaresDolbyVision: remuxer.masterDeclaresDolbyVision,
+            masterIsDolbyVisionOnly: remuxer.masterIsDolbyVisionOnly
+        )
+        if remuxer.masterDeclaresDolbyVision {
+            PrismCoreLog.notice(
+                "dv-diag: master refused (code \(MasterRejection.code(of: error).map { "\($0)" } ?? "unknown"));"
+                    + " falling back to " + (tier == .mediaPlaylist
+                        ? "the media playlist (sample entry and record unchanged)"
+                        : "the master without its Dolby Vision claim")
+            )
+        }
+        guard tier == .withoutDolbyVision else {
             return try await makeMuxedFallbackSession()
         }
         return try await makeSession { options in

@@ -254,16 +254,39 @@ struct MasterPlaylistBuilderTests {
         #expect(line.contains("VIDEO-RANGE=PQ"))
     }
 
-    @Test("Dolby Vision Profile 5 has no valid master for a non-DV display")
+    /// The P5 master is the same on any HDR display: there is no base codec
+    /// to declare instead of `dvh1`, and the system's Dolby Vision decoder
+    /// maps the picture on an HDR10 panel. 3.9.2 refused to build it here,
+    /// which sent P5 media-direct whenever a host said "no Dolby Vision".
+    @Test("Dolby Vision Profile 5 gets the same dvh1.05 master on a non-DV display")
     func profile5NonDVDisplay() throws {
-        let description = try variant(
-            range: .pq,
-            dolbyVision: dolbyVision(profile: 5, compatibilityID: 0),
-            dvCapableDisplay: false
+        let playlist = try MasterPlaylistBuilder.build(
+            try variant(
+                range: .pq,
+                dolbyVision: dolbyVision(profile: 5, compatibilityID: 0),
+                dvCapableDisplay: false
+            )
         )
-        #expect(throws: MasterPlaylistBuilder.SignalingError
-            .dolbyVisionProfile5RequiresCapableDisplay) {
-            _ = try MasterPlaylistBuilder.build(description)
+        let line = try streamInf(playlist)
+        #expect(line.contains("CODECS=\"dvh1.05.06,ec-3\""))
+        #expect(!line.contains("hvc1"))
+        #expect(!line.contains("SUPPLEMENTAL-CODECS"))
+        #expect(line.contains("VIDEO-RANGE=PQ"))
+        #expect(line.contains("FRAME-RATE=23.976"))
+        #expect(line.contains("RESOLUTION=3840x2160"))
+    }
+
+    @Test("the Profile 5 codec tag follows the DV level, zero-padded")
+    func profile5CodecTagFollowsLevel() throws {
+        for (level, tag) in [(UInt8(6), "dvh1.05.06"), (9, "dvh1.05.09"), (13, "dvh1.05.13")] {
+            let description = try variant(
+                range: .pq,
+                dolbyVision: dolbyVision(profile: 5, level: level, compatibilityID: 0),
+                dvCapableDisplay: true
+            )
+            #expect(MasterPlaylistBuilder.primaryVideoCodecString(for: description) == tag)
+            #expect(MasterPlaylistBuilder.codecsAttribute(for: description) == tag + ",ec-3")
+            #expect(MasterPlaylistBuilder.supplementalCodecsString(for: description) == nil)
         }
     }
 

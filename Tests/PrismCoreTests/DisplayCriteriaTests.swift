@@ -104,8 +104,8 @@ struct DisplayCriteriaChoiceTests {
             dynamicRange: .hlg, declaredDolbyVision: p84,
             display: display(hdr: true, dv: false), frameRate: 24
         ).target == .hlg)
-        // 5: no base layer; its bitstream is PQ and AVPlayer tone-maps from
-        // the dvh1 sample entry on the media-direct route.
+        // 5: no base layer; the system's Dolby Vision decoder maps its dvh1
+        // picture to PQ, served through the same dvh1.05 master.
         #expect(DisplayCriteriaChoice.forSource(
             dynamicRange: .pq, declaredDolbyVision: p5,
             display: display(hdr: true, dv: false), frameRate: 24
@@ -269,15 +269,25 @@ struct DisplayCriteriaLogicTests {
 @Suite("Master variant permission")
 struct MasterVariantPermissionTests {
 
-    @Test("Profile 5 on a non-DV display routes media-direct — a bare dvh1.05 master has no fallback variant")
-    func p5NeedsDVDisplay() {
-        #expect(!HLSRemuxer.masterVariantPermitted(
+    /// The master is what a P5 picture needs on an HDR10 panel too; a panel
+    /// that refuses it is the one-shot fallback's job, not a proactive guess.
+    @Test("Profile 5 gets a master on an HDR display with or without Dolby Vision")
+    func p5MasterOnAnyHDRDisplay() {
+        #expect(HLSRemuxer.masterVariantPermitted(
             dynamicRange: .pq, dolbyVision: p5,
             displayIsHDRReady: true, displayIsDolbyVisionCapable: false
         ))
         #expect(HLSRemuxer.masterVariantPermitted(
             dynamicRange: .pq, dolbyVision: p5,
             displayIsHDRReady: true, displayIsDolbyVisionCapable: true
+        ))
+    }
+
+    @Test("Profile 5 on an SDR display stays media-direct, like any PQ source")
+    func p5OnSDRDisplayIsMediaDirect() {
+        #expect(!HLSRemuxer.masterVariantPermitted(
+            dynamicRange: .pq, dolbyVision: p5,
+            displayIsHDRReady: false, displayIsDolbyVisionCapable: false
         ))
     }
 

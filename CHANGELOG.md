@@ -8,6 +8,64 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [3.9.3] — 2026-10-30
+
+Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
+HDR display, and a host's "Dolby Vision off" setting gets its own option
+instead of a false display read. Additive and source-compatible.
+
+### Added
+
+- **`DolbyVisionPreference`** (public API, additive):
+  `PrismCoreSession.Options.dolbyVisionPreference` and a
+  `dolbyVisionPreference:` parameter on the initializers and
+  `readingCurrentDisplay`, default `.automatic` (unchanged behaviour).
+  `.baseLayerOnly` presents the base layer of a source that has one — 7, 8.1,
+  8.4 — as plain `hvc1` with the `dvcC`/`dvvC` record stripped, no
+  `SUPPLEMENTAL-CODECS` and HDR10 / HLG display criteria, the shape a non-DV
+  display already got. A genuine Profile 5 ignores it (it has no base layer);
+  the one Profile 5 it applies to is a record whose VUI declares a BT.2020
+  YCbCr PQ / HLG base, which a genuine P5 cannot (declared with the range
+  that VUI states). `DisplayCapabilities`
+  stays the honest display read: map a user setting to the preference, not
+  to `isDolbyVisionCapable: false`. Carried by `makeSession(changing:)` and
+  both rejection fallbacks.
+- `MasterRejection.code(of:)`: which rejection code (`-11868`, `-11848`,
+  `-1002`) an error carries, `nil` when it is not a master rejection.
+- `makeMasterRejectionFallbackSession(after:)`: takes the triggering error,
+  optionally, so the fallback's log line names its code. The existing
+  no-argument call still compiles.
+- A `dv-diag` notice at session start for every Dolby Vision source: profile,
+  level, preference, display read and its source, the VUI, the declared
+  configuration, the playlist shape (`master` / `media`), the exact `CODECS`,
+  `SUPPLEMENTAL-CODECS` and `VIDEO-RANGE`, the sample-entry fourcc, whether
+  the record was kept or stripped, the `colr` box written and the display
+  criteria requested. One more when a refused master falls back. A Profile 5
+  record over a YCbCr HDR VUI is called out in the line.
+
+### Changed
+
+- **Profile 5 gets its `dvh1.05.LL` master on every HDR display**, with or
+  without Dolby Vision, and whatever the caller said about Dolby Vision. 3.9.2
+  sent it media-direct on a display that was not DV-capable, which is what a
+  host saying "no Dolby Vision" to express a user setting turned every P5 into.
+  `MasterPlaylistBuilder` no longer throws
+  `SignalingError.dolbyVisionProfile5RequiresCapableDisplay` (kept, unused, so
+  code matching on it still compiles). An SDR display still gets the media
+  playlist, as for any PQ source.
+- **A refused Profile 5 master falls back once to the media playlist**
+  (`makeMasterRejectionFallbackSession`), keeping the `dvh1` sample entry and
+  its record. It used to take the DV-less tier, which for P5 would rebuild
+  the same `dvh1` master: there is no claim to drop from a P5 primary.
+
+### Fixed
+
+- **Profile 5's sample entry always carries its `colr` box** (BT.2020 / PQ /
+  BT.2020nc, the source's range or limited). movenc writes `colr` only from
+  the stream's colour fields, and P5 encoders routinely leave the VUI
+  unspecified, so such a source reached AVPlayer as a `dvh1` entry with no
+  colour description, which the Dolby Vision decoder does not engage on.
+
 ## [3.9.2] — 2026-10-29
 
 An opt-in, experimental `HeightsOutput.lpcm` for TrueHD Atmos heights, kept

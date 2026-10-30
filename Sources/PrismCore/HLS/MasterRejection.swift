@@ -43,17 +43,47 @@ public enum MasterRejection {
     /// whose underlying error carries the real reason, and checking only the
     /// outer layer misses most real rejections.
     public static func matches(_ error: (any Error)?) -> Bool {
-        guard let error else { return false }
+        code(of: error) != nil
+    }
+
+    /// The rejection code this error carries, or `nil` when it is not a
+    /// master rejection — what the fallback's log line names, so a field log
+    /// says which of the three refusals it was.
+    public static func code(of error: (any Error)?) -> Int? {
+        guard let error else { return nil }
         var next: NSError? = error as NSError
         // Bounded rather than `while let`: an underlying-error chain is
         // attacker-adjacent input in the sense that it comes from a framework we
         // don't control, and a cycle here would hang the host's failure handler.
         var depth = 0
         while let current = next, depth < 8 {
-            if errorCodes.contains(current.code) { return true }
+            if errorCodes.contains(current.code) { return current.code }
             next = current.userInfo[NSUnderlyingErrorKey] as? NSError
             depth += 1
         }
-        return false
+        return nil
+    }
+
+    /// What a refused master is retried as.
+    enum FallbackTier: String, Equatable {
+        /// The same master without its Dolby Vision claim — a base-layer
+        /// profile's `SUPPLEMENTAL-CODECS`, which the panel may be what refused.
+        case withoutDolbyVision
+        /// No master at all: the media playlist, one audio track muxed in.
+        case mediaPlaylist
+    }
+
+    /// The tier for a refused master.
+    ///
+    /// A Profile 5 master goes straight to the media playlist. Its `dvh1`
+    /// primary cannot be dropped — there is no base codec to declare instead —
+    /// so the DV-less tier would rebuild the very same master and earn the
+    /// same refusal, and the retry of that retry would do it again. The
+    /// media playlist keeps the `dvh1` sample entry and its record, which is
+    /// what lets AVFoundation map the picture without a manifest to validate.
+    static func fallbackTier(
+        masterDeclaresDolbyVision: Bool, masterIsDolbyVisionOnly: Bool
+    ) -> FallbackTier {
+        masterDeclaresDolbyVision && !masterIsDolbyVisionOnly ? .withoutDolbyVision : .mediaPlaylist
     }
 }

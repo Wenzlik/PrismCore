@@ -68,7 +68,7 @@ table: the app's name, a link, and its platforms.
 | Video (native) | H.264, HEVC (incl. Main 10), AV1 **where the device has a hardware decoder** — asked with `VTIsHardwareDecodeSupported`, not inferred from a chip name |
 | Video (software) | VP9 / VP8, MPEG-2, MPEG-4 Part 2, VC-1 / WMV3, AV1 without hardware (libdav1d), interlaced H.264 with CPU `bwdif` deinterlace at field rate |
 | HDR | HDR10 (PQ) and HLG, signaled honestly in the master playlist and tone-mapped by the system |
-| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.1 and converted Profile 7 play as their HDR10 base, 8.4 as its HLG base |
+| Dolby Vision | Profile 5 (`dvh1` sample entry), 8.1 and 8.4 (`hvc1` + `SUPPLEMENTAL-CODECS`), **Profile 7 converted to single-layer 8.1** through libdovi (mode 2: the enhancement layer is dropped); 8.2's Rec.709 base plays as plain SDR because that is what it is. Dolby Vision is signalled only to a display that reports `DisplayCapabilities.isDolbyVisionCapable` — `DisplayCapabilities.current()` never does on macOS — and otherwise 8.1 and converted Profile 7 play as their HDR10 base, 8.4 as its HLG base. Profile 5 has no base layer and gets its `dvh1.05.LL` master on any HDR display (a refusal falls back once to the media playlist); `dolbyVisionPreference: .baseLayerOnly` presents the base layer of 7 / 8.x for a user who turned Dolby Vision off |
 | HDR10+ | ST 2094-40 SEI is stream-copied like any other SEI. Opt-in **detection** (`hdr10Plus: .standard` on `SourceProbe.open`) reads a bounded run of video packets and reports `seen` / `notSeenWithinBudget` / `unknown` in `SourceInfo.hdr10Plus` — never "absent". Reporting only: no playlist or display-criteria signalling until a device run shows it helps |
 | Dolby Atmos | EAC3+JOC **stream-copied**, and the `dec3` box's TS 103 420 type-A extension re-applied to the init segment — without it AVFoundation plays the same bitstream as plain DD+ |
 | Audio (copy) | AAC (non-LATM), AC3, EAC3, FLAC, ALAC — bit-for-bit. A FLAC whose STREAMINFO declares blocks under 192 samples, which CoreMedia refuses to open, is bridged instead |
@@ -90,7 +90,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.2")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.3")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -956,7 +956,9 @@ a decoder configuration that isn't there.
 the sample entry's fourcc, and the `dvcC`/`dvvC` box all describe the same track,
 and AVPlayer checks them against each other. Profile 5 gets `dvh1` as its sample
 entry — its picture is IPT-PQc2, not YCbCr, and an `hvc1` entry over P5 renders the
-familiar green-and-purple — while 8.x deliberately keeps `hvc1`, because its base
+familiar green-and-purple; its entry also gets the profile's fixed `colr` (BT.2020 /
+PQ / BT.2020nc), because P5 encoders often leave the VUI unspecified and the Dolby
+Vision decoder does not engage on a `dvh1` entry without one — while 8.x deliberately keeps `hvc1`, because its base
 layer really is plain-HEVC-compatible and the `dvvC` box is what upgrades it.
 Claiming `dvh1` there would deny the very fallback that makes 8.1 worth having.
 The boxes themselves need `-strict unofficial`: they are Dolby's specification
@@ -1165,7 +1167,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.2")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "3.9.3")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
@@ -1220,7 +1222,7 @@ Shipping, and stable under semantic versioning since 1.0.0 (see *Stability and
 versioning*). Two headline claims are still proven by construction rather than by a
 lab.
 
-The test suite is 882 tests across 124 suites, hermetic apart from an opt-in
+The test suite is 910 tests across 128 suites, hermetic apart from an opt-in
 real-media harness. It exercises the playlists, the loopback server, the subtitle
 renditions and the audio bridge's decode → resample → FIFO → encode chain, plus
 end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces)

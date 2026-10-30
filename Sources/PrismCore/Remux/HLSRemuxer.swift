@@ -38,8 +38,9 @@ import Libavutil
 ///   into the video's own segments and the media playlist is served directly.
 ///   Used whenever a master playlist would be *dishonest or refused* — the
 ///   source has no derivable `CODECS` string (HEVC or H.264 with Annex-B
-///   extradata), its dynamic range can't be declared to this display, or Dolby
-///   Vision Profile 5 meets a non-DV display. Renditions live in the master, so
+///   extradata), or its dynamic range can't be declared to this display — and,
+///   through the host's rejection fallback, a Dolby Vision Profile 5 master
+///   the panel refused. Renditions live in the master, so
 ///   no master means the audio has to ride inside the variant or not at all;
 ///   falling back to v0's single muxed track is strictly better than serving
 ///   silence.
@@ -303,6 +304,12 @@ final class HLSRemuxer: @unchecked Sendable {
     /// is `false`.
     private let displayIsHDRReady: Bool
     private let displayIsDolbyVisionCapable: Bool
+    /// Where the display read came from — only for the `dv-diag` line, so a
+    /// field log tells a caller's word from a measured read.
+    private let displaySource: DisplayCapabilities.Source
+    /// The host's choice between Dolby Vision and a base layer
+    /// (`PrismCoreSession.Options.dolbyVisionPreference`).
+    private let dolbyVisionPreference: DolbyVisionPreference
     /// Present = demand-driven session (phase 5): plan the segmentation
     /// upfront, publish complete VOD playlists, and re-anchor the producer
     /// wherever the loopback reports AVPlayer is fetching.
@@ -542,6 +549,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// drops. `false` before the master is written, and for masters with no
     /// DV claim to drop.
     private var storedMasterDeclaresDolbyVision = false
+    /// Whether that claim is a Profile 5 `dvh1` primary, which no tier can
+    /// drop — the rejection fallback goes straight to the media playlist.
+    private var storedMasterIsDolbyVisionOnly = false
 
     var displayCriteriaChoice: DisplayCriteriaChoice? {
         criteriaChoiceLock.withLock { storedCriteriaChoice }
@@ -559,6 +569,10 @@ final class HLSRemuxer: @unchecked Sendable {
 
     var masterDeclaresDolbyVision: Bool {
         criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision }
+    }
+
+    var masterIsDolbyVisionOnly: Bool {
+        criteriaChoiceLock.withLock { storedMasterIsDolbyVisionOnly }
     }
 
     /// The dialogue-boost renditions the served master actually declares —
@@ -695,6 +709,8 @@ final class HLSRemuxer: @unchecked Sendable {
         firstSegmentSeconds: Int = SegmentPlan.defaultFirstSegmentSeconds,
         displayIsHDRReady: Bool = false,
         displayIsDolbyVisionCapable: Bool = false,
+        displaySource: DisplayCapabilities.Source = .caller,
+        dolbyVisionPreference: DolbyVisionPreference = .automatic,
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
         sequentialPlaylist: PrismCoreSession.SequentialPlaylist = .event,
@@ -735,6 +751,8 @@ final class HLSRemuxer: @unchecked Sendable {
         self.subtitles = SubtitleRenditionSet(outputDirectory: outputDirectory, cueHistory: subtitleCueHistory)
         self.displayIsHDRReady = displayIsHDRReady
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
+        self.displaySource = displaySource
+        self.dolbyVisionPreference = dolbyVisionPreference
         self.demand = demand
         self.segmentCacheBytes = segmentCacheBytes
         self.sequentialPlaylist = sequentialPlaylist
@@ -1047,20 +1065,45 @@ final class HLSRemuxer: @unchecked Sendable {
         // converter is nil for every other source (and when libdovi isn't in this
         // build), and then nothing below changes.
         let dolbyVisionConverter = makeDolbyVisionConverter(video: videoTrack)
+        // The host asked for the base layer, and this source has one: nothing
+        // Dolby Vision is declared anywhere — no `dvh1`, no supplemental, no
+        // record, HDR10 / HLG criteria. A P7 conversion still runs, because it
+        // is also what drops the enhancement layer an `hvc1` decoder cannot
+        // take; its 8.1 record is simply never written. A genuine Profile 5
+        // never gets here (see `DolbyVisionPreference.baseLayerOnly`).
+        //
         // What the manifest may claim: the *converted* configuration when we are
         // converting, the source's own otherwise. Declaring 8.1 for a stream
         // whose RPUs are still P7 would be the one lie AVKit can't detect at
-        // parse time and can only fail on at the display.
-        let outputDolbyVision = dolbyVisionConverter != nil
-            ? videoTrack.dolbyVision?.convertedToProfile81
-            : videoTrack.dolbyVision
+        // parse time and can only fail on at the display. And whether the
+        // served sample entry carries the record — decided once, here, because
+        // the `dv-diag` line has to report what was written.
+        let presentsBaseLayer = dolbyVisionPreference.presentsBaseLayer(
+            of: videoTrack.dolbyVision,
+            colorTransferName: videoTrack.colorTransferName,
+            colorSpaceName: videoTrack.colorSpaceName
+        )
+        let dolbyVisionServing = Self.dolbyVisionServing(
+            source: videoTrack.dolbyVision,
+            converting: dolbyVisionConverter != nil,
+            presentsBaseLayer: presentsBaseLayer,
+            displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
+        )
+        let outputDolbyVision = dolbyVisionServing.declared
+        let stripsDolbyVisionRecord = dolbyVisionServing.stripsRecord
+        let servedRange = Self.servedDynamicRange(
+            probed: videoTrack.dynamicRange,
+            source: videoTrack.dolbyVision,
+            presentsBaseLayer: presentsBaseLayer,
+            colorTransferName: videoTrack.colorTransferName
+        )
 
         // What the panel should be asked for before AVPlayer loads any of
         // this. Computed from the same declared configuration the manifest
         // claims, so the criteria and the playlist never disagree about what
         // is being played.
         let criteriaChoice = DisplayCriteriaChoice.forSource(
-            dynamicRange: videoTrack.dynamicRange,
+            dynamicRange: servedRange,
             declaredDolbyVision: outputDolbyVision,
             display: DisplayCapabilities(
                 isHDRReady: displayIsHDRReady,
@@ -1071,7 +1114,7 @@ final class HLSRemuxer: @unchecked Sendable {
         criteriaChoiceLock.withLock { storedCriteriaChoice = criteriaChoice }
 
         let videoVariant = makeVideoVariant(
-            input: input, video: videoTrack, dolbyVision: outputDolbyVision
+            input: input, video: videoTrack, dynamicRange: servedRange, dolbyVision: outputDolbyVision
         )
         let masterIsPossible = videoVariant.map { (try? MasterPlaylistBuilder.build($0)) != nil } ?? false
 
@@ -1291,6 +1334,9 @@ final class HLSRemuxer: @unchecked Sendable {
 
         var renditions: [AudioRenditionWriter] = []
         defer { renditions.forEach { $0.close() } }
+        /// The variant the served master declares, once it is written — `nil`
+        /// for a media-playlist session. Only the `dv-diag` line reads it.
+        var servedMasterVariant: MasterPlaylistBuilder.VariantDescription?
         var muxedBridge: AudioBridge?
         defer { muxedBridge?.close() }
         // The video stream is the one output stream we describe ourselves rather
@@ -1310,8 +1356,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     // Only a conversion has to replace the source's own record.
                     rewriteDolbyVisionRecord: dolbyVisionConverter != nil,
                     // A display that cannot present Dolby Vision must not be
-                    // sent a `dvvC` box, whatever the manifest says.
-                    stripDolbyVisionRecord: !displayIsDolbyVisionCapable
+                    // sent a `dvvC` box, whatever the manifest says — and a
+                    // base layer presented alone must not be sent one at all.
+                    stripDolbyVisionRecord: stripsDolbyVisionRecord
                 )
                 // movenc takes the track timescale from the stream's time base.
                 if let videoGrid { outStream.pointee.time_base = videoGrid.outputTimeBase }
@@ -1539,7 +1586,12 @@ final class HLSRemuxer: @unchecked Sendable {
                 // claim may be what the panel refused gets one retry without
                 // it before the muxed shape (see the session's factory).
                 let claimsDV = MasterPlaylistBuilder.declaresDolbyVision(variant)
-                criteriaChoiceLock.withLock { storedMasterDeclaresDolbyVision = claimsDV }
+                let dolbyVisionOnly = variant.dolbyVision?.isSingleLayerDVOnly == true
+                criteriaChoiceLock.withLock {
+                    storedMasterDeclaresDolbyVision = claimsDV
+                    storedMasterIsDolbyVisionOnly = dolbyVisionOnly
+                }
+                servedMasterVariant = variant
                 // Report only what the master actually declares — a requested
                 // level that couldn't be built must not be promised to the
                 // host, whose UI builds rows from this list.
@@ -1574,6 +1626,50 @@ final class HLSRemuxer: @unchecked Sendable {
                     audioDeliveryStore.update(index: Int(audio.index), delivery: .streamCopy)
                 }
             }
+        }
+
+        // What a Dolby Vision session actually served, in one line: the
+        // device log of a wrong-colours report has to prove the playlist
+        // shape, the exact codec strings and the sample entry, because each of
+        // them alone has been the cause before.
+        if let sourceDolbyVision = videoTrack.dolbyVision {
+            let inPar = input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee
+            let colour: (AVColorPrimaries, AVColorTransferCharacteristic, AVColorSpace, AVColorRange) =
+                outputDolbyVision?.isSingleLayerDVOnly == true
+                    ? Self.profile5Colour(sourceRange: inPar.color_range)
+                    : (inPar.color_primaries, inPar.color_trc, inPar.color_space, inPar.color_range)
+            var line = "dv-diag: profile=\(sourceDolbyVision.profileName) level=\(sourceDolbyVision.level)"
+                + " preference=\(dolbyVisionPreference.rawValue)"
+                + " display hdr=\(displayIsHDRReady) dv=\(displayIsDolbyVisionCapable) (\(displaySource.rawValue))"
+                + " vui trc=\(videoTrack.colorTransferName ?? "-") matrix=\(videoTrack.colorSpaceName ?? "-")"
+                + " declared=\(outputDolbyVision?.profileName ?? "none")"
+            if let master = servedMasterVariant {
+                line += " playlist=master CODECS=\"\(MasterPlaylistBuilder.codecsAttribute(for: master))\""
+                if let supplemental = MasterPlaylistBuilder.supplementalCodecsString(for: master) {
+                    line += " SUPPLEMENTAL-CODECS=\"\(supplemental)\""
+                }
+                line += " VIDEO-RANGE=\(master.dynamicRange.rawValue)"
+            } else {
+                line += " playlist=media"
+            }
+            let fourCC = outputDolbyVision?.isSingleLayerDVOnly == true
+                ? "dvh1" : (videoTrack.codecName == "hevc" ? "hvc1" : videoTrack.codecName)
+            line += " fourcc=\(fourCC)"
+                + " record=\(stripsDolbyVisionRecord ? "stripped" : "kept")"
+                + " colr=\(Self.colrDescription(primaries: colour.0, transfer: colour.1, matrix: colour.2, range: colour.3))"
+                + " criteria=\(criteriaChoice.target.rawValue)"
+            // The one shape a host can act on: a Profile 5 record over a VUI
+            // that names a YCbCr HDR base. Served as `dvh1` the decoder reads
+            // that YCbCr as IPT, so if the picture is wrong the record is.
+            if sourceDolbyVision.isSingleLayerDVOnly, !presentsBaseLayer,
+               DolbyVisionPreference.vuiDeclaresYCbCrHDRBase(
+                   colorTransferName: videoTrack.colorTransferName,
+                   colorSpaceName: videoTrack.colorSpaceName
+               ) {
+                line += "; Profile 5 record over a BT.2020 YCbCr HDR VUI (a genuine P5 leaves it"
+                    + " unspecified): if colours are wrong, dolbyVisionPreference .baseLayerOnly serves its base layer"
+            }
+            PrismCoreLog.notice(line)
         }
 
         let muxedBridgeIndex: Int32? = {
@@ -2921,6 +3017,22 @@ final class HLSRemuxer: @unchecked Sendable {
             ? Self.fourCC("dvh1")
             : (par.pointee.codec_id == AV_CODEC_ID_HEVC ? Self.fourCC("hvc1") : 0)
 
+        // A `dvh1` entry also needs its `colr` box, and movenc writes one only
+        // from what codecpar says. Profile 5 encoders routinely leave the VUI
+        // unspecified (IPT has no matrix code point), so a stream-copied P5
+        // could reach AVPlayer as `dvh1` with no colour description at all —
+        // and the Dolby Vision decoder does not engage on that entry, so the
+        // IPT picture is shown unmapped. The tuple is fixed by the profile, so
+        // writing it is a repair, never a guess; only the range is the
+        // source's own (full-range P5 is legal).
+        if declaredDolbyVision?.isSingleLayerDVOnly == true {
+            let colour = Self.profile5Colour(sourceRange: par.pointee.color_range)
+            par.pointee.color_primaries = colour.primaries
+            par.pointee.color_trc = colour.transfer
+            par.pointee.color_space = colour.matrix
+            par.pointee.color_range = colour.range
+        }
+
         // `hvcC` → `hvc1`-correct form. Only HEVC has the problem (an `avcC`
         // carries no arrays to normalize), and `normalize` returns nil when the
         // record was already right, so the common case keeps the source's own
@@ -2960,11 +3072,11 @@ final class HLSRemuxer: @unchecked Sendable {
         //
         // Only ever for a profile with a real base layer. Profile 5's picture
         // is IPT-PQc2 and the record is what says so: strip it there and the
-        // green-and-purple misread is what plays. P5 on a non-DV display is
-        // already handled a level up, by refusing to build a master at all.
-        if Self.shouldStripDolbyVisionRecord(
-            declared: declaredDolbyVision, displayIsDolbyVisionCapable: !stripDolbyVisionRecord
-        ) {
+        // green-and-purple misread is what plays (`shouldStripDolbyVisionRecord`
+        // keeps it on every display). The caller decides, because a base layer
+        // presented alone (`DolbyVisionPreference.baseLayerOnly`) is stripped
+        // with nothing declared.
+        if stripDolbyVisionRecord {
             av_packet_side_data_remove(
                 par.pointee.coded_side_data,
                 &par.pointee.nb_coded_side_data,
@@ -2995,8 +3107,8 @@ final class HLSRemuxer: @unchecked Sendable {
     /// - Profile 5 keeps it on any display, because for P5 the record is not an
     ///   upgrade but the *description* — its picture is IPT-PQc2, and an entry
     ///   that omits the record has it read as YCbCr (the green-and-purple
-    ///   misread). P5 on a non-DV display is refused a master a level up
-    ///   instead, which is the honest answer there.
+    ///   misread). On a display without Dolby Vision the system's decoder
+    ///   still needs it to map the picture to HDR10.
     /// - Everything else — a base-layer-compatible profile going to a display
     ///   that cannot present DV — is stripped, so the sample entry matches a
     ///   manifest that is no longer claiming DV.
@@ -3007,6 +3119,95 @@ final class HLSRemuxer: @unchecked Sendable {
         guard declared.isPresentableAsDolbyVision else { return true }
         guard !displayIsDolbyVisionCapable else { return false }
         return !declared.isSingleLayerDVOnly
+    }
+
+    /// The configuration the session *declares* — in the manifest, the sample
+    /// entry's fourcc and the display criteria alike — and whether the sample
+    /// entry is served without the source's record.
+    ///
+    /// - A base layer presented alone (`presentsBaseLayer`, from the host's
+    ///   `DolbyVisionPreference`) declares nothing, so every one of those reads
+    ///   the source as the plain HEVC it then is, and its record is stripped:
+    ///   an `hvc1` entry carrying a `dvcC`/`dvvC` is refused on its own.
+    /// - Otherwise a conversion declares the 8.1 it produces, anything else
+    ///   the source's own, and the record follows
+    ///   `shouldStripDolbyVisionRecord` for the display.
+    static func dolbyVisionServing(
+        source: DolbyVisionConfiguration?,
+        converting: Bool,
+        presentsBaseLayer: Bool,
+        displayIsDolbyVisionCapable: Bool
+    ) -> (declared: DolbyVisionConfiguration?, stripsRecord: Bool) {
+        guard !presentsBaseLayer else { return (nil, source != nil) }
+        let declared = converting ? source?.convertedToProfile81 : source
+        return (
+            declared,
+            shouldStripDolbyVisionRecord(
+                declared: declared, displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
+            )
+        )
+    }
+
+    /// The range the manifest and the display criteria declare.
+    ///
+    /// The probe's, except for a Profile 5 (or AV1 10.0) record presented as
+    /// its base layer: the probe reads every P5 as PQ from the profile alone,
+    /// because a genuine P5's VUI says nothing, but a base layer presented
+    /// alone is exactly the case whose VUI *does* say — and an HLG base must
+    /// not be declared `VIDEO-RANGE=PQ`. 7 and 8.x already take their range
+    /// from the record's compatibility id.
+    static func servedDynamicRange(
+        probed: DynamicRange,
+        source: DolbyVisionConfiguration?,
+        presentsBaseLayer: Bool,
+        colorTransferName: String?
+    ) -> DynamicRange {
+        guard presentsBaseLayer, let source, source.baseLayerSignalCompatibilityID == 0,
+              source.profile == 5 || source.profile == 10 else { return probed }
+        switch colorTransferName {
+        case "arib-std-b67": return .hlg
+        case "smpte2084": return .pq
+        default: return probed
+        }
+    }
+
+    /// The colour description a Profile 5 `dvh1` entry is served with:
+    /// BT.2020 primaries, PQ, BT.2020 non-constant matrix — the code points
+    /// Dolby specifies for the IPT-PQc2 signal, and what the `colr` box of a
+    /// working P5 init segment carries. The range is the source's when it says
+    /// one, limited when it doesn't.
+    static func profile5Colour(sourceRange: AVColorRange) -> (
+        primaries: AVColorPrimaries,
+        transfer: AVColorTransferCharacteristic,
+        matrix: AVColorSpace,
+        range: AVColorRange
+    ) {
+        (
+            AVCOL_PRI_BT2020,
+            AVCOL_TRC_SMPTE2084,
+            AVCOL_SPC_BT2020_NCL,
+            sourceRange == AVCOL_RANGE_UNSPECIFIED ? AVCOL_RANGE_MPEG : sourceRange
+        )
+    }
+
+    /// The `colr` box movenc writes for these values, the way the `dv-diag`
+    /// line prints it: `nclx 9/16/9 limited`, or `none` when nothing is
+    /// specified (movenc then writes no box).
+    static func colrDescription(
+        primaries: AVColorPrimaries,
+        transfer: AVColorTransferCharacteristic,
+        matrix: AVColorSpace,
+        range: AVColorRange
+    ) -> String {
+        guard primaries != AVCOL_PRI_UNSPECIFIED || transfer != AVCOL_TRC_UNSPECIFIED
+            || matrix != AVCOL_SPC_UNSPECIFIED else { return "none" }
+        let rangeName: String
+        switch range {
+        case AVCOL_RANGE_JPEG: rangeName = "full"
+        case AVCOL_RANGE_MPEG: rangeName = "limited"
+        default: rangeName = "unspecified"
+        }
+        return "nclx \(primaries.rawValue)/\(transfer.rawValue)/\(matrix.rawValue) \(rangeName)"
     }
 
     /// A big-endian fourcc as libavcodec's `codec_tag` wants it: first character
@@ -3139,18 +3340,22 @@ final class HLSRemuxer: @unchecked Sendable {
     /// this display isn't ready for). `nil` routes the session to the muxed
     /// shape — see the type's doc.
     ///
+    /// - Parameter dynamicRange: the range served (`servedDynamicRange`),
+    ///   which differs from the probe's only for a Profile 5 record presented
+    ///   as its base layer.
     /// - Parameter dolbyVision: the configuration to *declare*, which is the
-    ///   converted 8.1 record for a P7 source being converted and the source's
-    ///   own otherwise.
+    ///   converted 8.1 record for a P7 source being converted, `nil` for a
+    ///   base layer presented alone, and the source's own otherwise.
     private func makeVideoVariant(
         input: UnsafeMutablePointer<AVFormatContext>,
         video: VideoTrackInfo,
+        dynamicRange: DynamicRange,
         dolbyVision: DolbyVisionConfiguration?
     ) -> MasterPlaylistBuilder.VariantDescription? {
         guard let codec = videoCodecDeclaration(for: video) else { return nil }
 
         guard Self.masterVariantPermitted(
-            dynamicRange: video.dynamicRange,
+            dynamicRange: dynamicRange,
             dolbyVision: dolbyVision,
             displayIsHDRReady: displayIsHDRReady,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
@@ -3163,7 +3368,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 ? .init(width: video.width, height: video.height)
                 : nil,
             frameRate: video.frameRate,
-            dynamicRange: video.dynamicRange,
+            dynamicRange: dynamicRange,
             videoCodec: codec,
             dolbyVision: dolbyVision,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
@@ -3179,25 +3384,22 @@ final class HLSRemuxer: @unchecked Sendable {
     ///   makes the manifest a lie. So an HDR source on a display the host
     ///   hasn't vouched for gets no master, which is exactly the shape v0
     ///   already served it.
-    /// - Profile 5 on a non-DV display gets no master either, *proactively*:
-    ///   its primary tag is a bare `dvh1.05.xx` (there is no base codec to
-    ///   fall back to and no `SUPPLEMENTAL-CODECS` brand for P5), so a non-DV
-    ///   client's variant filter rejects the whole master with `-11868` —
-    ///   there is no sibling variant it could pick instead. Media-direct is
-    ///   the route that works there: AVPlayer tone-maps from the `dvh1`
-    ///   sample entry. Serving the master just to watch it be refused would
-    ///   burn a failed load on every P5 play.
+    /// - Profile 5 follows the same HDR gate as any PQ source, on a display
+    ///   with or without Dolby Vision. Its bare `dvh1.05.LL` master is
+    ///   accepted on an HDR10 panel and the system's Dolby Vision decoder maps
+    ///   the IPT picture there; 3.9.2 sent it media-direct proactively
+    ///   instead, which also meant a host that said "no Dolby Vision" to mean
+    ///   a user preference never got the master a P5 needs. A panel that does
+    ///   refuse the master (`-11868` / `-11848`) is caught by the one-shot
+    ///   fallback to the media playlist
+    ///   (`MasterRejection.fallbackTier`), not guessed at here.
     static func masterVariantPermitted(
         dynamicRange: DynamicRange,
         dolbyVision: DolbyVisionConfiguration?,
         displayIsHDRReady: Bool,
         displayIsDolbyVisionCapable: Bool
     ) -> Bool {
-        guard dynamicRange == .sdr || displayIsHDRReady else { return false }
-        if let dv = dolbyVision, dv.isSingleLayerDVOnly, !displayIsDolbyVisionCapable {
-            return false
-        }
-        return true
+        dynamicRange == .sdr || displayIsHDRReady
     }
 
     /// How the video codec is declared — from the container's own configuration
