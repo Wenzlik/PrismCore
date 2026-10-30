@@ -225,7 +225,7 @@ public enum MasterPlaylistBuilder {
         /// source whose frame rate the demuxer couldn't determine therefore
         /// must not be served a master at all — it plays media-direct.
         case frameRateRequiredForHDR(DynamicRange)
-        /// No longer thrown (since 3.9.3); kept so code that matches on it
+        /// No longer thrown (since 4.0.0); kept so code that matches on it
         /// still compiles.
         ///
         /// It used to refuse a Profile 5 master for a display that cannot

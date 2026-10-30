@@ -73,7 +73,9 @@ public enum MasterRejection {
         case mediaPlaylist
     }
 
-    /// The tier for a refused master.
+    /// The tier for a refused master, or `nil` when the session served no
+    /// master: the media playlist is already the last tier, and retrying it
+    /// would mint the same session again on every refusal, forever.
     ///
     /// A Profile 5 master goes straight to the media playlist. Its `dvh1`
     /// primary cannot be dropped — there is no base codec to declare instead —
@@ -82,8 +84,9 @@ public enum MasterRejection {
     /// media playlist keeps the `dvh1` sample entry and its record, which is
     /// what lets AVFoundation map the picture without a manifest to validate.
     static func fallbackTier(
-        masterDeclaresDolbyVision: Bool, masterIsDolbyVisionOnly: Bool
-    ) -> FallbackTier {
-        masterDeclaresDolbyVision && !masterIsDolbyVisionOnly ? .withoutDolbyVision : .mediaPlaylist
+        masterServed: Bool, masterDeclaresDolbyVision: Bool, masterIsDolbyVisionOnly: Bool
+    ) -> FallbackTier? {
+        guard masterServed else { return nil }
+        return masterDeclaresDolbyVision && !masterIsDolbyVisionOnly ? .withoutDolbyVision : .mediaPlaylist
     }
 }

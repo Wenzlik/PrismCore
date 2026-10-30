@@ -8,11 +8,13 @@ source-compatible.)
 
 ## [Unreleased]
 
-## [3.9.3] — 2026-10-30
+## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
 HDR display, and a host's "Dolby Vision off" setting gets its own option
-instead of a false display read. Additive and source-compatible.
+instead of a false display read. A Profile 5 record its own RPU contradicts
+is served as the profile that RPU was authored for. Source-compatible except
+for one new `SessionError` case (see Changed).
 
 ### Added
 
@@ -40,8 +42,9 @@ instead of a false display read. Additive and source-compatible.
   configuration, the playlist shape (`master` / `media`), the exact `CODECS`,
   `SUPPLEMENTAL-CODECS` and `VIDEO-RANGE`, the sample-entry fourcc, whether
   the record was kept or stripped, the `colr` box written and the display
-  criteria requested. One more when a refused master falls back. A Profile 5
-  record over a YCbCr HDR VUI is called out in the line.
+  criteria requested. One more when a refused master falls back, or when a
+  refused media playlist ends the chain. For an audited Profile 5 record
+  (see Fixed) the line names the RPU's profile and the correction.
 
 ### Changed
 
@@ -57,14 +60,37 @@ instead of a false display read. Additive and source-compatible.
   (`makeMasterRejectionFallbackSession`), keeping the `dvh1` sample entry and
   its record. It used to take the DV-less tier, which for P5 would rebuild
   the same `dvh1` master: there is no claim to drop from a P5 primary.
+- **The master-rejection fallback chain ends at the media playlist.**
+  `makeMasterRejectionFallbackSession(after:)` on a started session that
+  served the media playlist now throws the new
+  `SessionError.noMasterToFallBackFrom` (classified `.unknown`) instead of
+  minting the same media playlist again, which a host answering every
+  `isMasterRejection` with it could repeat forever. An unstarted session is
+  cloned as before, and `makeMuxedFallbackSession()` stays unconditional. An
+  exhaustive `switch` over `SessionError` needs the new case.
 
 ### Fixed
 
+- **A Profile 5 record over a BT.2020 YCbCr HDR VUI is checked against its
+  own RPU.** IPT-PQc2 has no VUI code point, so a genuine Profile 5 leaves the
+  VUI unspecified; a record over a YCbCr PQ / HLG VUI is a relabelled stream,
+  and served as `dvh1.05` the Dolby Vision decoder reads its YCbCr as IPT —
+  wrong colours on every display and with a correct master, which is what a
+  field log of the Dolby-Vision-on case showed (`dvcC` profile 5 over
+  `colr` 9/16/9, `dvh1.05.06`, no player error). The session now reads the
+  first RPU before the shape is decided (`DolbyVisionRecordAudit`, libdovi's
+  `guessed_profile`) and, when it was authored as 7 or 8, serves that profile
+  through the existing routes: the 8.1 conversion for a 7, `hvc1` + 8.1 / 8.4
+  record + `SUPPLEMENTAL-CODECS` for an 8, with the sample entry's record
+  rewritten to match. An RPU that reads 5, cannot be read, or names anything
+  else leaves the record standing (and the `dv-diag` line says so). A genuine
+  P5 reads no packet.
 - **Profile 5's sample entry always carries its `colr` box** (BT.2020 / PQ /
   BT.2020nc, the source's range or limited). movenc writes `colr` only from
   the stream's colour fields, and P5 encoders routinely leave the VUI
   unspecified, so such a source reached AVPlayer as a `dvh1` entry with no
   colour description, which the Dolby Vision decoder does not engage on.
+  An init that already carried 9/16/9 is unchanged by this.
 
 ## [3.9.2] — 2026-10-29
 
@@ -3868,7 +3894,9 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/3.9.1...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.0...HEAD
+[4.0.0]: https://github.com/Wenzlik/PrismCore/compare/3.9.2...4.0.0
+[3.9.2]: https://github.com/Wenzlik/PrismCore/compare/3.9.1...3.9.2
 [3.9.1]: https://github.com/Wenzlik/PrismCore/compare/3.9.0...3.9.1
 [3.9.0]: https://github.com/Wenzlik/PrismCore/compare/3.8.7...3.9.0
 [3.8.7]: https://github.com/Wenzlik/PrismCore/compare/3.8.6...3.8.7

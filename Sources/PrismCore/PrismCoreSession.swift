@@ -262,6 +262,11 @@ public actor PrismCoreSession {
         /// A second successor was asked of a session that already minted one.
         /// Successors chain, they do not fan out — see `makeSession(changing:)`.
         case alreadySuperseded
+        /// `makeMasterRejectionFallbackSession(after:)` was asked of a session
+        /// that served the media playlist: there is no master left to refuse,
+        /// so the refusal is the end of the fallback chain, not a reason to
+        /// play the same media playlist again.
+        case noMasterToFallBackFrom
     }
 
     /// Everything the session was built from, kept verbatim so a successor can
@@ -967,6 +972,7 @@ public actor PrismCoreSession {
             displayIsHDRReady: display.offersHDR,
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             displaySource: display.source,
+            dolbyVisionPreference: dolbyVisionPreference,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             sequentialPlaylist: sequentialPlaylist,
@@ -982,7 +988,6 @@ public actor PrismCoreSession {
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
             heightsOutput: heightsOutput,
-            dolbyVisionPreference: dolbyVisionPreference,
             probed: probed,
             input: inputFactory,
             keyframeCacheDirectory: keyframeIndexCacheDirectory,
@@ -1322,6 +1327,14 @@ public actor PrismCoreSession {
     /// and the media playlist still carries the `dvh1` sample entry and its
     /// record. Seek the new item to where playback was, as with any successor.
     ///
+    /// The chain ends at the media playlist: a *started* session that served
+    /// one throws `SessionError.noMasterToFallBackFrom` instead of minting
+    /// the same media playlist again, so a host that answers every
+    /// `isMasterRejection` with this method retries once (twice for a
+    /// claim-dropping 8.x) and then gets an error to show. An unstarted
+    /// session has served nothing yet and is cloned as before.
+    /// `makeMuxedFallbackSession()` stays the unconditional clone.
+    ///
     /// - Parameter error: the `AVPlayerItem` error that triggered the
     ///   fallback, logged with its rejection code (`MasterRejection.code(of:)`)
     ///   so a field log shows which refusal it was. Optional and never
@@ -1329,10 +1342,17 @@ public actor PrismCoreSession {
     public func makeMasterRejectionFallbackSession(
         after error: (any Error)? = nil
     ) async throws -> PrismCoreSession {
-        let tier = MasterRejection.fallbackTier(
+        guard let tier = MasterRejection.fallbackTier(
+            masterServed: !started || remuxer.masterServed,
             masterDeclaresDolbyVision: remuxer.masterDeclaresDolbyVision,
             masterIsDolbyVisionOnly: remuxer.masterIsDolbyVisionOnly
-        )
+        ) else {
+            PrismCoreLog.notice(
+                "dv-diag: media playlist refused (code \(MasterRejection.code(of: error).map { "\($0)" } ?? "unknown"));"
+                    + " no fallback left"
+            )
+            throw SessionError.noMasterToFallBackFrom
+        }
         if remuxer.masterDeclaresDolbyVision {
             PrismCoreLog.notice(
                 "dv-diag: master refused (code \(MasterRejection.code(of: error).map { "\($0)" } ?? "unknown"));"

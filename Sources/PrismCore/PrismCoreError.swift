@@ -215,6 +215,11 @@ extension PrismCoreError {
                 // would invite hosts to handle it at runtime instead of fixing
                 // the call order.
                 return .unknown(underlying: error)
+            case .noMasterToFallBackFrom:
+                // The end of the rejection fallback chain: the media playlist
+                // was refused too. Not a master rejection (there is nothing
+                // left to fall back to) and nothing this engine can name.
+                return .unknown(underlying: error)
             }
 
         case let probe as SourceProbe.Failure:

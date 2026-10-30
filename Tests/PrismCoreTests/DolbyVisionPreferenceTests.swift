@@ -404,6 +404,103 @@ struct Profile5ColourTests {
     }
 }
 
+// MARK: - A Profile 5 record its own VUI contradicts
+
+@Suite("Contradicted Profile 5 record audit")
+struct DolbyVisionRecordAuditTests {
+
+    /// The init in the field report: `dvcC` profile 5 over `colr` 9/16/9.
+    @Test("only a Profile 5 record over a BT.2020 YCbCr HDR VUI is audited")
+    func contradictedRecordIsAudited() {
+        #expect(DolbyVisionRecordAudit.recordIsContradicted(
+            p5, codecName: "hevc", colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix
+        ))
+        // A genuine P5 reads no packet.
+        #expect(!DolbyVisionRecordAudit.recordIsContradicted(
+            p5, codecName: "hevc", colorTransferName: unspecifiedVUI.transfer, colorSpaceName: unspecifiedVUI.matrix
+        ))
+        #expect(!DolbyVisionRecordAudit.recordIsContradicted(
+            p81, codecName: "hevc", colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix
+        ))
+        #expect(!DolbyVisionRecordAudit.recordIsContradicted(
+            nil, codecName: "hevc", colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix
+        ))
+        // AV1 carries its RPU in an OBU the NAL walk cannot reach.
+        #expect(!DolbyVisionRecordAudit.recordIsContradicted(
+            p5, codecName: "av1", colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix
+        ))
+    }
+
+    @Test("an RPU authored as 8 makes the record 8.1, or 8.4 over an HLG VUI")
+    func profile8RPUCorrects() throws {
+        let pq = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "smpte2084"))
+        #expect(pq.profile == 8)
+        #expect(pq.baseLayerSignalCompatibilityID == 1)
+        #expect(pq.level == p5.level)
+        #expect(!pq.enhancementLayerPresent)
+        #expect(DolbyVisionRecordAudit.dynamicRange(of: pq) == .pq)
+
+        let hlg = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "arib-std-b67"))
+        #expect(hlg.baseLayerSignalCompatibilityID == 4)
+        #expect(DolbyVisionRecordAudit.dynamicRange(of: hlg) == .hlg)
+    }
+
+    @Test("an RPU authored as 7 makes the record 7, so the 8.1 conversion runs")
+    func profile7RPUCorrects() throws {
+        let corrected = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 7, colorTransferName: "smpte2084"))
+        #expect(corrected.isDualLayer)
+        #expect(corrected.rpuPresent)
+        #expect(corrected.baseLayerSignalCompatibilityID == 6)
+        #expect(DolbyVisionRecordAudit.dynamicRange(of: corrected) == .pq)
+    }
+
+    @Test("an RPU that agrees, can't be read or names another profile leaves the record")
+    func otherRPUsLeaveTheRecord() {
+        for rpu in [nil, 5, 4, 10] as [UInt8?] {
+            #expect(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: rpu, colorTransferName: "smpte2084") == nil)
+        }
+        #expect(DolbyVisionRecordAudit.correctedRecord(p81, rpuProfile: 7, colorTransferName: "smpte2084") == nil)
+    }
+
+    /// The decisive DV-on case: what a relabelled 8.1 is served once its RPU
+    /// has spoken — the 8.1 shape, not the `dvh1.05` that showed it wrong.
+    @Test("a corrected 8.1 is served as 8.1 on a DV display and as HDR10 without one")
+    func correctedRecordIsServedAsItsProfile() throws {
+        let corrected = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 8, colorTransferName: "smpte2084"))
+        let dv = Served(corrected, range: .pq, vui: hdr10VUI, preference: .automatic, display: .dolbyVision)
+        #expect(dv.declared == corrected)
+        #expect(!dv.stripsRecord)
+        #expect(dv.codecs == "hvc1.2.4.L153.B0")
+        #expect(dv.supplemental == "dvh1.08.06/db1p")
+        #expect(dv.videoRange == .pq)
+        #expect(dv.criteria == .dolbyVision)
+
+        let hdr10 = Served(corrected, range: .pq, vui: hdr10VUI, preference: .automatic, display: .hdr10Only)
+        #expect(hdr10.stripsRecord)
+        #expect(hdr10.supplemental == nil)
+        #expect(hdr10.criteria == .hdr10)
+
+        let corrected7 = try #require(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 7, colorTransferName: "smpte2084"))
+        let converted = Served(corrected7, range: .pq, vui: hdr10VUI, preference: .automatic,
+                               display: .dolbyVision, converting: true)
+        #expect(converted.declared == corrected7.convertedToProfile81)
+        #expect(converted.supplemental == "dvh1.08.06/db1p")
+    }
+
+    @Test("a packet without a parseable RPU reads no profile")
+    func unparseableRPUReadsNothing() {
+        // Length-prefixed: a slice NAL, then a type-62 NAL whose body is no RPU.
+        let packet: [UInt8] = [0, 0, 0, 3, 0x02, 0x01, 0xAA, 0, 0, 0, 3, 0x7C, 0x01, 0x00]
+        packet.withUnsafeBufferPointer { bytes in
+            #expect(DolbyVisionRecordAudit.rpuProfile(inPacket: bytes, framing: .lengthPrefixed(4)) == nil)
+        }
+        let noRPU: [UInt8] = [0, 0, 0, 3, 0x02, 0x01, 0xAA]
+        noRPU.withUnsafeBufferPointer { bytes in
+            #expect(DolbyVisionRecordAudit.rpuProfile(inPacket: bytes, framing: .lengthPrefixed(4)) == nil)
+        }
+    }
+}
+
 // MARK: - The refusal path
 
 @Suite("Profile 5 master-rejection fallback")
@@ -414,22 +511,48 @@ struct Profile5FallbackTests {
     @Test("a refused Profile 5 master goes straight to the media playlist")
     func profile5GoesToMediaPlaylist() {
         #expect(MasterRejection.fallbackTier(
-            masterDeclaresDolbyVision: true, masterIsDolbyVisionOnly: true
+            masterServed: true, masterDeclaresDolbyVision: true, masterIsDolbyVisionOnly: true
         ) == .mediaPlaylist)
     }
 
     @Test("a refused 8.x master with a DV claim drops the claim first")
     func profile8DropsTheClaim() {
         #expect(MasterRejection.fallbackTier(
-            masterDeclaresDolbyVision: true, masterIsDolbyVisionOnly: false
+            masterServed: true, masterDeclaresDolbyVision: true, masterIsDolbyVisionOnly: false
         ) == .withoutDolbyVision)
     }
 
     @Test("a master without a DV claim goes to the media playlist, as before")
     func noClaimGoesToMediaPlaylist() {
         #expect(MasterRejection.fallbackTier(
-            masterDeclaresDolbyVision: false, masterIsDolbyVisionOnly: false
+            masterServed: true, masterDeclaresDolbyVision: false, masterIsDolbyVisionOnly: false
         ) == .mediaPlaylist)
+    }
+
+    /// Master refused → one media-playlist fallback → that refused too: the
+    /// chain ends there instead of minting the same media playlist forever.
+    @Test("a refused media playlist has no fallback left")
+    func mediaPlaylistEndsTheChain() {
+        let first = MasterRejection.fallbackTier(
+            masterServed: true, masterDeclaresDolbyVision: true, masterIsDolbyVisionOnly: true
+        )
+        #expect(first == .mediaPlaylist)
+        // The fallback session served the media playlist, so no master.
+        for (declares, dvOnly) in [(false, false), (true, true), (true, false)] {
+            #expect(MasterRejection.fallbackTier(
+                masterServed: false, masterDeclaresDolbyVision: declares, masterIsDolbyVisionOnly: dvOnly
+            ) == nil)
+        }
+    }
+
+    @Test("the end of the chain is no master rejection to classify")
+    func chainEndIsNotARejection() {
+        let end = PrismCoreSession.SessionError.noMasterToFallBackFrom
+        #expect(!PrismCoreSession.isMasterRejection(end))
+        guard case .unknown = PrismCoreError.classify(end) else {
+            Issue.record("expected .unknown")
+            return
+        }
     }
 
     @Test("the rejection code is read out, nested or not", arguments: [-11868, -11848])

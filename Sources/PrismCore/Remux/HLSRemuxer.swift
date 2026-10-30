@@ -552,6 +552,10 @@ final class HLSRemuxer: @unchecked Sendable {
     /// Whether that claim is a Profile 5 `dvh1` primary, which no tier can
     /// drop — the rejection fallback goes straight to the media playlist.
     private var storedMasterIsDolbyVisionOnly = false
+    /// Whether a master was written at all. A media-playlist session has
+    /// nothing a rejection fallback could take away, so a refusal of it ends
+    /// the chain instead of minting the same session again.
+    private var storedMasterServed = false
 
     var displayCriteriaChoice: DisplayCriteriaChoice? {
         criteriaChoiceLock.withLock { storedCriteriaChoice }
@@ -573,6 +577,10 @@ final class HLSRemuxer: @unchecked Sendable {
 
     var masterIsDolbyVisionOnly: Bool {
         criteriaChoiceLock.withLock { storedMasterIsDolbyVisionOnly }
+    }
+
+    var masterServed: Bool {
+        criteriaChoiceLock.withLock { storedMasterServed }
     }
 
     /// The dialogue-boost renditions the served master actually declares —
@@ -1064,7 +1072,36 @@ final class HLSRemuxer: @unchecked Sendable {
         // RPUs to 8.1 and drop the enhancement layer as the packets go past. The
         // converter is nil for every other source (and when libdovi isn't in this
         // build), and then nothing below changes.
-        let dolbyVisionConverter = makeDolbyVisionConverter(video: videoTrack)
+        //
+        // First, though, the one record worth checking against the bitstream:
+        // a Profile 5 record over a VUI naming a BT.2020 YCbCr HDR base. Served
+        // as P5 the decoder reads that YCbCr as IPT on every display, and no
+        // playlist or sample-entry detail can fix it — so the first RPU is read
+        // and, if it was authored as 7 or 8, the session serves that profile
+        // instead (`DolbyVisionRecordAudit`). Every later decision reads
+        // `sourceDolbyVision`, never the probe's record. A genuine P5 leaves
+        // its VUI unspecified and reads no packet here.
+        var sourceDolbyVision = videoTrack.dolbyVision
+        var servedProbeRange = videoTrack.dynamicRange
+        var auditedRPUProfile: UInt8?
+        let recordAudited = DolbyVisionRecordAudit.recordIsContradicted(
+            videoTrack.dolbyVision,
+            codecName: videoTrack.codecName,
+            colorTransferName: videoTrack.colorTransferName,
+            colorSpaceName: videoTrack.colorSpaceName
+        )
+        if recordAudited, let record = videoTrack.dolbyVision {
+            auditedRPUProfile = DolbyVisionRecordAudit.scan(input: input, video: videoTrack)
+            needsRewindToHead = true
+            if let corrected = DolbyVisionRecordAudit.correctedRecord(
+                record, rpuProfile: auditedRPUProfile, colorTransferName: videoTrack.colorTransferName
+            ) {
+                sourceDolbyVision = corrected
+                servedProbeRange = DolbyVisionRecordAudit.dynamicRange(of: corrected)
+            }
+        }
+        let recordCorrected = sourceDolbyVision != videoTrack.dolbyVision
+        let dolbyVisionConverter = makeDolbyVisionConverter(video: videoTrack, dolbyVision: sourceDolbyVision)
         // The host asked for the base layer, and this source has one: nothing
         // Dolby Vision is declared anywhere — no `dvh1`, no supplemental, no
         // record, HDR10 / HLG criteria. A P7 conversion still runs, because it
@@ -1079,12 +1116,12 @@ final class HLSRemuxer: @unchecked Sendable {
         // served sample entry carries the record — decided once, here, because
         // the `dv-diag` line has to report what was written.
         let presentsBaseLayer = dolbyVisionPreference.presentsBaseLayer(
-            of: videoTrack.dolbyVision,
+            of: sourceDolbyVision,
             colorTransferName: videoTrack.colorTransferName,
             colorSpaceName: videoTrack.colorSpaceName
         )
         let dolbyVisionServing = Self.dolbyVisionServing(
-            source: videoTrack.dolbyVision,
+            source: sourceDolbyVision,
             converting: dolbyVisionConverter != nil,
             presentsBaseLayer: presentsBaseLayer,
             displayIsDolbyVisionCapable: displayIsDolbyVisionCapable
@@ -1092,8 +1129,8 @@ final class HLSRemuxer: @unchecked Sendable {
         let outputDolbyVision = dolbyVisionServing.declared
         let stripsDolbyVisionRecord = dolbyVisionServing.stripsRecord
         let servedRange = Self.servedDynamicRange(
-            probed: videoTrack.dynamicRange,
-            source: videoTrack.dolbyVision,
+            probed: servedProbeRange,
+            source: sourceDolbyVision,
             presentsBaseLayer: presentsBaseLayer,
             colorTransferName: videoTrack.colorTransferName
         )
@@ -1353,8 +1390,9 @@ final class HLSRemuxer: @unchecked Sendable {
                     // not converting: it decides the sample entry's fourcc, and a
                     // Profile 5 stream needs `dvh1` whatever else is true.
                     declaredDolbyVision: outputDolbyVision,
-                    // Only a conversion has to replace the source's own record.
-                    rewriteDolbyVisionRecord: dolbyVisionConverter != nil,
+                    // Only a conversion, or a record the RPU corrected, has to
+                    // replace the source's own record.
+                    rewriteDolbyVisionRecord: dolbyVisionConverter != nil || recordCorrected,
                     // A display that cannot present Dolby Vision must not be
                     // sent a `dvvC` box, whatever the manifest says — and a
                     // base layer presented alone must not be sent one at all.
@@ -1578,19 +1616,23 @@ final class HLSRemuxer: @unchecked Sendable {
                         )
                     }
                 }
-                try Data(try MasterPlaylistBuilder.build(variant).utf8).write(
-                    to: outputDirectory.appendingPathComponent(Self.masterPlaylistFileName),
-                    options: .atomic
-                )
                 // Remembered for the rejection fallback: a master whose DV
                 // claim may be what the panel refused gets one retry without
                 // it before the muxed shape (see the session's factory).
+                // Before the write, not after: `start()` returns the moment
+                // the file exists, and a fallback asked right then must not
+                // read a session that served a master as one that did not.
                 let claimsDV = MasterPlaylistBuilder.declaresDolbyVision(variant)
                 let dolbyVisionOnly = variant.dolbyVision?.isSingleLayerDVOnly == true
                 criteriaChoiceLock.withLock {
                     storedMasterDeclaresDolbyVision = claimsDV
                     storedMasterIsDolbyVisionOnly = dolbyVisionOnly
+                    storedMasterServed = true
                 }
+                try Data(try MasterPlaylistBuilder.build(variant).utf8).write(
+                    to: outputDirectory.appendingPathComponent(Self.masterPlaylistFileName),
+                    options: .atomic
+                )
                 servedMasterVariant = variant
                 // Report only what the master actually declares — a requested
                 // level that couldn't be built must not be promised to the
@@ -1632,14 +1674,20 @@ final class HLSRemuxer: @unchecked Sendable {
         // device log of a wrong-colours report has to prove the playlist
         // shape, the exact codec strings and the sample entry, because each of
         // them alone has been the cause before.
-        if let sourceDolbyVision = videoTrack.dolbyVision {
+        if let recordedDolbyVision = videoTrack.dolbyVision {
             let inPar = input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee
             let colour: (AVColorPrimaries, AVColorTransferCharacteristic, AVColorSpace, AVColorRange) =
                 outputDolbyVision?.isSingleLayerDVOnly == true
                     ? Self.profile5Colour(sourceRange: inPar.color_range)
                     : (inPar.color_primaries, inPar.color_trc, inPar.color_space, inPar.color_range)
-            var line = "dv-diag: profile=\(sourceDolbyVision.profileName) level=\(sourceDolbyVision.level)"
-                + " preference=\(dolbyVisionPreference.rawValue)"
+            var line = "dv-diag: profile=\(recordedDolbyVision.profileName) level=\(recordedDolbyVision.level)"
+            if recordAudited {
+                // What the RPU said about a contradicted Profile 5 record, and
+                // what the session believed as a result.
+                line += " rpu=\(auditedRPUProfile.map { "\($0)" } ?? "unread")"
+                    + (recordCorrected ? " corrected=\(sourceDolbyVision?.profileName ?? "-")" : " record-stands")
+            }
+            line += " preference=\(dolbyVisionPreference.rawValue)"
                 + " display hdr=\(displayIsHDRReady) dv=\(displayIsDolbyVisionCapable) (\(displaySource.rawValue))"
                 + " vui trc=\(videoTrack.colorTransferName ?? "-") matrix=\(videoTrack.colorSpaceName ?? "-")"
                 + " declared=\(outputDolbyVision?.profileName ?? "none")"
@@ -1654,18 +1702,17 @@ final class HLSRemuxer: @unchecked Sendable {
             }
             let fourCC = outputDolbyVision?.isSingleLayerDVOnly == true
                 ? "dvh1" : (videoTrack.codecName == "hevc" ? "hvc1" : videoTrack.codecName)
+            let record: String = stripsDolbyVisionRecord
+                ? "stripped"
+                : (dolbyVisionConverter != nil || recordCorrected ? "rewritten" : "kept")
             line += " fourcc=\(fourCC)"
-                + " record=\(stripsDolbyVisionRecord ? "stripped" : "kept")"
+                + " record=\(record)"
                 + " colr=\(Self.colrDescription(primaries: colour.0, transfer: colour.1, matrix: colour.2, range: colour.3))"
                 + " criteria=\(criteriaChoice.target.rawValue)"
-            // The one shape a host can act on: a Profile 5 record over a VUI
-            // that names a YCbCr HDR base. Served as `dvh1` the decoder reads
-            // that YCbCr as IPT, so if the picture is wrong the record is.
-            if sourceDolbyVision.isSingleLayerDVOnly, !presentsBaseLayer,
-               DolbyVisionPreference.vuiDeclaresYCbCrHDRBase(
-                   colorTransferName: videoTrack.colorTransferName,
-                   colorSpaceName: videoTrack.colorSpaceName
-               ) {
+            // The contradicted record the RPU could not settle: still served as
+            // P5, and if the picture is wrong the record is — the host's
+            // `.baseLayerOnly` serves the YCbCr base the VUI declares.
+            if recordAudited, !recordCorrected, !presentsBaseLayer {
                 line += "; Profile 5 record over a BT.2020 YCbCr HDR VUI (a genuine P5 leaves it"
                     + " unspecified): if colours are wrong, dolbyVisionPreference .baseLayerOnly serves its base layer"
             }
@@ -3324,8 +3371,13 @@ final class HLSRemuxer: @unchecked Sendable {
     /// conversion target would be a different picture, not a different wrapper),
     /// 8.x is already single-layer, and a source with no DV configuration has no
     /// RPUs to rewrite.
-    private func makeDolbyVisionConverter(video: VideoTrackInfo) -> DolbyVisionRPUConverter? {
-        guard let dv = video.dolbyVision, dv.isDualLayer, dv.rpuPresent else { return nil }
+    ///
+    /// - Parameter dolbyVision: the record the session believes — the
+    ///   source's, or the 7 its RPU corrected a relabelled Profile 5 to.
+    private func makeDolbyVisionConverter(
+        video: VideoTrackInfo, dolbyVision: DolbyVisionConfiguration?
+    ) -> DolbyVisionRPUConverter? {
+        guard let dv = dolbyVision, dv.isDualLayer, dv.rpuPresent else { return nil }
         guard video.hevcConfiguration != nil else { return nil }
         // The prefix width comes from the record itself; a source whose hvcC we
         // couldn't parse never gets here (no `CODECS` string either, so it plays

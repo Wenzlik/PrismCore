@@ -186,5 +186,11 @@ struct MasterRejectionFallbackTests {
         defer { Task { await fallback.stop() } }
         // Muxed shape: media playlist served directly, no master on disk.
         #expect(fallbackPlaylist.lastPathComponent == HLSRemuxer.mediaPlaylistFileName)
+
+        // Refused again: the media playlist was the last tier, so the chain
+        // ends with an error instead of another identical session.
+        await #expect(throws: PrismCoreSession.SessionError.self) {
+            _ = try await fallback.makeMasterRejectionFallbackSession()
+        }
     }
 }
