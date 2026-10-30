@@ -13,8 +13,8 @@ source-compatible.)
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
 HDR display, and a host's "Dolby Vision off" setting gets its own option
 instead of a false display read. A Profile 5 record its own RPU contradicts
-is served as the profile that RPU was authored for. Source-compatible except
-for one new `SessionError` case (see Changed).
+is served as the profile that RPU was authored for. Additive and
+source-compatible.
 
 ### Added
 
@@ -28,7 +28,9 @@ for one new `SessionError` case (see Changed).
   display already got. A genuine Profile 5 ignores it (it has no base layer);
   the one Profile 5 it applies to is a record whose VUI declares a BT.2020
   YCbCr PQ / HLG base, which a genuine P5 cannot (declared with the range
-  that VUI states). `DisplayCapabilities`
+  that VUI states) and whose RPU does not read 5: those colour fields can
+  come from a container `colr` box, and an RPU reading 5 is a genuine P5,
+  kept as one under either preference. `DisplayCapabilities`
   stays the honest display read: map a user setting to the preference, not
   to `isDolbyVisionCapable: false`. Carried by `makeSession(changing:)` and
   both rejection fallbacks.
@@ -63,11 +65,12 @@ for one new `SessionError` case (see Changed).
 - **The master-rejection fallback chain ends at the media playlist.**
   `makeMasterRejectionFallbackSession(after:)` on a started session that
   served the media playlist now throws the new
-  `SessionError.noMasterToFallBackFrom` (classified `.unknown`) instead of
+  `PrismCoreSession.NoMasterToFallBackFrom` (classified `.unknown`) instead of
   minting the same media playlist again, which a host answering every
   `isMasterRejection` with it could repeat forever. An unstarted session is
-  cloned as before, and `makeMuxedFallbackSession()` stays unconditional. An
-  exhaustive `switch` over `SessionError` needs the new case.
+  cloned as before, and `makeMuxedFallbackSession()` stays unconditional.
+  The error is its own type, not a `SessionError` case, so an exhaustive
+  `switch` over `SessionError` is unaffected.
 
 ### Fixed
 
@@ -84,7 +87,11 @@ for one new `SessionError` case (see Changed).
   record + `SUPPLEMENTAL-CODECS` for an 8, with the sample entry's record
   rewritten to match. An RPU that reads 5, cannot be read, or names anything
   else leaves the record standing (and the `dv-diag` line says so). A genuine
-  P5 reads no packet.
+  P5 reads no packet. The audit rewinds to the head first (the caption and
+  TrueHD scouts before it may have read to EOF on a short source) and is
+  bounded by 500 ms and 4 MB through the context's read-interrupt guard, so
+  a stalled read cannot hold the master back; an exhausted budget leaves the
+  record standing.
 - **Profile 5's sample entry always carries its `colr` box** (BT.2020 / PQ /
   BT.2020nc, the source's range or limited). movenc writes `colr` only from
   the stream's colour fields, and P5 encoders routinely leave the VUI

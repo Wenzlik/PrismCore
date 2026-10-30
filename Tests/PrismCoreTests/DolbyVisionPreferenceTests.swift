@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import Libavcodec
+import Libavformat
 import Libavutil
 @testable import PrismCore
 
@@ -61,11 +63,12 @@ private struct Served {
         vui: (transfer: String?, matrix: String?) = unspecifiedVUI,
         preference: DolbyVisionPreference,
         display: Panel,
-        converting: Bool = false
+        converting: Bool = false,
+        rpuProfile: UInt8? = nil
     ) {
         let capabilities = display.capabilities
         let presentsBaseLayer = preference.presentsBaseLayer(
-            of: source, colorTransferName: vui.transfer, colorSpaceName: vui.matrix
+            of: source, colorTransferName: vui.transfer, colorSpaceName: vui.matrix, rpuProfile: rpuProfile
         )
         let serving = HLSRemuxer.dolbyVisionServing(
             source: source,
@@ -154,6 +157,24 @@ struct DolbyVisionPreferenceTests {
                 of: p5, colorTransferName: transfer, colorSpaceName: matrix
             ))
         }
+    }
+
+    /// The colour fields are codec parameters, which a container `colr` box
+    /// fills as well as the SPS: a genuine P5 muxed with `colr` 9/16/9 looks
+    /// exactly like a relabelled one until its RPU is read.
+    @Test("an RPU that reads 5 keeps a Profile 5 record whatever its colour fields say")
+    func confirmedProfile5IgnoresContainerColour() {
+        #expect(!DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
+            of: p5, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: 5
+        ))
+        // Unread, the colour fields are all there is.
+        #expect(DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
+            of: p5, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: nil
+        ))
+        // The RPU protects only a P5 record; a base-layer profile is unaffected.
+        #expect(DolbyVisionPreference.baseLayerOnly.presentsBaseLayer(
+            of: p81, colorTransferName: hdr10VUI.transfer, colorSpaceName: hdr10VUI.matrix, rpuProfile: 5
+        ))
     }
 
     @Test("no Dolby Vision, no base layer to present")
@@ -487,6 +508,23 @@ struct DolbyVisionRecordAuditTests {
         #expect(converted.supplemental == "dvh1.08.06/db1p")
     }
 
+    /// A genuine P5 under a container `colr` 9/16/9 — the init in the field
+    /// report, with an RPU that reads 5 — is served as P5 under either
+    /// preference: stripping it would show its IPT as YCbCr.
+    @Test("a confirmed Profile 5 under a YCbCr colr keeps its record and DV criteria")
+    func confirmedProfile5KeepsItsRecord() {
+        #expect(DolbyVisionRecordAudit.correctedRecord(p5, rpuProfile: 5, colorTransferName: "smpte2084") == nil)
+        for preference in [DolbyVisionPreference.automatic, .baseLayerOnly] {
+            let served = Served(p5, range: .pq, vui: hdr10VUI, preference: preference,
+                                display: .dolbyVision, rpuProfile: 5)
+            #expect(served.declared == p5)
+            #expect(!served.stripsRecord)
+            #expect(served.codecs == "dvh1.05.06")
+            #expect(served.supplemental == nil)
+            #expect(served.criteria == .dolbyVision)
+        }
+    }
+
     @Test("a packet without a parseable RPU reads no profile")
     func unparseableRPUReadsNothing() {
         // Length-prefixed: a slice NAL, then a type-62 NAL whose body is no RPU.
@@ -547,7 +585,7 @@ struct Profile5FallbackTests {
 
     @Test("the end of the chain is no master rejection to classify")
     func chainEndIsNotARejection() {
-        let end = PrismCoreSession.SessionError.noMasterToFallBackFrom
+        let end = PrismCoreSession.NoMasterToFallBackFrom()
         #expect(!PrismCoreSession.isMasterRejection(end))
         guard case .unknown = PrismCoreError.classify(end) else {
             Issue.record("expected .unknown")
@@ -571,5 +609,80 @@ struct Profile5FallbackTests {
         #expect(MasterRejection.code(of: NSError(domain: NSURLErrorDomain, code: -1009)) == nil)
         #expect(MasterRejection.code(of: nil) == nil)
         #expect(!MasterRejection.matches(NSError(domain: "AVFoundationErrorDomain", code: -11829)))
+    }
+}
+
+// MARK: - The audit's reads
+
+/// The audit against a real demuxer: where it reads from and how long it may
+/// take. The fixture carries no RPU, so the answer is always `nil`; what is
+/// checked is the read position and the budget.
+@Suite("Record audit reads", .serialized)
+struct DolbyVisionRecordAuditScanTests {
+
+    private func fixture(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil)
+            ?? Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "fixture \(name) missing from test bundle")
+    }
+
+    /// The caption scout reads up to 28 video packets before the audit runs,
+    /// to EOF on a short source. Without its own rewind the audit's first
+    /// read returned EOF and a relabelled record stood.
+    @Test("the audit reads from the head even after a scout left the input at EOF")
+    func auditRewindsBeforeReading() throws {
+        let url = try fixture("hevc_eac3.mkv")
+        let video = try #require(try SourceProbe.open(url: url).info.video)
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, url.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+        try FFmpegError.check(avformat_find_stream_info(context, nil), "avformat_find_stream_info")
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let reader = try #require(packet)
+        while av_read_frame(context, reader) >= 0 { av_packet_unref(reader) }
+
+        #expect(DolbyVisionRecordAudit.scan(input: context, video: video) == nil)
+        // It stopped after its eight video packets, not at EOF: it read the head.
+        #expect(av_read_frame(context, reader) >= 0, "the audit read nothing: it never rewound")
+        av_packet_unref(reader)
+    }
+
+    @Test("a stalled source cannot hold the audit past its time budget")
+    func auditIsBounded() async throws {
+        let url = try fixture("hevc_eac3.mkv")
+        let video = try #require(try SourceProbe.open(url: url).info.video)
+        let media = try Data(contentsOf: url)
+        // ~30 KB/s: the header arrives, eight HEVC packets would take seconds.
+        let server = try RangeFixtureServer(media: media, bytesPerSecond: 30_000, firstByteDelay: 0)
+        let served = try await server.start()
+        defer { server.stop() }
+        let guardian = ReadInterruptGuard()
+        var input: UnsafeMutablePointer<AVFormatContext>? = guardian.makeContext()
+        try FFmpegError.check(avformat_open_input(&input, served.absoluteString, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let context = try #require(input)
+
+        let started = ContinuousClock.now
+        let profile = DolbyVisionRecordAudit.scan(
+            input: context, video: video, interruptGuard: guardian, timeBudget: .milliseconds(50)
+        )
+        let spent = ContinuousClock.now - started
+        #expect(profile == nil)
+        #expect(spent < .seconds(2), "audit took \(spent)")
+        #expect(context.pointee.pb?.pointee.error ?? 0 >= 0, "the latched abort must be cleared")
+        // Production carries on: the head rewind and a read still work.
+        #expect(av_seek_frame(context, -1, 0, AVSEEK_FLAG_BACKWARD) >= 0)
+        avformat_flush(context)
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        #expect(av_read_frame(context, try #require(packet)) >= 0)
+
+        // A byte budget alone also stops it, on a local file.
+        var local: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&local, url.path, nil, nil), "avformat_open_input")
+        defer { avformat_close_input(&local) }
+        #expect(DolbyVisionRecordAudit.scan(input: try #require(local), video: video, byteBudget: 0) == nil)
     }
 }

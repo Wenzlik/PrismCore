@@ -262,11 +262,16 @@ public actor PrismCoreSession {
         /// A second successor was asked of a session that already minted one.
         /// Successors chain, they do not fan out — see `makeSession(changing:)`.
         case alreadySuperseded
-        /// `makeMasterRejectionFallbackSession(after:)` was asked of a session
-        /// that served the media playlist: there is no master left to refuse,
-        /// so the refusal is the end of the fallback chain, not a reason to
-        /// play the same media playlist again.
-        case noMasterToFallBackFrom
+    }
+
+    /// `makeMasterRejectionFallbackSession(after:)` was asked of a session
+    /// that served the media playlist: there is no master left to refuse, so
+    /// the refusal is the end of the fallback chain, not a reason to play the
+    /// same media playlist again. Its own type rather than a `SessionError`
+    /// case, so an existing exhaustive `switch` over `SessionError` still
+    /// compiles.
+    public struct NoMasterToFallBackFrom: Error, Sendable {
+        public init() {}
     }
 
     /// Everything the session was built from, kept verbatim so a successor can
@@ -1328,7 +1333,7 @@ public actor PrismCoreSession {
     /// record. Seek the new item to where playback was, as with any successor.
     ///
     /// The chain ends at the media playlist: a *started* session that served
-    /// one throws `SessionError.noMasterToFallBackFrom` instead of minting
+    /// one throws `NoMasterToFallBackFrom` instead of minting
     /// the same media playlist again, so a host that answers every
     /// `isMasterRejection` with this method retries once (twice for a
     /// claim-dropping 8.x) and then gets an error to show. An unstarted
@@ -1351,7 +1356,7 @@ public actor PrismCoreSession {
                 "dv-diag: media playlist refused (code \(MasterRejection.code(of: error).map { "\($0)" } ?? "unknown"));"
                     + " no fallback left"
             )
-            throw SessionError.noMasterToFallBackFrom
+            throw NoMasterToFallBackFrom()
         }
         if remuxer.masterDeclaresDolbyVision {
             PrismCoreLog.notice(

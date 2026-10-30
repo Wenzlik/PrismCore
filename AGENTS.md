@@ -182,7 +182,7 @@ API surface.
   preference, and gets its `dvh1.05.LL` master on any HDR display; a refused
   P5 master falls back once to the media playlist, never to a DV-less master
   (there is no claim to drop), and a refused media playlist ends the chain
-  (`SessionError.noMasterToFallBackFrom`).
+  (`PrismCoreSession.NoMasterToFallBackFrom`).
 - A Profile 5 record over a BT.2020 YCbCr PQ/HLG VUI contradicts itself; the
   first RPU decides (`DolbyVisionRecordAudit`). No `dvh1`/`colr`/playlist
   detail can fix a picture whose record is wrong, so don't look for one there.

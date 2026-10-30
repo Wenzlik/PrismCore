@@ -27,7 +27,10 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
     /// to is a record whose own VUI declares a BT.2020 YCbCr base with a PQ or
     /// HLG transfer: IPT has no VUI code point, so a genuine Profile 5 leaves
     /// both unspecified, and a record over a YCbCr VUI is a container
-    /// contradicting the bitstream the decoder actually consumes.
+    /// contradicting the bitstream the decoder actually consumes. Those colour
+    /// fields are the codec parameters, which a container `colr` box can fill
+    /// as well as the SPS, so they are no proof on their own: an RPU that
+    /// reads 5 overrules them, and the record is kept.
     case baseLayerOnly
 
     /// Whether a source with this Dolby Vision record (and this VUI) is
@@ -38,10 +41,13 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
     ///     libavutil names it (`VideoTrackInfo.colorTransferName`).
     ///   - colorSpaceName: its matrix coefficients, likewise
     ///     (`VideoTrackInfo.colorSpaceName`).
+    ///   - rpuProfile: the profile the stream's own RPU was authored for, when
+    ///     it has been read; `nil` when it has not.
     public func presentsBaseLayer(
         of dolbyVision: DolbyVisionConfiguration?,
         colorTransferName: String?,
-        colorSpaceName: String?
+        colorSpaceName: String?,
+        rpuProfile: UInt8? = nil
     ) -> Bool {
         guard self == .baseLayerOnly, let dolbyVision else { return false }
         switch dolbyVision.profile {
@@ -49,6 +55,10 @@ public enum DolbyVisionPreference: String, Sendable, Equatable {
             return true
         case 10 where dolbyVision.baseLayerSignalCompatibilityID != 0:
             return true
+        case 5 where rpuProfile == 5:
+            // The picture is IPT, whatever a `colr` box claims: stripping the
+            // record would serve it as plain HEVC, the solarised misread.
+            return false
         case 5, 10:
             return Self.vuiDeclaresYCbCrHDRBase(
                 colorTransferName: colorTransferName, colorSpaceName: colorSpaceName

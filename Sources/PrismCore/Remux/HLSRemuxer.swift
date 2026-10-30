@@ -1091,7 +1091,9 @@ final class HLSRemuxer: @unchecked Sendable {
             colorSpaceName: videoTrack.colorSpaceName
         )
         if recordAudited, let record = videoTrack.dolbyVision {
-            auditedRPUProfile = DolbyVisionRecordAudit.scan(input: input, video: videoTrack)
+            auditedRPUProfile = DolbyVisionRecordAudit.scan(
+                input: input, video: videoTrack, interruptGuard: interruptGuard
+            )
             needsRewindToHead = true
             if let corrected = DolbyVisionRecordAudit.correctedRecord(
                 record, rpuProfile: auditedRPUProfile, colorTransferName: videoTrack.colorTransferName
@@ -1118,7 +1120,8 @@ final class HLSRemuxer: @unchecked Sendable {
         let presentsBaseLayer = dolbyVisionPreference.presentsBaseLayer(
             of: sourceDolbyVision,
             colorTransferName: videoTrack.colorTransferName,
-            colorSpaceName: videoTrack.colorSpaceName
+            colorSpaceName: videoTrack.colorSpaceName,
+            rpuProfile: auditedRPUProfile
         )
         let dolbyVisionServing = Self.dolbyVisionServing(
             source: sourceDolbyVision,
@@ -1711,8 +1714,10 @@ final class HLSRemuxer: @unchecked Sendable {
                 + " criteria=\(criteriaChoice.target.rawValue)"
             // The contradicted record the RPU could not settle: still served as
             // P5, and if the picture is wrong the record is — the host's
-            // `.baseLayerOnly` serves the YCbCr base the VUI declares.
-            if recordAudited, !recordCorrected, !presentsBaseLayer {
+            // `.baseLayerOnly` serves the YCbCr base the VUI declares. Not
+            // when the RPU read 5: that is a genuine P5 under a container
+            // `colr`, and `.baseLayerOnly` keeps it as P5 anyway.
+            if recordAudited, !recordCorrected, auditedRPUProfile == nil, !presentsBaseLayer {
                 line += "; Profile 5 record over a BT.2020 YCbCr HDR VUI (a genuine P5 leaves it"
                     + " unspecified): if colours are wrong, dolbyVisionPreference .baseLayerOnly serves its base layer"
             }

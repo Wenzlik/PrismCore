@@ -189,7 +189,7 @@ struct MasterRejectionFallbackTests {
 
         // Refused again: the media playlist was the last tier, so the chain
         // ends with an error instead of another identical session.
-        await #expect(throws: PrismCoreSession.SessionError.self) {
+        await #expect(throws: PrismCoreSession.NoMasterToFallBackFrom.self) {
             _ = try await fallback.makeMasterRejectionFallbackSession()
         }
     }
