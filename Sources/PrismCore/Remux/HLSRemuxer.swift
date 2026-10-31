@@ -1607,7 +1607,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 ).merging(cachedEntry?.positionsByPTS ?? [:]) { live, _ in live }
                 variant.bandwidth = Self.peakSegmentBandwidth(
                     boundaries: Self.segmentBoundaries(plan: plannedPlan, positions: keyframePositions),
-                    average: variant.bandwidth,
+                    average: variant.bandwidth == Self.unknownSourceBandwidth ? nil : variant.bandwidth,
                     audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0
                 ) ?? variant.bandwidth + (renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
                     .map(\.bitRateCeilingOverSource).max() ?? 0)
@@ -3504,21 +3504,25 @@ final class HLSRemuxer: @unchecked Sendable {
             let seconds = Double(input.pointee.duration) / Double(AV_TIME_BASE)
             return max(1, Int(Double(size) * 8 / seconds))
         }
-        return 25_000_000
+        return Self.unknownSourceBandwidth
     }
+
+    /// `sourceBandwidth`'s last resort: no rate known anywhere (a remote
+    /// source with no `bit_rate`). Not an average, so `peakSegmentBandwidth`
+    /// must not clamp against it — 4 × 25 would cut a measured 120 Mbit/s
+    /// peak to 100, back below what AVPlayer meets.
+    static let unknownSourceBandwidth = 25_000_000
 
     /// `BANDWIDTH` from the densest segment: its bit rate with 20 % headroom,
     /// plus `audioCeiling` for a re-encoded audio rendition whose bits the
-    /// source's byte positions do not measure. Held between twice and four
-    /// times the average the same boundaries measure (never above 160 Mbit/s,
-    /// never below the `average` declared today): one odd index entry must
-    /// neither under-cut the average nor inflate the declaration past
-    /// anything the source can be.
+    /// source's byte positions do not measure. Held to at least twice and at
+    /// most four times `average`, and never above 160 Mbit/s: one odd index
+    /// entry must neither under-cut the average nor inflate the declaration
+    /// past anything the source can be.
     ///
-    /// The clamp's average is measured, not `average`: over HTTP a source
-    /// with no `bit_rate` gets the 25 Mbit/s stub from `sourceBandwidth`, and
-    /// a cap of 4 × the stub would cut a measured 120 Mbit/s peak to 100 —
-    /// back below what AVPlayer meets.
+    /// `average` is `nil` when the source declared no rate (only the
+    /// `unknownSourceBandwidth` stub); the clamp then uses the average the
+    /// same boundaries measure.
     ///
     /// `nil` — use the average — when fewer than two whole segments are
     /// measurable, or the positions run backwards (an index not to trust).
@@ -3527,7 +3531,7 @@ final class HLSRemuxer: @unchecked Sendable {
     ///   position of the keyframe and its time in seconds.
     static func peakSegmentBandwidth(
         boundaries: [(position: Int64, seconds: Double)],
-        average: Int,
+        average: Int?,
         audioCeiling: Int
     ) -> Int? {
         guard boundaries.count >= 3, let first = boundaries.first, let last = boundaries.last else { return nil }
@@ -3539,11 +3543,12 @@ final class HLSRemuxer: @unchecked Sendable {
             peak = max(peak, Double(bytes) * 8 / seconds)
         }
         // Every step moved forward in time, so the span is positive.
-        let measured = Int(Double(last.position - first.position) * 8 / (last.seconds - first.seconds))
-        guard peak > 0, measured > 0 else { return nil }
+        let base = average ?? Int(Double(last.position - first.position) * 8 / (last.seconds - first.seconds))
+        guard peak > 0, base > 0 else { return nil }
         let declared = Int(peak * 1.2) + audioCeiling
-        let cap = min(4 * measured, 160_000_000)
-        return max(average, min(cap, max(2 * measured, declared)))
+        // The 160 Mbit/s cap is applied last: a floor of 2 × a high average
+        // must not lift the declaration past it.
+        return min(160_000_000, min(4 * base, max(2 * base, declared)))
     }
 
     /// The planned segment starts `positions` has a byte position for. Empty

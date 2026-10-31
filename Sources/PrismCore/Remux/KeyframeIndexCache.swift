@@ -314,9 +314,23 @@ struct KeyframeIndexCache: Sendable {
         // every session's cache value points at the same directory.
         Self.storeLock.lock()
         defer { Self.storeLock.unlock() }
-        if !entry.complete, let existing = lookup(identity: entry.identity) {
-            if existing.complete { return true }
-            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
+        var entry = entry
+        if let existing = lookup(identity: entry.identity) {
+            if !entry.complete {
+                if existing.complete { return true }
+                if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
+            }
+            // The harvest keeps PTS only. Landing after the late index load
+            // stored the same map with byte positions, it would erase them,
+            // and the next hit — which skips the index load — could no longer
+            // measure the densest segment for `BANDWIDTH`.
+            if entry.keyframePositions == nil,
+               existing.timeBaseNum == entry.timeBaseNum, existing.timeBaseDen == entry.timeBaseDen {
+                let known = existing.positionsByPTS
+                if !known.isEmpty {
+                    entry.keyframePositions = entry.keyframePTS.map { known[$0] ?? -1 }
+                }
+            }
         }
         guard let data = try? JSONEncoder().encode(entry) else { return false }
         try? FileManager.default.createDirectory(

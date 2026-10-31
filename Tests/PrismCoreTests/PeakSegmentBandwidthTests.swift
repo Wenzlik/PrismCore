@@ -36,33 +36,35 @@ struct PeakSegmentBandwidthTests {
             == 8_000_000)
     }
 
-    @Test("never above four times the measured average")
+    @Test("never above four times the average")
     func capAtFourTimesAverage() {
-        // A 40 Mbit/s segment, then four at 2.5: 10 Mbit/s over the 10 s, so
-        // 48 declared is held to 4 × 10.
+        // A 40 Mbit/s segment, then four at 2.5 on a 10 Mbit/s average: 48
+        // declared is held to 4 × 10.
         let spike: [(position: Int64, seconds: Double)] = [
             (position: 0, seconds: 0), (position: 10_000_000, seconds: 2), (position: 10_625_000, seconds: 4),
             (position: 11_250_000, seconds: 6), (position: 11_875_000, seconds: 8), (position: 12_500_000, seconds: 10),
         ]
-        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: spike, average: 5_000_000, audioCeiling: 0)
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: spike, average: 10_000_000, audioCeiling: 0)
             == 40_000_000)
     }
 
-    @Test("the clamp measures its average from the boundaries, not the 25 Mbit/s stub")
-    func clampIgnoresStubAverage() {
-        // HTTP with no `bit_rate`: `sourceBandwidth` says 25 Mbit/s. A 120 Mbit/s
-        // segment (80 average) declares 144; 4 × the stub would cut it to 100.
+    @Test("with no declared rate the clamp measures its average from the boundaries")
+    func clampMeasuresWithoutDeclaredRate() {
+        // HTTP with no `bit_rate`: `sourceBandwidth` has only the 25 Mbit/s
+        // stub, passed as `nil`. A 120 Mbit/s segment, then a 5 (62.5
+        // average), declares 144; 4 × the stub would cut it to 100.
         let dense: [(position: Int64, seconds: Double)] = [
-            (position: 0, seconds: 0), (position: 30_000_000, seconds: 2), (position: 40_000_000, seconds: 4),
+            (position: 0, seconds: 0), (position: 30_000_000, seconds: 2), (position: 31_250_000, seconds: 4),
         ]
-        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: dense, average: 25_000_000, audioCeiling: 0)
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: dense, average: nil, audioCeiling: 0)
             == 144_000_000)
     }
 
-    @Test("never below the average declared without the index")
-    func neverBelowDeclaredAverage() {
+    @Test("the floor is twice the declared average, whatever the boundaries measure")
+    func floorFromDeclaredAverage() {
+        // The boundaries measure ~6.7 Mbit/s; the declared 30 sets the floor.
         #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: vbr, average: 30_000_000, audioCeiling: 0)
-            == 30_000_000)
+            == 60_000_000)
     }
 
     @Test("never above 160 Mbit/s")
@@ -72,6 +74,9 @@ struct PeakSegmentBandwidthTests {
             (position: 0, seconds: 0), (position: 50_000_000, seconds: 2), (position: 60_000_000, seconds: 4),
         ]
         #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: spike, average: 60_000_000, audioCeiling: 0)
+            == 160_000_000)
+        // A 200 Mbit/s average: the 2 × floor must not lift it past the cap.
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: spike, average: 200_000_000, audioCeiling: 0)
             == 160_000_000)
     }
 
@@ -113,5 +118,29 @@ struct PeakSegmentBandwidthTests {
         // A harvested entry carries none.
         #expect(KeyframeIndexCache.Entry(identity: "id", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0])
             .positionsByPTS.isEmpty)
+    }
+
+    @Test("a harvest landing after the late index load keeps its positions")
+    func harvestKeepsStoredPositions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrismCorePeakBandwidth-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = KeyframeIndexCache(directory: directory)
+        #expect(cache.store(.init(
+            identity: "id", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 4000],
+            keyframePositions: [0: 100, 2000: 500, 4000: 900]
+        )))
+        // The complete harvest: PTS only, one keyframe the index lacked.
+        #expect(cache.store(.init(
+            identity: "id", timeBaseNum: 1, timeBaseDen: 1000, keyframePTS: [0, 2000, 3000, 4000]
+        )))
+        let stored = try #require(cache.lookup(identity: "id"))
+        #expect(stored.keyframePTS == [0, 2000, 3000, 4000])
+        #expect(stored.positionsByPTS == [0: 100, 2000: 500, 4000: 900])
+        // Another time base: the old positions do not describe these PTS.
+        #expect(cache.store(.init(
+            identity: "id", timeBaseNum: 1, timeBaseDen: 90000, keyframePTS: [0, 180000]
+        )))
+        #expect(try #require(cache.lookup(identity: "id")).positionsByPTS.isEmpty)
     }
 }
