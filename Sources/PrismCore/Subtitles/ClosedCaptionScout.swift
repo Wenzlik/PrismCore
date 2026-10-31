@@ -59,13 +59,18 @@ enum ClosedCaptionScout {
 
     /// Consume packets from `input` looking for captions. **Leaves the read
     /// position where it stopped** — the caller must rewind.
+    ///
+    /// The same packets answer one more question for free: the first
+    /// `alternative_transfer_characteristics` SEI's preferred transfer
+    /// (`AlternativeTransferSEI`), which is how broadcast HLG hides behind an
+    /// SDR VUI.
     static func scan(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
         framing: HEVCNALUnits.Framing,
         codec: HEVCNALUnits.Codec
-    ) -> Finding? {
-        guard let packet = av_packet_alloc() else { return nil }
+    ) -> (captions: Finding?, preferredTransfer: Int?) {
+        guard let packet = av_packet_alloc() else { return (nil, nil) }
         var packetRef: UnsafeMutablePointer<AVPacket>? = packet
         defer { av_packet_free(&packetRef) }
 
@@ -81,6 +86,8 @@ enum ClosedCaptionScout {
         var fieldSeen = [false, false]
         var videoPackets = 0
         var packets = 0
+        var preferredTransfer: Int?
+        var sawRandomAccess = false
 
         while videoPackets < maximumVideoPackets, packets < maximumPackets,
               av_read_frame(input, packet) >= 0 {
@@ -90,8 +97,14 @@ enum ClosedCaptionScout {
                   let data = packet.pointee.data, packet.pointee.size > 0
             else { continue }
             videoPackets += 1
+            if packet.pointee.flags & AV_PKT_FLAG_KEY != 0 { sawRandomAccess = true }
 
             let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+            if preferredTransfer == nil {
+                preferredTransfer = AlternativeTransferSEI.preferredTransfer(
+                    inPacket: bytes, framing: framing, codec: codec
+                )
+            }
             for triplet in A53CaptionData.triplets(in: bytes, framing: framing, codec: codec) {
                 if let field = triplet.cea608Field { fieldSeen[field - 1] = true }
             }
@@ -104,7 +117,11 @@ enum ClosedCaptionScout {
                 : Double(videoPackets)
             reader.ingest(bytes, presentationSeconds: seconds)
             _ = reader.flush(at: seconds)
-            if reader.hasPrintedText(channel: 1) { break }
+            if Self.isSettled(
+                printedCC1: reader.hasPrintedText(channel: 1),
+                preferredTransfer: preferredTransfer,
+                sawRandomAccess: sawRandomAccess
+            ) { break }
         }
 
         var channels: [Int] = []
@@ -112,7 +129,20 @@ enum ClosedCaptionScout {
         if reader.hasPrintedText(channel: 2) { channels.append(2) }
         if fieldSeen[1] { channels.append(3) }
         if reader.hasPrintedText(channel: 4) { channels.append(4) }
-        guard !channels.isEmpty else { return nil }
-        return Finding(channels: channels.sorted(), framing: framing, codec: codec)
+        guard !channels.isEmpty else { return (nil, preferredTransfer) }
+        return (Finding(channels: channels.sorted(), framing: framing, codec: codec), preferredTransfer)
+    }
+
+    /// Whether the scan has both answers and can stop before its budget.
+    ///
+    /// Printed CC1 settles the captions, but not the transfer: the
+    /// `alternative_transfer_characteristics` SEI rides only on random-access
+    /// pictures, so its absence means nothing until one has been read. Stopping
+    /// on CC1 alone let a captioned broadcast-HLG recording that starts mid-GOP
+    /// (the usual cut of a transport stream) keep its SDR tags. No seek is
+    /// added for it: reading on to the next keyframe stays within the budget
+    /// and costs no Range request.
+    static func isSettled(printedCC1: Bool, preferredTransfer: Int?, sawRandomAccess: Bool) -> Bool {
+        printedCC1 && (preferredTransfer != nil || sawRandomAccess)
     }
 }

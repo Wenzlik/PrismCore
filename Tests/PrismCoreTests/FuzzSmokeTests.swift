@@ -139,5 +139,17 @@ struct FuzzSmokeTests {
             }
             #expect(version == 1, "the HDR10+ seed never reached its message (\(framing))")
         }
+
+        // The alternative-transfer seeds must step over the decoy message and
+        // read the HLG code point in both carriages.
+        for (seed, framing) in [
+            (FuzzSeeds.alternativeTransferUnit, HEVCNALUnits.Framing.lengthPrefixed(4)),
+            ([0, 0, 0, 1] + FuzzSeeds.alternativeTransferNAL, .annexB),
+        ] {
+            let transfer = seed.withUnsafeBufferPointer {
+                AlternativeTransferSEI.preferredTransfer(inPacket: $0, framing: framing, codec: .hevc)
+            }
+            #expect(transfer == 18, "the alternative-transfer seed never reached its message (\(framing))")
+        }
     }
 }
