@@ -16,6 +16,7 @@ source-compatible.)
 - Broadcast HLG signalled only by an `alternative_transfer_characteristics`
   SEI (preferred transfer 18) over an SDR or unspecified VUI is served as HLG
   (`VIDEO-RANGE`, display criteria, `colr`) to an HDR display.
+  New fuzz target `alternative-transfer-sei` with seeds.
 - `PrivacyInfo.xcprivacy` ships as a resource of the PrismCore target.
 
 ## [4.0.0] — 2026-10-30
