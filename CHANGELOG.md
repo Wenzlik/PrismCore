@@ -16,8 +16,8 @@ source-compatible.)
 - Profile 7 → 8.1: an access unit left with no base-layer picture after the
   EL strip (only RPU + EL) is dropped instead of muxed as an empty sample;
   counted in `DolbyVisionConversionStats.picturelessPackets`. Its DTS passes
-  to the next picture, so a drop before a fragment cut no longer shifts the
-  next fragment, and a key-flagged one can no longer anchor a seek or open a
+  to the next picture, whose duration grows by the same amount, so a drop
+  before a fragment cut no longer shifts the next fragment, and a key-flagged one can no longer anchor a seek or open a
   segment. (#177)
 
 ### Added

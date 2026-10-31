@@ -2530,15 +2530,15 @@ final class HLSRemuxer: @unchecked Sendable {
                             )
                         }
                     }
-                    // The dropped packet's DTS goes to the next picture written:
-                    // the sample before it keeps its own duration, so leaving
-                    // the next DTS where it was would open a gap — and across
-                    // a fragment cut movenc closes that gap by starting the
-                    // next fragment (tfdt) at the previous one's end, shifting
-                    // every sample in it. `min` keeps a NOPTS DTS as it is.
+                    // The dropped packet's DTS goes to the next picture written
+                    // (see `carryingDroppedDTS`).
                     if let carried = carriedVideoDTS {
                         carriedVideoDTS = nil
-                        packet.pointee.dts = min(carried, packet.pointee.dts)
+                        let timing = Self.carryingDroppedDTS(
+                            carried, dts: packet.pointee.dts, duration: packet.pointee.duration
+                        )
+                        packet.pointee.dts = timing.dts
+                        packet.pointee.duration = timing.duration
                     }
                     if let mapped = streamMap[streamIndex] {
                         try write(packet, to: mapped, from: sourceTimeBase, writer: writer, grid: videoGrid)
@@ -3168,6 +3168,29 @@ final class HLSRemuxer: @unchecked Sendable {
                 AV_PKT_DATA_DOVI_CONF
             )
         }
+    }
+
+    /// The timing for the first picture written after dropped picture-less
+    /// P7 access units: it takes the first dropped one's DTS and stretches
+    /// its duration by the same amount, so it still decodes until where it
+    /// did.
+    ///
+    /// Moving only the DTS fails both ways. Left where it was, the sample
+    /// before keeps its own duration and a gap opens; moved without the
+    /// duration, a picture that ends a fragment ends early (40 ms frames:
+    /// a drop at 40, the last picture at 80 moved to 40 ends at 80, not
+    /// 120). Either way movenc starts the next fragment's tfdt at the
+    /// previous one's end, so the next keyframe — and every sample after it —
+    /// presents a gap's worth early, on top of the picture before it.
+    ///
+    /// A NOPTS DTS, a carried DTS that is not earlier, or an unknown
+    /// duration (≤ 0, which the muxer derives from the next DTS anyway) are
+    /// left as they came.
+    static func carryingDroppedDTS(
+        _ carried: Int64, dts: Int64, duration: Int64
+    ) -> (dts: Int64, duration: Int64) {
+        guard dts != swift_AV_NOPTS_VALUE(), carried < dts else { return (dts, duration) }
+        return (carried, duration > 0 ? duration + (dts - carried) : duration)
     }
 
     /// Whether the served sample entry must carry **no** `dvvC`/`dvcC` box.

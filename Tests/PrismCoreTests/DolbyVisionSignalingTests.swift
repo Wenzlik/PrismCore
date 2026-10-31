@@ -478,6 +478,37 @@ struct DolbyVisionP7FELTests {
         #expect(MasterPlaylistBuilder.primaryVideoCodecString(for: p5) == "dvh1.05.06")
     }
 
+    @Test("derived levels honour the table's widths: 1440p24 is 5, 8K30 is 11")
+    func derivedLevelWidths() throws {
+        let qhd = MasterPlaylistBuilder.Resolution(width: 2560, height: 1440)
+        let uhd8k = MasterPlaylistBuilder.Resolution(width: 7680, height: 4320)
+        let p81 = profile(8, level: 0, compatibility: 1)
+        let qhd24 = try variant(p81, resolution: qhd, frameRate: 24)
+        let k8at24 = try variant(p81, resolution: uhd8k, frameRate: 24)
+        let k8at30 = try variant(p81, resolution: uhd8k, frameRate: 30)
+        let k8at60 = try variant(p81, resolution: uhd8k, frameRate: 60)
+        #expect(MasterPlaylistBuilder.dolbyVisionLevel(for: qhd24) == 5)
+        #expect(MasterPlaylistBuilder.dolbyVisionLevel(for: k8at24) == 11)
+        #expect(MasterPlaylistBuilder.dolbyVisionLevel(for: k8at30) == 11)
+        #expect(MasterPlaylistBuilder.dolbyVisionLevel(for: k8at60) == 12)
+    }
+
+    @Test("a carried DTS stretches the duration so the decode end stays put")
+    func carriedDTSKeepsDecodeEnd() {
+        func pair(_ t: (dts: Int64, duration: Int64)) -> [Int64] { [t.dts, t.duration] }
+        // 40-tick frames: the drop at 40, the next picture at 80 takes 40 and
+        // must still end at 120 — or movenc starts the next fragment at 80.
+        let timing = HLSRemuxer.carryingDroppedDTS(40, dts: 80, duration: 40)
+        #expect(timing.dts == 40)
+        #expect(timing.duration == 80)
+        #expect(timing.dts + timing.duration == 120)
+        // Unknown duration stays unknown; the muxer derives it.
+        #expect(pair(HLSRemuxer.carryingDroppedDTS(40, dts: 80, duration: 0)) == [40, 0])
+        // NOPTS (INT64_MIN) and a carried DTS that is not earlier change nothing.
+        #expect(pair(HLSRemuxer.carryingDroppedDTS(40, dts: .min, duration: 40)) == [.min, 40])
+        #expect(pair(HLSRemuxer.carryingDroppedDTS(80, dts: 80, duration: 40)) == [80, 40])
+    }
+
     @Test("a valid record level is kept even where the picture would derive another")
     func validLevelIsKept() throws {
         let hd = MasterPlaylistBuilder.Resolution(width: 1920, height: 1080)

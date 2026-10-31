@@ -499,14 +499,16 @@ public enum MasterPlaylistBuilder {
               resolution.width > 0, resolution.height > 0, frameRate > 0 else { return fallback }
         let pixelRate = Double(resolution.width * resolution.height) * frameRate
         // (level, max width, max luma pixels per second) from the Dolby Vision
-        // profiles-and-levels table. Level 11 is 10's pixel rate at a higher
-        // bitrate, so the pixel rate never picks it.
+        // profiles-and-levels table. Levels 4 and 5 already allow wider
+        // pictures than 1080p and 11 is 8K at 10's pixel rate — miss either
+        // and 1440p24 asks for 6, 8K30 for 12, and a decoder that could play
+        // it is turned away.
         let table: [(level: UInt8, width: Int, pixelRate: Double)] = [
             (1, 1280, 22_118_400), (2, 1280, 27_648_000),
-            (3, 1920, 49_766_400), (4, 1920, 62_208_000), (5, 1920, 124_416_000),
+            (3, 1920, 49_766_400), (4, 2560, 62_208_000), (5, 3840, 124_416_000),
             (6, 3840, 199_065_600), (7, 3840, 248_832_000), (8, 3840, 398_131_200),
             (9, 3840, 497_664_000), (10, 3840, 995_328_000),
-            (12, 7680, 1_990_656_000), (13, 7680, 3_981_312_000),
+            (11, 7680, 995_328_000), (12, 7680, 1_990_656_000), (13, 7680, 3_981_312_000),
         ]
         // A whisker of slack: 23.976 and 59.94 are listed under 24 and 60.
         return table.first {
