@@ -1305,7 +1305,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     identity: cacheIdentity,
                     timeBaseNum: timeBase.num,
                     timeBaseDen: timeBase.den,
-                    keyframePTS: indexed.sorted()
+                    keyframePTS: indexed.sorted(),
+                    keyframePositions: SegmentPlan.indexedKeyframePositions(of: stream)
                 ))
             }
         }
@@ -1599,10 +1600,13 @@ final class HLSRemuxer: @unchecked Sendable {
                 // average plus LPCM heights, which outweigh the TrueHD they replace (13.8 Mbit/s
                 // for 7.1.4) where the source's own rate cannot know it. Over-stating only grows
                 // AVPlayer's buffer (see `sourceBandwidth`).
+                // A cache hit skipped the index load (Matroska Cues stay unread), so the
+                // stored positions stand in for the ones the live index lacks.
+                let keyframePositions = SegmentPlan.indexedKeyframePositions(
+                    of: input.pointee.streams[Int(videoIndex)]!
+                ).merging(cachedEntry?.positionsByPTS ?? [:]) { live, _ in live }
                 variant.bandwidth = Self.peakSegmentBandwidth(
-                    boundaries: Self.segmentBoundaries(
-                        of: input.pointee.streams[Int(videoIndex)]!, plan: plannedPlan
-                    ),
+                    boundaries: Self.segmentBoundaries(plan: plannedPlan, positions: keyframePositions),
                     average: variant.bandwidth,
                     audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0
                 ) ?? variant.bandwidth + (renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
@@ -3506,9 +3510,15 @@ final class HLSRemuxer: @unchecked Sendable {
     /// `BANDWIDTH` from the densest segment: its bit rate with 20 % headroom,
     /// plus `audioCeiling` for a re-encoded audio rendition whose bits the
     /// source's byte positions do not measure. Held between twice and four
-    /// times the `average` (never above 160 Mbit/s, never below `average`):
-    /// one odd index entry must neither under-cut the average nor inflate the
-    /// declaration past anything the source can be.
+    /// times the average the same boundaries measure (never above 160 Mbit/s,
+    /// never below the `average` declared today): one odd index entry must
+    /// neither under-cut the average nor inflate the declaration past
+    /// anything the source can be.
+    ///
+    /// The clamp's average is measured, not `average`: over HTTP a source
+    /// with no `bit_rate` gets the 25 Mbit/s stub from `sourceBandwidth`, and
+    /// a cap of 4 × the stub would cut a measured 120 Mbit/s peak to 100 —
+    /// back below what AVPlayer meets.
     ///
     /// `nil` — use the average — when fewer than two whole segments are
     /// measurable, or the positions run backwards (an index not to trust).
@@ -3520,7 +3530,7 @@ final class HLSRemuxer: @unchecked Sendable {
         average: Int,
         audioCeiling: Int
     ) -> Int? {
-        guard boundaries.count >= 3, average > 0 else { return nil }
+        guard boundaries.count >= 3, let first = boundaries.first, let last = boundaries.last else { return nil }
         var peak = 0.0
         for (start, end) in zip(boundaries, boundaries.dropFirst()) {
             let bytes = end.position - start.position
@@ -3528,29 +3538,22 @@ final class HLSRemuxer: @unchecked Sendable {
             guard bytes >= 0, seconds > 0 else { return nil }
             peak = max(peak, Double(bytes) * 8 / seconds)
         }
-        guard peak > 0 else { return nil }
+        // Every step moved forward in time, so the span is positive.
+        let measured = Int(Double(last.position - first.position) * 8 / (last.seconds - first.seconds))
+        guard peak > 0, measured > 0 else { return nil }
         let declared = Int(peak * 1.2) + audioCeiling
-        let cap = min(4 * average, 160_000_000)
-        return max(average, min(cap, max(2 * average, declared)))
+        let cap = min(4 * measured, 160_000_000)
+        return max(average, min(cap, max(2 * measured, declared)))
     }
 
-    /// The planned segment starts the demuxer index has a byte position for.
-    /// Empty without a keyframe plan, or when the index was never loaded (a
-    /// plan from the keyframe cache skips the load) — `peakSegmentBandwidth`
-    /// then falls back. A plan entry with no indexed position (a partial
-    /// plan's uniform tail) merges into the segment before it.
+    /// The planned segment starts `positions` has a byte position for. Empty
+    /// without a keyframe plan — `peakSegmentBandwidth` then falls back. A
+    /// plan entry with no position (a partial plan's uniform tail) merges
+    /// into the segment before it.
     static func segmentBoundaries(
-        of stream: UnsafeMutablePointer<AVStream>, plan: SegmentPlan?
+        plan: SegmentPlan?, positions: [Int64: Int64]
     ) -> [(position: Int64, seconds: Double)] {
         guard let plan, plan.timeBaseDen != 0 else { return [] }
-        var positions: [Int64: Int64] = [:]
-        let count = avformat_index_get_entries_count(stream)
-        for i in 0..<count {
-            guard let entry = avformat_index_get_entry(stream, i),
-                  entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0, entry.pointee.pos >= 0
-            else { continue }
-            positions[entry.pointee.timestamp] = entry.pointee.pos
-        }
         let tick = Double(plan.timeBaseNum) / Double(plan.timeBaseDen)
         return plan.entries.compactMap { entry in
             positions[entry.startPTS].map { (position: $0, seconds: Double(entry.startPTS) * tick) }

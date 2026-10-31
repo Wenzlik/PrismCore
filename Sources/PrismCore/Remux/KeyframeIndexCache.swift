@@ -222,10 +222,17 @@ struct KeyframeIndexCache: Sendable {
         /// contiguous run, past which the map says nothing.
         var complete: Bool = true
         var coveredThroughPTS: Int64? = nil
+        /// The byte position of each `keyframePTS` entry (-1 where unknown),
+        /// from the demuxer index; `nil` from the harvest, which keeps PTS
+        /// only. A hit skips the index load, and without these `BANDWIDTH`
+        /// could not measure the densest segment and would fall back to the
+        /// average — the under-declaration it exists to avoid.
+        var keyframePositions: [Int64]? = nil
 
         init(
             identity: String, timeBaseNum: Int32, timeBaseDen: Int32, keyframePTS: [Int64],
-            complete: Bool = true, coveredThroughPTS: Int64? = nil
+            complete: Bool = true, coveredThroughPTS: Int64? = nil,
+            keyframePositions: [Int64: Int64] = [:]
         ) {
             self.identity = identity
             self.format = KeyframeIndexCache.formatVersion
@@ -234,6 +241,19 @@ struct KeyframeIndexCache: Sendable {
             self.keyframePTS = keyframePTS
             self.complete = complete
             self.coveredThroughPTS = coveredThroughPTS
+            self.keyframePositions = keyframePositions.isEmpty
+                ? nil : keyframePTS.map { keyframePositions[$0] ?? -1 }
+        }
+
+        /// `keyframePositions` keyed by PTS, unknown ones left out; empty when
+        /// none were stored or they do not line up with the PTS.
+        var positionsByPTS: [Int64: Int64] {
+            guard let keyframePositions, keyframePositions.count == keyframePTS.count else { return [:] }
+            var positions: [Int64: Int64] = [:]
+            for (pts, position) in zip(keyframePTS, keyframePositions) where position >= 0 {
+                positions[pts] = position
+            }
+            return positions
         }
 
         // Entries written before `complete` existed were only ever stored at
@@ -248,6 +268,7 @@ struct KeyframeIndexCache: Sendable {
             keyframePTS = try container.decode([Int64].self, forKey: .keyframePTS)
             complete = try container.decodeIfPresent(Bool.self, forKey: .complete) ?? true
             coveredThroughPTS = try container.decodeIfPresent(Int64.self, forKey: .coveredThroughPTS)
+            keyframePositions = try container.decodeIfPresent([Int64].self, forKey: .keyframePositions)
         }
     }
 

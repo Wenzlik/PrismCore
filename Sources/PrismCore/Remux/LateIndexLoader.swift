@@ -80,14 +80,15 @@ final class LateIndexLoader: @unchecked Sendable {
 
     func start() {
         thread = ProducerThread(name: "cz.zmrhal.prismcore.late-index") { [self] in
-            guard let (keyframes, segments) = load(), !interruptGuard.shouldInterrupt else { return }
+            guard let (keyframes, positions, segments) = load(), !interruptGuard.shouldInterrupt else { return }
             // Announce only what landed: a write the cache swallowed would
             // send the host to a successor that misses and stays sequential.
             guard cache.store(.init(
                 identity: target.identity,
                 timeBaseNum: target.timeBase.num,
                 timeBaseDen: target.timeBase.den,
-                keyframePTS: keyframes
+                keyframePTS: keyframes,
+                keyframePositions: positions
             )) else { return }
             onStored(segments)
         }
@@ -97,9 +98,10 @@ final class LateIndexLoader: @unchecked Sendable {
     /// before or after `start()`.
     func cancel() { interruptGuard.cancel() }
 
-    /// The sorted keyframe map and the plan's segment count, or `nil` for
-    /// anything short of a whole, trusted index of the producer's version.
-    private func load() -> ([Int64], Int)? {
+    /// The sorted keyframe map, its byte positions and the plan's segment
+    /// count, or `nil` for anything short of a whole, trusted index of the
+    /// producer's version.
+    private func load() -> ([Int64], [Int64: Int64], Int)? {
         var options = SourceOpenTuning.makeOptions(httpHeaders: target.httpHeaders)
         defer { av_dict_free(&options) }
         var context = interruptGuard.makeContext()
@@ -175,6 +177,6 @@ final class LateIndexLoader: @unchecked Sendable {
                   targetSeconds: target.segmentSeconds, firstSegmentSeconds: target.firstSegmentSeconds
               )
         else { return nil }
-        return (keyframes, entries.count)
+        return (keyframes, SegmentPlan.indexedKeyframePositions(of: stream), entries.count)
     }
 }
