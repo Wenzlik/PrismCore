@@ -136,6 +136,11 @@ struct KeyframeIndexCacheTests {
         try Data(#"{"identity":"\#(key)","timeBaseNum":1,"timeBaseDen":1000,"keyframePTS":[0,2000]}"#.utf8)
             .write(to: file)
         #expect(cache.lookup(identity: key) == nil)
+        // Format 2 never carried byte positions; a hit would skip the index
+        // load and leave `BANDWIDTH` on the average for good.
+        try Data(#"{"identity":"\#(key)","format":2,"timeBaseNum":1,"timeBaseDen":1000,"keyframePTS":[0,2000]}"#.utf8)
+            .write(to: file)
+        #expect(cache.lookup(identity: key) == nil)
         try Data("not a sidecar".utf8).write(to: file)
         #expect(cache.lookup(identity: key) == nil)
 

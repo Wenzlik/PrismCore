@@ -80,7 +80,11 @@ struct KeyframeIndexCache: Sendable {
     /// `Identity.key`; entries before it (no field) were keyed by a readable
     /// URL with the query stripped and no version proof, and are misses —
     /// their key could not match anyway, this says so without relying on it.
-    static let formatVersion = 2
+    /// 3 = may carry `keyframePositions`. A format-2 entry never has them,
+    /// and a hit skips the index load that would supply them — so without
+    /// the bump a source played before them would declare the average
+    /// `BANDWIDTH` on every later play instead of its densest segment.
+    static let formatVersion = 3
 
     /// What vouches that the bytes behind an address are the ones a map was
     /// learned from. Deliberately only two kinds: anything weaker — a weak

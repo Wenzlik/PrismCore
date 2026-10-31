@@ -16,7 +16,8 @@ source-compatible.)
   one the positions measure when the source declares no rate) and never above
   160 Mbit/s. An average under-declared VBR UHD remuxes and AVPlayer stalled
   or failed with -12318. The keyframe cache keeps the positions — also across
-  a later PTS-only harvest — so a cache hit measures the peak too. Without a
+  a later PTS-only harvest — so a cache hit measures the peak too; its
+  format goes to 3, so a map stored without positions is re-learned once. Without a
   keyframe plan or index positions it stays the average.
 
 ## [4.0.0] — 2026-10-30
