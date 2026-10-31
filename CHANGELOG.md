@@ -8,6 +8,16 @@ source-compatible.)
 
 ## [Unreleased]
 
+- Audio-description tracks (`AV_DISPOSITION_VISUAL_IMPAIRED`) are reported as
+  `AudioTrackInfo.isAudioDescription` and declared
+  `public.accessibility.describes-video` in the master.
+- `bridgedAudioProcessing:` (`BridgedAudioProcessing`): opt-in night mode
+  (`acompressor`) and a channel cap for re-encoded audio only; off by default.
+- Broadcast HLG signalled only by an `alternative_transfer_characteristics`
+  SEI (preferred transfer 18) over an SDR or unspecified VUI is served as HLG
+  (`VIDEO-RANGE`, display criteria, `colr`) to an HDR display.
+- `PrivacyInfo.xcprivacy` ships as a resource of the PrismCore target.
+
 ## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
