@@ -434,8 +434,11 @@ public enum MasterPlaylistBuilder {
         if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly {
             // Profile 5: a bare `dvh1` tag, no HEVC tag anywhere. There is no
             // base layer to declare, and the DV level (not the HEVC level)
-            // is what follows.
-            return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dv.level))"
+            // is what follows. With no level to derive, the record's own is
+            // still the only tag P5 can carry — an `hvc1` one would decode
+            // green-and-purple.
+            let level = dolbyVisionLevel(for: variant) ?? dv.level
+            return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(level))"
         }
         switch variant.videoCodec {
         case .hevc(let record):
@@ -474,7 +477,39 @@ public enum MasterPlaylistBuilder {
         // codec to supplement.
         guard !dv.isSingleLayerDVOnly else { return nil }
         guard let brand = dolbyVisionBrand(for: dv) else { return nil }
-        return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dv.level))/\(brand)"
+        // No level means no claim: the base layer plays as HDR10 either way,
+        // and an invalid tag is a rejected item, not a degraded one.
+        guard let level = dolbyVisionLevel(for: variant) else { return nil }
+        return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(level))/\(brand)"
+    }
+
+    /// The DV level to print: the record's when it names a real one (1…13),
+    /// otherwise the lowest level whose limits cover the variant's resolution
+    /// and frame rate, or `nil` when neither is known.
+    ///
+    /// Muxers write `dv_level 0` often enough — a P7 remux whose record was
+    /// never filled in is how issue #177 got a `dvh1.08.00` — and level 0 is
+    /// not in the Dolby Vision level table, so the tag names a decoder that
+    /// does not exist.
+    static func dolbyVisionLevel(for variant: VariantDescription) -> UInt8? {
+        if let level = variant.dolbyVision?.level, (1...13).contains(level) { return level }
+        guard let resolution = variant.resolution, let frameRate = variant.frameRate,
+              resolution.width > 0, resolution.height > 0, frameRate > 0 else { return nil }
+        let pixelRate = Double(resolution.width * resolution.height) * frameRate
+        // (level, max width, max luma pixels per second) from the Dolby Vision
+        // profiles-and-levels table. Level 11 is 10's pixel rate at a higher
+        // bitrate, so the pixel rate never picks it.
+        let table: [(level: UInt8, width: Int, pixelRate: Double)] = [
+            (1, 1280, 22_118_400), (2, 1280, 27_648_000),
+            (3, 1920, 49_766_400), (4, 1920, 62_208_000), (5, 1920, 124_416_000),
+            (6, 3840, 199_065_600), (7, 3840, 248_832_000), (8, 3840, 398_131_200),
+            (9, 3840, 497_664_000), (10, 3840, 995_328_000),
+            (12, 7680, 1_990_656_000), (13, 7680, 3_981_312_000),
+        ]
+        // A whisker of slack: 23.976 and 59.94 are listed under 24 and 60.
+        return table.first {
+            resolution.width <= $0.width && pixelRate <= $0.pixelRate * 1.001
+        }?.level
     }
 
     /// The ISO brand that names the *base* layer's compatibility, which is the
