@@ -530,6 +530,25 @@ struct DolbyVisionP7FELTests {
         #expect(!converter.lastPacketCarriesNoPicture)
         #expect(converter.picturelessPackets == 1)
     }
+
+    @Test("a key-flagged RPU + EL packet is not a base-layer picture, so it cannot anchor a seek or open a segment")
+    func baseLayerPicturePredicate() {
+        func carries(_ units: [[UInt8]]) -> Bool {
+            packet(units).withUnsafeBufferPointer {
+                DolbyVisionRPUConverter.carriesBaseLayerPicture($0, lengthSize: 4)
+            }
+        }
+        // IDR (type 19) with EL and RPU: the strip leaves a picture.
+        #expect(carries([nal(type: 19), nal(type: 62), nal(type: 63)]))
+        // Parameter sets + RPU + EL, no base VCL: dropped by the converter.
+        #expect(!carries([nal(type: 32), nal(type: 33), nal(type: 34), nal(type: 62), nal(type: 63)]))
+        // A VCL type on a non-zero layer is enhancement layer too.
+        #expect(!carries([nal(type: 19, layerID: 1), nal(type: 62)]))
+        // Does not frame: goes out unconverted, so it is not treated as dropped.
+        #expect([UInt8]([0, 0, 0, 9, 0x26]).withUnsafeBufferPointer {
+            DolbyVisionRPUConverter.carriesBaseLayerPicture($0, lengthSize: 4)
+        })
+    }
 }
 
 // MARK: - Normalization end to end

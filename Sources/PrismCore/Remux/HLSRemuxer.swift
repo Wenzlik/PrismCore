@@ -1799,6 +1799,9 @@ final class HLSRemuxer: @unchecked Sendable {
         /// Post-reanchor: discard packets until the anchor keyframe arrives
         /// (a BACKWARD seek may land at an earlier keyframe than requested).
         var droppingUntilPTS: Int64?
+        /// DTS of the first picture-less P7 packet dropped since the last
+        /// video write, handed to the next one (see the copy loop).
+        var carriedVideoDTS: Int64?
         /// Re-opens after a read failure, planned sessions only (see
         /// `ProducerRecoveryPolicy`).
         var recovery = ProducerRecoveryPolicy()
@@ -2182,6 +2185,8 @@ final class HLSRemuxer: @unchecked Sendable {
             segmentStartPTS = nil
             nextBoundaryPTS = plannedBoundary(after: anchor)
             droppingUntilPTS = target
+            // Belongs to the timeline the seek just left.
+            carriedVideoDTS = nil
             demand?.setProducing(index: anchor)
             // A run that starts inside the covered prefix extends it; one
             // that starts past it leaves a hole and must not be stored.
@@ -2368,10 +2373,19 @@ final class HLSRemuxer: @unchecked Sendable {
                 // the plan's PTS is an indexed keyframe, so it WILL arrive, and
                 // pre-anchor packets belong to a segment nobody asked for.
                 if let target = droppingUntilPTS {
-                    let isAnchorKeyframe = Int32(packet.pointee.stream_index) == videoIndex
+                    var isAnchorKeyframe = Int32(packet.pointee.stream_index) == videoIndex
                         && packet.pointee.flags & AV_PKT_FLAG_KEY != 0
                         && packet.pointee.pts != swift_AV_NOPTS_VALUE()
                         && packet.pointee.pts >= target
+                    // A key-flagged P7 packet that is only RPU + enhancement
+                    // layer is dropped below; as the anchor it would let the
+                    // next, dependent picture open the segment.
+                    if isAnchorKeyframe, let dolbyVisionConverter, let data = packet.pointee.data,
+                       packet.pointee.size > 0 {
+                        isAnchorKeyframe = dolbyVisionConverter.carriesBaseLayerPicture(
+                            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        )
+                    }
                     if isAnchorKeyframe {
                         droppingUntilPTS = nil
                     } else {
@@ -2402,6 +2416,51 @@ final class HLSRemuxer: @unchecked Sendable {
                 }
 
                 if Int32(streamIndex) == videoIndex {
+                    // P7 → 8.1: rewrite the RPUs and drop the enhancement layer
+                    // before the bits reach the muxer. Returns nil for a packet
+                    // that needed neither, which is every packet of every other
+                    // source — the cost there is one NAL walk, no copy.
+                    var strippedToNoPicture = false
+                    if let dolbyVisionConverter, packet.pointee.data != nil,
+                       packet.pointee.size > 0 {
+                        // The walk runs on the packet's own buffer, and a changed
+                        // packet is written ONCE into a fresh av_malloc'd buffer
+                        // that replaces the packet's — no `[UInt8]` copy in, no
+                        // grow + memcpy out.
+                        try Self.rewritePayload(of: packet) { source, allocate in
+                            dolbyVisionConverter.convert(packet: source, into: allocate)
+                        }
+                        strippedToNoPicture = dolbyVisionConverter.lastPacketCarriesNoPicture
+                    }
+                    if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
+                       packet.pointee.flags & AV_PKT_FLAG_KEY != 0,
+                       let lengthSize = videoTrack.nalUnitLengthSize,
+                       let data = packet.pointee.data, packet.pointee.size > 0 {
+                        // Keyframes carry the sets — gated on the flag, so a
+                        // non-keyframe costs nothing, not even the walk.
+                        let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+                        for unit in HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) ?? []
+                        where HVCCNormalizer.keptNALTypes.contains(unit.type) && unit.layerID == 0 {
+                            let value = Array(unit.bytes)
+                            var existing = harvestedParameterSets[unit.type] ?? []
+                            if !existing.contains(value) {
+                                existing.append(value)
+                                harvestedParameterSets[unit.type] = existing
+                            }
+                        }
+                    }
+                    // An access unit that was only RPU + enhancement layer has
+                    // nothing left to decode: written, it would be a sample
+                    // with no picture. Decided BEFORE the cut logic below — a
+                    // key-flagged one must not open a segment it is not in —
+                    // and AFTER the harvest above, which may still want its
+                    // parameter sets.
+                    if strippedToNoPicture {
+                        if carriedVideoDTS == nil, packet.pointee.dts != swift_AV_NOPTS_VALUE() {
+                            carriedVideoDTS = packet.pointee.dts
+                        }
+                        continue
+                    }
                     // Cut BEFORE writing a boundary keyframe, so the keyframe opens
                     // the next segment (every segment starts decodable on its own —
                     // what EXT-X-INDEPENDENT-SEGMENTS promises).
@@ -2471,44 +2530,17 @@ final class HLSRemuxer: @unchecked Sendable {
                             )
                         }
                     }
-                    // P7 → 8.1: rewrite the RPUs and drop the enhancement layer
-                    // before the bits reach the muxer. Returns nil for a packet
-                    // that needed neither, which is every packet of every other
-                    // source — the cost there is one NAL walk, no copy.
-                    var strippedToNoPicture = false
-                    if let dolbyVisionConverter, packet.pointee.data != nil,
-                       packet.pointee.size > 0 {
-                        // The walk runs on the packet's own buffer, and a changed
-                        // packet is written ONCE into a fresh av_malloc'd buffer
-                        // that replaces the packet's — no `[UInt8]` copy in, no
-                        // grow + memcpy out.
-                        try Self.rewritePayload(of: packet) { source, allocate in
-                            dolbyVisionConverter.convert(packet: source, into: allocate)
-                        }
-                        strippedToNoPicture = dolbyVisionConverter.lastPacketCarriesNoPicture
+                    // The dropped packet's DTS goes to the next picture written:
+                    // the sample before it keeps its own duration, so leaving
+                    // the next DTS where it was would open a gap — and across
+                    // a fragment cut movenc closes that gap by starting the
+                    // next fragment (tfdt) at the previous one's end, shifting
+                    // every sample in it. `min` keeps a NOPTS DTS as it is.
+                    if let carried = carriedVideoDTS {
+                        carriedVideoDTS = nil
+                        packet.pointee.dts = min(carried, packet.pointee.dts)
                     }
-                    if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
-                       packet.pointee.flags & AV_PKT_FLAG_KEY != 0,
-                       let lengthSize = videoTrack.nalUnitLengthSize,
-                       let data = packet.pointee.data, packet.pointee.size > 0 {
-                        // Keyframes carry the sets — gated on the flag, so a
-                        // non-keyframe costs nothing, not even the walk.
-                        let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
-                        for unit in HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) ?? []
-                        where HVCCNormalizer.keptNALTypes.contains(unit.type) && unit.layerID == 0 {
-                            let value = Array(unit.bytes)
-                            var existing = harvestedParameterSets[unit.type] ?? []
-                            if !existing.contains(value) {
-                                existing.append(value)
-                                harvestedParameterSets[unit.type] = existing
-                            }
-                        }
-                    }
-                    // An access unit that was only RPU + enhancement layer has
-                    // nothing left to decode: written, it would be a sample
-                    // with no picture. Skipped AFTER the harvest above, which
-                    // may still want its parameter sets.
-                    if !strippedToNoPicture, let mapped = streamMap[streamIndex] {
+                    if let mapped = streamMap[streamIndex] {
                         try write(packet, to: mapped, from: sourceTimeBase, writer: writer, grid: videoGrid)
                     }
                     continue

@@ -83,9 +83,10 @@ final class DolbyVisionRPUConverter {
     /// Packets dropped whole because the strip left no base-layer picture in
     /// them — an access unit that carried only RPU and enhancement layer.
     /// Written as is, such a packet becomes an fMP4 sample with no VCL NAL: a
-    /// timestamp the decoder has nothing to decode for. Dropping it lets the
-    /// previous sample run on to the next picture's DTS, which keeps the
-    /// timeline whole; its RPU described no base picture, so nothing is lost.
+    /// timestamp the decoder has nothing to decode for. Dropping it and
+    /// handing its DTS to the next picture written (the copy loop does that)
+    /// keeps the decode timeline whole; its RPU described no base picture, so
+    /// nothing is lost.
     private(set) var picturelessPackets = 0
 
     /// Whether the packet `convert` just handled must not reach the muxer —
@@ -267,6 +268,22 @@ final class DolbyVisionRPUConverter {
     /// itself cannot even be constructed in a build that has neither.
     static func isEnhancementLayer(type: UInt8, layerID: UInt8) -> Bool {
         type == nalTypeEnhancementLayer || layerID != 0
+    }
+
+    /// Whether the packet still has a base-layer picture once the enhancement
+    /// layer is stripped — the same test `dispose` applies, asked BEFORE
+    /// converting. The copy loop needs it where a key-flagged RPU + EL packet
+    /// would otherwise end a seek's discard: the packet is dropped later, so
+    /// the next picture written would be a dependent one opening the segment.
+    /// A packet that does not frame counts as a picture: it goes out
+    /// unconverted (see `staleUnconvertedPackets`), so it is not dropped.
+    func carriesBaseLayerPicture(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        Self.carriesBaseLayerPicture(bytes, lengthSize: lengthSize)
+    }
+
+    static func carriesBaseLayerPicture(_ bytes: UnsafeBufferPointer<UInt8>, lengthSize: Int) -> Bool {
+        guard let units = HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) else { return true }
+        return units.contains { $0.type < 32 && !isEnhancementLayer(type: $0.type, layerID: $0.layerID) }
     }
 
     /// One RPU NAL (including its two-byte HEVC header) through libdovi.
