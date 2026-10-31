@@ -11,9 +11,8 @@ source-compatible.)
 ### Fixed
 
 - A Dolby Vision record with `dv_level 0` no longer produces `dvh1.08.00`:
-  the level is derived from resolution × frame rate (DV level table), and the
-  `SUPPLEMENTAL-CODECS` claim is dropped when it cannot be. A valid record
-  level is kept. (#177)
+  the level is derived from resolution × frame rate (DV level table), or 6
+  when the picture size is unknown. A valid record level is kept. (#177)
 - Profile 7 → 8.1: an access unit left with no base-layer picture after the
   EL strip (only RPU + EL) is dropped instead of muxed as an empty sample;
   counted in `DolbyVisionConversionStats.picturelessPackets`. (#177)

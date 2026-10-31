@@ -485,11 +485,13 @@ struct DolbyVisionP7FELTests {
         #expect(MasterPlaylistBuilder.supplementalCodecsString(for: v) == "dvh1.08.09/db1p")
     }
 
-    @Test("dv_level 0 with no resolution drops the DV claim instead of guessing")
-    func underivableLevelDropsClaim() throws {
+    @Test("dv_level 0 with no resolution keeps the DV claim at level 6")
+    func underivableLevelKeepsClaim() throws {
+        // Dropping the claim would leave a kept `dvvC` undeclared (-11868)
+        // and route the fallback past the record-stripping tier.
         let v = try variant(profile(8, level: 0, compatibility: 1), resolution: nil)
-        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: v) == nil)
-        #expect(!MasterPlaylistBuilder.declaresDolbyVision(v))
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: v) == "dvh1.08.06/db1p")
+        #expect(MasterPlaylistBuilder.declaresDolbyVision(v))
         let master = try MasterPlaylistBuilder.build(v)
         #expect(!master.contains("dvh1.08.00"))
     }

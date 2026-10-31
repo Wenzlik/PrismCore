@@ -281,15 +281,16 @@ final class DolbyVisionRPUConverter {
             // FEL and MEL convert the same way and look the same afterwards,
             // so this is the only place a device log can tell them apart — a
             // FEL source loses real picture data with its EL, a MEL source
-            // does not. Debug level: one line per frame.
-            if let header = dovi_rpu_get_header(rpu) {
+            // does not. Debug level: one line per frame, and the header is
+            // only read when debug logging is on (the logger evaluates the
+            // autoclosure synchronously, while `rpu` is still alive).
+            PrismCoreLog.debug({ () -> String in
+                guard let header = dovi_rpu_get_header(rpu) else { return "Dolby Vision P7 RPU: no header" }
                 defer { dovi_rpu_free_header(header) }
                 let elType = header.pointee.el_type.map { String(cString: $0) } ?? "none"
                 let disableResidual = header.pointee.disable_residual_flag
-                PrismCoreLog.debug(
-                    "Dolby Vision P7 RPU: el_type=\(elType) disable_residual_flag=\(disableResidual)"
-                )
-            }
+                return "Dolby Vision P7 RPU: el_type=\(elType) disable_residual_flag=\(disableResidual)"
+            }())
 
             guard dovi_convert_rpu_with_mode(rpu, convertToProfile81) == 0 else { return nil }
             guard let written = dovi_write_unspec62_nalu(rpu) else { return nil }

@@ -434,11 +434,8 @@ public enum MasterPlaylistBuilder {
         if let dv = variant.dolbyVision, dv.isSingleLayerDVOnly {
             // Profile 5: a bare `dvh1` tag, no HEVC tag anywhere. There is no
             // base layer to declare, and the DV level (not the HEVC level)
-            // is what follows. With no level to derive, the record's own is
-            // still the only tag P5 can carry — an `hvc1` one would decode
-            // green-and-purple.
-            let level = dolbyVisionLevel(for: variant) ?? dv.level
-            return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(level))"
+            // is what follows.
+            return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dolbyVisionLevel(for: variant)))"
         }
         switch variant.videoCodec {
         case .hevc(let record):
@@ -477,24 +474,29 @@ public enum MasterPlaylistBuilder {
         // codec to supplement.
         guard !dv.isSingleLayerDVOnly else { return nil }
         guard let brand = dolbyVisionBrand(for: dv) else { return nil }
-        // No level means no claim: the base layer plays as HDR10 either way,
-        // and an invalid tag is a rejected item, not a degraded one.
-        guard let level = dolbyVisionLevel(for: variant) else { return nil }
-        return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(level))/\(brand)"
+        return "dvh1.\(twoDigits(dv.profile)).\(twoDigits(dolbyVisionLevel(for: variant)))/\(brand)"
     }
 
     /// The DV level to print: the record's when it names a real one (1…13),
     /// otherwise the lowest level whose limits cover the variant's resolution
-    /// and frame rate, or `nil` when neither is known.
+    /// and frame rate, otherwise 6 (UHD at 24 fps).
     ///
     /// Muxers write `dv_level 0` often enough — a P7 remux whose record was
     /// never filled in is how issue #177 got a `dvh1.08.00` — and level 0 is
     /// not in the Dolby Vision level table, so the tag names a decoder that
     /// does not exist.
-    static func dolbyVisionLevel(for variant: VariantDescription) -> UInt8? {
+    ///
+    /// Never `nil`: dropping the claim instead would leave the `dvvC` the
+    /// remuxer keeps for a DV display undeclared — `hvc1` + `dvvC` without
+    /// `SUPPLEMENTAL-CODECS` is refused (-11868), and a master that claims no
+    /// DV sends the fallback straight to the media playlist, past the tier
+    /// that strips the record. 6 is what a UHD Blu-ray P7 source — the case
+    /// that writes level 0 — almost always is.
+    static func dolbyVisionLevel(for variant: VariantDescription) -> UInt8 {
+        let fallback: UInt8 = 6
         if let level = variant.dolbyVision?.level, (1...13).contains(level) { return level }
         guard let resolution = variant.resolution, let frameRate = variant.frameRate,
-              resolution.width > 0, resolution.height > 0, frameRate > 0 else { return nil }
+              resolution.width > 0, resolution.height > 0, frameRate > 0 else { return fallback }
         let pixelRate = Double(resolution.width * resolution.height) * frameRate
         // (level, max width, max luma pixels per second) from the Dolby Vision
         // profiles-and-levels table. Level 11 is 10's pixel rate at a higher
@@ -509,7 +511,7 @@ public enum MasterPlaylistBuilder {
         // A whisker of slack: 23.976 and 59.94 are listed under 24 and 60.
         return table.first {
             resolution.width <= $0.width && pixelRate <= $0.pixelRate * 1.001
-        }?.level
+        }?.level ?? 13
     }
 
     /// The ISO brand that names the *base* layer's compatibility, which is the
