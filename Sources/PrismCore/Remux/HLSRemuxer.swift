@@ -345,6 +345,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// What a base bridged track is encoded into. See
     /// `PrismCoreSession.Options.bridgedAudio`.
     private let bridgedAudio: BridgedAudioFormat
+    /// Night mode and the channel cap for every re-encoded track. See
+    /// `PrismCoreSession.Options.bridgedAudioProcessing`.
+    private let bridgedAudioProcessing: BridgedAudioProcessing
     /// Whether TrueHD Atmos renders its heights. See
     /// `PrismCoreSession.Options.objectAudioRendering`; engaged only with
     /// `allowsAtmosOutput` too.
@@ -730,6 +733,7 @@ final class HLSRemuxer: @unchecked Sendable {
         preferredSubtitleStreamIndex: Int? = nil,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
+        bridgedAudioProcessing: BridgedAudioProcessing = .init(),
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
@@ -772,6 +776,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.preferredSubtitleStreamIndex = preferredSubtitleStreamIndex
         self.inBandClosedCaptions = inBandClosedCaptions
         self.bridgedAudio = bridgedAudio
+        self.bridgedAudioProcessing = bridgedAudioProcessing
         self.objectAudioRendering = objectAudioRendering
         self.allowsAtmosOutput = allowsAtmosOutput
         self.heightsLayout = heightsLayout
@@ -1446,7 +1451,8 @@ final class HLSRemuxer: @unchecked Sendable {
                         allowsAtmosOutput: allowsAtmosOutput, available: heightsOutput.isAvailable(for: heightsLayout)
                     ),
                     heightsLayout: heightsLayout,
-                    heightsOutput: heightsOutput
+                    heightsOutput: heightsOutput,
+                    bridgeProcessing: bridgedAudioProcessing
                 )
                 rendition.onObjectAudioSettled = { [weak self] finding in
                     self?.recordObjectAudio(finding)
@@ -1655,7 +1661,8 @@ final class HLSRemuxer: @unchecked Sendable {
                         // mp4/mov is a global-header muxer by definition; the
                         // encoder's extradata must land in codecpar, not in-band.
                         globalHeader: true,
-                        targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
+                        targetCodec: AudioBridge.targetCodec(for: bridgedAudio),
+                        processing: bridgedAudioProcessing
                     )
                     muxedBridge = bridge
                     bridge.onProgress = { [audioDeliveryStore, index = Int(audio.index)] progress in
@@ -2131,7 +2138,8 @@ final class HLSRemuxer: @unchecked Sendable {
                             codecpar: inStream.pointee.codecpar,
                             timeBase: inStream.pointee.time_base,
                             globalHeader: true,
-                            targetCodec: AudioBridge.targetCodec(for: bridgedAudio)
+                            targetCodec: AudioBridge.targetCodec(for: bridgedAudio),
+                            processing: bridgedAudioProcessing
                         )
                         muxedBridge = fresh
                         fresh.onProgress = { [audioDeliveryStore, index = Int(index)] progress in

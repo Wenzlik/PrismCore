@@ -78,6 +78,11 @@ let audioDescriptionCharacteristic = "public.accessibility.describes-video"
 /// unfiltered rather than failing the rendition — the rendition then
 /// duplicates the base track, which is useless but playable, and the
 /// eligibility precheck in `AudioBridge` makes the case rare.
+///
+/// The same graph carries night mode (`BridgedAudioProcessing.nightMode`): an
+/// `acompressor` stage after the `pan`, or alone on a bridge with no boost.
+/// One graph, not two, so the bridge keeps a single detour between decoder
+/// and resampler and a single flush order to get right.
 final class DialogueBoostFilter {
 
     enum Failure: Error, CustomStringConvertible {
@@ -103,6 +108,59 @@ final class DialogueBoostFilter {
             && avfilter_get_by_name("abuffersink") != nil
     }
 
+    /// The same read for night mode's compressor.
+    static var isNightModeAvailable: Bool {
+        avfilter_get_by_name("acompressor") != nil
+            && avfilter_get_by_name("abuffer") != nil
+            && avfilter_get_by_name("abuffersink") != nil
+    }
+
+    /// Night mode's compressor. Downward only — no make-up gain — because
+    /// decoded floats sit near full scale and anything raised would clip on
+    /// exactly the transients this is meant to tame; the threshold sits above
+    /// typical dialogue level, so speech passes mostly untouched while effects
+    /// come down. `acompressor` has no look-ahead, so frames keep their sample
+    /// count and timestamps, as `pan` does.
+    static let nightModeArguments = "threshold=0.0625:ratio=4:attack=10:release=250"
+
+    /// One filter of the chain between `abuffer` and `abuffersink`.
+    struct Stage: Equatable {
+        let filter: String
+        let arguments: String
+    }
+
+    /// The chain for a layout's channel names — pure, so what a rendition
+    /// runs is testable without a decoder. The boost applies only where there
+    /// is a centre to favour (≥3 channels, `FC` among them); night mode to
+    /// anything. Empty means nothing to do: the frames pass through.
+    static func stages(
+        channelNames names: [String], boostLevel: DialogueBoostLevel?, nightMode: Bool
+    ) -> [Stage] {
+        var stages: [Stage] = []
+        if let boostLevel, names.count >= 3, names.contains("FC") {
+            // Same layout out as in; centre at unity, everything else
+            // attenuated. Written in channel names ("FC=FC", "FL=0.5*FL"),
+            // which is why eligibility demands nameable channels.
+            let gain = String(format: "%.4f", boostLevel.backgroundGain)
+            let mappings = names.map { name in
+                name == "FC" ? "FC=FC" : "\(name)=\(gain)*\(name)"
+            }
+            stages.append(Stage(
+                filter: "pan", arguments: ([names.joined(separator: "+")] + mappings).joined(separator: "|")
+            ))
+        }
+        if nightMode {
+            stages.append(Stage(filter: "acompressor", arguments: nightModeArguments))
+        }
+        return stages
+    }
+
+    /// The chain in filtergraph notation (`pan=…,acompressor=…`), for logs
+    /// and tests.
+    static func graphDescription(_ stages: [Stage]) -> String {
+        stages.map { "\($0.filter)=\($0.arguments)" }.joined(separator: ",")
+    }
+
     /// Whether a layout has a dialogue channel to favour: a front centre among
     /// at least three channels, every one of them nameable (the `pan` spec is
     /// written in channel names, so an unnameable custom layout can't be
@@ -115,7 +173,9 @@ final class DialogueBoostFilter {
         return channelNames(of: &layout) != nil
     }
 
-    let level: DialogueBoostLevel
+    /// `nil` on a night-mode-only bridge.
+    let level: DialogueBoostLevel?
+    let nightMode: Bool
     /// Time base the pushed frames' PTS are in (the source stream's); the
     /// graph is told it so emitted frames keep it.
     private let timeBase: AVRational
@@ -136,8 +196,9 @@ final class DialogueBoostFilter {
 
     typealias EmitFrame = (UnsafeMutablePointer<AVFrame>) throws -> Void
 
-    init(level: DialogueBoostLevel, timeBase: AVRational) {
+    init(level: DialogueBoostLevel?, nightMode: Bool = false, timeBase: AVRational) {
         self.level = level
+        self.nightMode = nightMode
         self.timeBase = timeBase
     }
 
@@ -237,14 +298,22 @@ final class DialogueBoostFilter {
             "av_channel_layout_copy(boost input)"
         )
 
-        guard Self.layoutIsEligible(&inLayout), let names = Self.channelNames(of: &inLayout) else {
+        // Unnameable channels can't be described to `abuffer`, and a layout
+        // with no centre has nothing to boost — with night mode off, both
+        // pass through.
+        guard av_channel_layout_check(&inLayout) != 0, let names = Self.channelNames(of: &inLayout) else {
             passthrough = true
             return
         }
-        try buildGraph(names: names)
+        let stages = Self.stages(channelNames: names, boostLevel: level, nightMode: nightMode)
+        guard !stages.isEmpty else {
+            passthrough = true
+            return
+        }
+        try buildGraph(names: names, stages: stages)
     }
 
-    private func buildGraph(names: [String]) throws {
+    private func buildGraph(names: [String], stages: [Stage]) throws {
         guard let graph = avfilter_graph_alloc() else {
             throw Failure.allocationFailed("filter graph")
         }
@@ -275,25 +344,23 @@ final class DialogueBoostFilter {
             "avfilter_graph_create_filter(abuffersink)"
         )
 
-        // Same layout out as in; centre at unity, everything else attenuated.
-        // Written in channel names ("FC=FC", "FL=0.5*FL"), which is why the
-        // eligibility check demanded nameable channels.
-        let gain = String(format: "%.4f", level.backgroundGain)
-        let mappings = names.map { name in
-            name == "FC" ? "FC=FC" : "\(name)=\(gain)*\(name)"
+        // Each stage linked after the previous one. `acompressor` works in
+        // doubles; `avfilter_graph_config` inserts the conversion itself, and
+        // the bridge's resampler re-derives its input format per frame.
+        var previous = source
+        for stage in stages {
+            guard let filter = avfilter_get_by_name(stage.filter) else {
+                throw Failure.filterMissing(stage.filter)
+            }
+            var context: UnsafeMutablePointer<AVFilterContext>?
+            try FFmpegError.check(
+                avfilter_graph_create_filter(&context, filter, stage.filter, stage.arguments, nil, graph),
+                "avfilter_graph_create_filter(\(stage.filter))"
+            )
+            try FFmpegError.check(avfilter_link(previous, 0, context, 0), "avfilter_link(→\(stage.filter))")
+            previous = context
         }
-        let panArgs = ([layoutSpec] + mappings).joined(separator: "|")
-        var pan: UnsafeMutablePointer<AVFilterContext>?
-        guard let panFilter = avfilter_get_by_name("pan") else {
-            throw Failure.filterMissing("pan")
-        }
-        try FFmpegError.check(
-            avfilter_graph_create_filter(&pan, panFilter, "boost", panArgs, nil, graph),
-            "avfilter_graph_create_filter(pan)"
-        )
-
-        try FFmpegError.check(avfilter_link(source, 0, pan, 0), "avfilter_link(in→pan)")
-        try FFmpegError.check(avfilter_link(pan, 0, sink, 0), "avfilter_link(pan→out)")
+        try FFmpegError.check(avfilter_link(previous, 0, sink, 0), "avfilter_link(→out)")
         try FFmpegError.check(avfilter_graph_config(graph, nil), "avfilter_graph_config(boost)")
 
         guard let filtered = av_frame_alloc() else {

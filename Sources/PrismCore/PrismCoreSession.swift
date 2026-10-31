@@ -350,6 +350,9 @@ public actor PrismCoreSession {
         /// into — `.compressed` (EAC3 5.1, the default) or `.lossless` (FLAC
         /// up to 7.1). See the initializer's doc.
         public var bridgedAudio: BridgedAudioFormat = .compressed
+        /// Night mode and a channel cap for re-encoded audio — off by
+        /// default. See the initializer's doc.
+        public var bridgedAudioProcessing: BridgedAudioProcessing = .init()
         /// Whether TrueHD Atmos is rendered with its heights (`.heights`) or
         /// bridged as its bed (`.off`, the default). See the initializer's doc.
         public var objectAudioRendering: ObjectAudioRendering = .off
@@ -700,6 +703,7 @@ public actor PrismCoreSession {
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
+        bridgedAudioProcessing: BridgedAudioProcessing = .init(),
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
@@ -731,6 +735,7 @@ public actor PrismCoreSession {
             subtitleCueHistory: subtitleCueHistory,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
+            bridgedAudioProcessing: bridgedAudioProcessing,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
@@ -835,6 +840,14 @@ public actor PrismCoreSession {
     ///   (`AVAudioSession.maximumOutputNumberOfChannels >= 8`).
     ///   Dialogue-boost renditions stay EAC3 either way, and
     ///   `makeMuxedFallbackSession()` goes back to `.compressed`.
+    /// - Parameter bridgedAudioProcessing: night mode and a channel cap for
+    ///   the audio PrismCore re-encodes — bridged tracks and dialogue-boost
+    ///   renditions, never a stream-copied track, whose bits stay the
+    ///   source's. `nightMode` compresses loud passages downward
+    ///   (`acompressor`, no make-up gain); `maxChannels` folds wider tracks
+    ///   down (`2` for stereo) and the master's `CHANNELS` says so. Both off
+    ///   by default, which leaves the output exactly as before. Carried by
+    ///   clones and the muxed fallback.
     /// - Parameter objectAudioRendering: `.heights` turns a TrueHD Atmos
     ///   track into 7.1.4 — its objects rendered by their metadata, or its own
     ///   7.1 presentation split between ear level and the heights by where its
@@ -911,6 +924,7 @@ public actor PrismCoreSession {
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
+        bridgedAudioProcessing: BridgedAudioProcessing = .init(),
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
@@ -938,6 +952,7 @@ public actor PrismCoreSession {
             subtitleCueHistory: subtitleCueHistory.normalized,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
+            bridgedAudioProcessing: bridgedAudioProcessing,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
@@ -989,6 +1004,7 @@ public actor PrismCoreSession {
             preferredSubtitleStreamIndex: preferredSubtitleStreamIndex,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
+            bridgedAudioProcessing: bridgedAudioProcessing,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
@@ -1078,6 +1094,7 @@ public actor PrismCoreSession {
         subtitleCueHistory: SubtitleCueHistory = .complete,
         inBandClosedCaptions: Bool = false,
         bridgedAudio: BridgedAudioFormat = .compressed,
+        bridgedAudioProcessing: BridgedAudioProcessing = .init(),
         objectAudioRendering: ObjectAudioRendering = .off,
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
@@ -1106,6 +1123,7 @@ public actor PrismCoreSession {
             subtitleCueHistory: subtitleCueHistory,
             inBandClosedCaptions: inBandClosedCaptions,
             bridgedAudio: bridgedAudio,
+            bridgedAudioProcessing: bridgedAudioProcessing,
             objectAudioRendering: objectAudioRendering,
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
@@ -1252,6 +1270,7 @@ public actor PrismCoreSession {
             subtitleCueHistory: options.subtitleCueHistory,
             inBandClosedCaptions: options.inBandClosedCaptions,
             bridgedAudio: options.bridgedAudio,
+            bridgedAudioProcessing: options.bridgedAudioProcessing,
             objectAudioRendering: options.objectAudioRendering,
             allowsAtmosOutput: options.allowsAtmosOutput,
             heightsLayout: options.heightsLayout,

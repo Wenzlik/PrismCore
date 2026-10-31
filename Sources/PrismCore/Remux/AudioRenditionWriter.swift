@@ -67,6 +67,8 @@ final class AudioRenditionWriter {
     /// compressed default: it is a derived extra whose point is
     /// intelligibility, not fidelity.
     private let bridgeTarget: AVCodecID
+    /// Night mode and the channel cap, for the bridge this rendition builds.
+    private let bridgeProcessing: BridgedAudioProcessing
     private var outputIndex: Int32 = 0
     private var segmentIndex = 0
     /// Boundary time that had no audio bytes to carry (see `cut`). Rolled into
@@ -165,8 +167,10 @@ final class AudioRenditionWriter {
         bridgeTarget: AVCodecID = AudioBridge.defaultTargetCodec,
         rendersHeights: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
-        heightsOutput: HeightsOutput = .apac
+        heightsOutput: HeightsOutput = .apac,
+        bridgeProcessing: BridgedAudioProcessing = .init()
     ) {
+        self.bridgeProcessing = bridgeProcessing
         self.route = route
         self.heightsLayout = heightsLayout
         self.heightsOutput = heightsOutput
@@ -368,7 +372,8 @@ final class AudioRenditionWriter {
             // Nil for a plain bridge; a boost rendition's bridge carries
             // the centre-favouring filter between decode and re-encode.
             dialogueBoost: route.mode.dialogueBoostLevel,
-            targetCodec: bridgeTarget
+            targetCodec: bridgeTarget,
+            processing: bridgeProcessing
         )
     }
 
