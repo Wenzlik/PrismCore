@@ -80,6 +80,24 @@ final class DolbyVisionRPUConverter {
     /// it makes `isClean` false rather than passing silently.
     private(set) var staleUnconvertedPackets = 0
 
+    /// Packets dropped whole because the strip left no base-layer picture in
+    /// them — an access unit that carried only RPU and enhancement layer.
+    /// Written as is, such a packet becomes an fMP4 sample with no VCL NAL: a
+    /// timestamp the decoder has nothing to decode for. Dropping it and
+    /// handing its DTS to the next picture written (the copy loop does that)
+    /// keeps the decode timeline whole; its RPU described no base picture, so
+    /// nothing is lost.
+    private(set) var picturelessPackets = 0
+
+    /// Whether the packet `convert` just handled must not reach the muxer —
+    /// see `picturelessPackets`. Read by the copy loop right after `convert`.
+    private(set) var lastPacketCarriesNoPicture = false
+
+    /// Whether an in-band VPS has been looked at yet: once is enough to tell
+    /// a device log whether the base layer's VPS still claims more than one
+    /// layer after the strip.
+    private var checkedVPS = false
+
     /// Per-packet tallies, committed to the counters above only once the
     /// rewrite has actually landed.
     ///
@@ -92,6 +110,8 @@ final class DolbyVisionRPUConverter {
     private var pendingConverted = 0
     private var pendingFailed = 0
     private var pendingDropped = 0
+    /// Whether any base-layer VCL NAL (types 0…31) survived this packet.
+    private var pendingKeptPicture = false
 
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
@@ -143,6 +163,7 @@ final class DolbyVisionRPUConverter {
         pendingConverted = 0
         pendingFailed = 0
         pendingDropped = 0
+        pendingKeptPicture = false
     }
 
     /// `rewrote == false` means one of two things, and only one of them is
@@ -152,6 +173,7 @@ final class DolbyVisionRPUConverter {
     /// original bytes went out stale.
     private func commitPending(rewrote: Bool, framed: Bool) {
         let decidedAChange = pendingConverted + pendingFailed + pendingDropped > 0
+        lastPacketCarriesNoPicture = false
         guard rewrote else {
             // A packet that did not FRAME is stale too, and the pending tally
             // cannot see it: `HEVCNALUnits.rewrite` validates the whole packet
@@ -165,6 +187,13 @@ final class DolbyVisionRPUConverter {
         convertedRPUs += pendingConverted
         failedRPUs += pendingFailed
         droppedEnhancementLayerNALs += pendingDropped
+        // Only a packet this converter changed: one that arrived without a
+        // picture and needed no edit is the source's own business, and is
+        // passed through as before.
+        if !pendingKeptPicture {
+            lastPacketCarriesNoPicture = true
+            picturelessPackets += 1
+        }
         resetPending()
     }
 
@@ -193,6 +222,20 @@ final class DolbyVisionRPUConverter {
         if Self.isEnhancementLayer(type: unit.type, layerID: unit.layerID) {
             pendingDropped += 1
             return .drop
+        }
+        if unit.type < 32 { pendingKeptPicture = true }
+        if unit.type == 32, !checkedVPS {
+            checkedVPS = true
+            if let layers = HEVCNALUnits.vpsMaxLayersMinus1(unit.bytes), layers > 0 {
+                // Not rewritten: a P7 base layer is a plain single-layer HEVC
+                // stream by construction (the EL's own parameter sets ride
+                // inside `unspec63` and are dropped with it), so this has not
+                // been seen. If a device log ever shows it, the VPS extension
+                // has to be rewritten too, not just this field.
+                PrismCoreLog.notice(
+                    "Dolby Vision P7: base-layer VPS declares vps_max_layers_minus1=\(layers) after the EL strip"
+                )
+            }
         }
         guard unit.type == 62 else { return .keep }
         guard let converted = Self.convertRPU(Array(unit.bytes)) else {
@@ -227,6 +270,22 @@ final class DolbyVisionRPUConverter {
         type == nalTypeEnhancementLayer || layerID != 0
     }
 
+    /// Whether the packet still has a base-layer picture once the enhancement
+    /// layer is stripped — the same test `dispose` applies, asked BEFORE
+    /// converting. The copy loop needs it where a key-flagged RPU + EL packet
+    /// would otherwise end a seek's discard: the packet is dropped later, so
+    /// the next picture written would be a dependent one opening the segment.
+    /// A packet that does not frame counts as a picture: it goes out
+    /// unconverted (see `staleUnconvertedPackets`), so it is not dropped.
+    func carriesBaseLayerPicture(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        Self.carriesBaseLayerPicture(bytes, lengthSize: lengthSize)
+    }
+
+    static func carriesBaseLayerPicture(_ bytes: UnsafeBufferPointer<UInt8>, lengthSize: Int) -> Bool {
+        guard let units = HEVCNALUnits.units(in: bytes, lengthSize: lengthSize) else { return true }
+        return units.contains { $0.type < 32 && !isEnhancementLayer(type: $0.type, layerID: $0.layerID) }
+    }
+
     /// One RPU NAL (including its two-byte HEVC header) through libdovi.
     private static func convertRPU(_ nal: [UInt8]) -> [UInt8]? {
         #if canImport(Libdovi)
@@ -235,6 +294,20 @@ final class DolbyVisionRPUConverter {
                   let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
             else { return nil }
             defer { dovi_rpu_free(rpu) }
+
+            // FEL and MEL convert the same way and look the same afterwards,
+            // so this is the only place a device log can tell them apart — a
+            // FEL source loses real picture data with its EL, a MEL source
+            // does not. Debug level: one line per frame, and the header is
+            // only read when debug logging is on (the logger evaluates the
+            // autoclosure synchronously, while `rpu` is still alive).
+            PrismCoreLog.debug({ () -> String in
+                guard let header = dovi_rpu_get_header(rpu) else { return "Dolby Vision P7 RPU: no header" }
+                defer { dovi_rpu_free_header(header) }
+                let elType = header.pointee.el_type.map { String(cString: $0) } ?? "none"
+                let disableResidual = header.pointee.disable_residual_flag
+                return "Dolby Vision P7 RPU: el_type=\(elType) disable_residual_flag=\(disableResidual)"
+            }())
 
             guard dovi_convert_rpu_with_mode(rpu, convertToProfile81) == 0 else { return nil }
             guard let written = dovi_write_unspec62_nalu(rpu) else { return nil }
@@ -274,19 +347,25 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// include that work: they are committed only once a rewrite has landed.
     /// Anything here is the black-screen mismatch on a rarer path.
     public let staleUnconvertedPackets: Int
+    /// Packets dropped whole because the strip left no base-layer picture in
+    /// them (only RPU and enhancement layer). Not a failure — writing them
+    /// would have been one: a sample with nothing to decode.
+    public let picturelessPackets: Int
 
-    /// `staleUnconvertedPackets` defaults so that 2.0.x stays source
-    /// compatible for anyone constructing this.
+    /// `staleUnconvertedPackets` and `picturelessPackets` default so that
+    /// 2.0.x stays source compatible for anyone constructing this.
     public init(
         convertedRPUs: Int,
         failedRPUs: Int,
         droppedEnhancementLayerNALs: Int,
-        staleUnconvertedPackets: Int = 0
+        staleUnconvertedPackets: Int = 0,
+        picturelessPackets: Int = 0
     ) {
         self.convertedRPUs = convertedRPUs
         self.failedRPUs = failedRPUs
         self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
         self.staleUnconvertedPackets = staleUnconvertedPackets
+        self.picturelessPackets = picturelessPackets
     }
 
     /// Every RPU converted, none refused, and the enhancement layer actually
