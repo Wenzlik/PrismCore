@@ -104,4 +104,15 @@ struct AlternativeTransferSEITests {
         )
         #expect(!signals("bt709", dolbyVision: profile81))
     }
+
+    @Test func captionScoutDoesNotStopBeforeTheTransferIsSettled() {
+        // Printed CC1 on a non-keyframe: the SEI could still be one IRAP away.
+        #expect(!ClosedCaptionScout.isSettled(printedCC1: true, preferredTransfer: nil, sawRandomAccess: false))
+        // A keyframe read without the SEI: the source has none.
+        #expect(ClosedCaptionScout.isSettled(printedCC1: true, preferredTransfer: nil, sawRandomAccess: true))
+        // The SEI already found.
+        #expect(ClosedCaptionScout.isSettled(printedCC1: true, preferredTransfer: 18, sawRandomAccess: false))
+        // Captions not settled: keep reading whatever the transfer says.
+        #expect(!ClosedCaptionScout.isSettled(printedCC1: false, preferredTransfer: 18, sawRandomAccess: true))
+    }
 }

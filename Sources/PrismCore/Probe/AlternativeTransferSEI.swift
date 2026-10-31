@@ -11,8 +11,9 @@ import Foundation
 /// tags alone, such a source plays as flat SDR on an HDR panel.
 ///
 /// No new reads: the remuxer's closed-caption scout already walks the SEI of
-/// the first video packets (`ClosedCaptionScout`), and the message rides with
-/// every random-access picture, so the first packet answers.
+/// the first video packets (`ClosedCaptionScout`). The message rides only on
+/// random-access pictures, so the scout does not stop before it has read a
+/// keyframe — a broadcast recording often starts mid-GOP.
 enum AlternativeTransferSEI {
 
     static let payloadType = 147
