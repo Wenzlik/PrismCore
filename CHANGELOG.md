@@ -8,6 +8,14 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- The master's `BANDWIDTH` is declared from the densest planned segment (byte
+  positions from the demuxer index) with 20 % headroom plus a bridged audio
+  rendition's encoder rate, held between 2× and 4× the average (≤ 160 Mbit/s).
+  An average under-declared VBR UHD remuxes and AVPlayer stalled or failed
+  with -12318. Without a keyframe plan or index positions it stays the average.
+
 ## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
