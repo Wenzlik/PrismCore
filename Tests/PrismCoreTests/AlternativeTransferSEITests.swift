@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Libavutil
 @testable import PrismCore
 
 /// Broadcast HLG behind an SDR VUI: the payloadType-147 read out of synthetic
@@ -85,6 +86,18 @@ struct AlternativeTransferSEITests {
         for transfer in [nil, "unknown", "bt709", "bt2020-10", "bt2020-12"] {
             #expect(signals(transfer), "\(transfer ?? "nil")")
         }
+    }
+
+    /// The probe reads names from `av_color_transfer_name`; asking the linked
+    /// libavutil keeps the switch honest if that spelling ever moves, rather
+    /// than trusting a hard-coded guess at it.
+    @Test("The unspecified transfer, as libavutil names it, counts as SDR")
+    func unspecifiedTransferAsLibavutilNamesIt() {
+        let name = av_color_transfer_name(AVCOL_TRC_UNSPECIFIED).map { String(cString: $0) }
+        #expect(name == "unknown")
+        #expect(signals(name))
+        let bt709 = av_color_transfer_name(AVCOL_TRC_BT709).map { String(cString: $0) }
+        #expect(signals(bt709))
     }
 
     @Test("Everything else keeps the probe's range")
