@@ -1553,7 +1553,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     ordinal: routes.count + offset,
                     parent: outputDirectory,
                     lazy: production == .lazy,
-                    suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil)
+                    suspendable: Self.audioSuspendable(mode: route.mode, planned: plannedPlan != nil),
+                    // A boost is a re-encode like any bridge: without this a
+                    // capped, night-mode session still served (and declared)
+                    // its boost levels at full width and full dynamic range.
+                    bridgeProcessing: bridgedAudioProcessing
                 )
                 // An empty planned boundary keeps its index and is declared
                 // to the demand seam (see `AudioRenditionWriter.cut`).

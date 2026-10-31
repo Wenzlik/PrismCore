@@ -196,4 +196,30 @@ struct BridgedAudioProcessingSessionTests {
             #expect(line.contains("CHANNELS=\"2\""), "\(line)")
         }
     }
+
+    @Test("A stereo cap reaches the dialogue-boost renditions too")
+    func capReachesTheBoost() async throws {
+        // h264_ac3_51_20s.mkv: one 5.1 AC3 track, eligible for a boost. Its
+        // stream-copied default rendition keeps CHANNELS="6"; the boost is a
+        // bridge, so the cap must fold it to stereo like any other.
+        let session = try PrismCoreSession(
+            url: try fixture("h264_ac3_51_20s.mkv"),
+            dialogueBoost: [.medium],
+            bridgedAudioProcessing: .init(maxChannels: 2)
+        )
+        _ = try await session.start()
+        defer { Task { await session.stop() } }
+        let reported = await session.dialogueBoostRenditions
+        guard PrismCoreSession.isDialogueBoostAvailable, !reported.isEmpty else { return }
+
+        let master = try String(
+            contentsOf: await session.workDirectory.appendingPathComponent("master.m3u8"),
+            encoding: .utf8
+        )
+        let boosts = master.split(separator: "\n").filter { $0.contains("CHARACTERISTICS") }
+        #expect(boosts.count == reported.count)
+        for line in boosts {
+            #expect(line.contains("CHANNELS=\"2\""), "\(line)")
+        }
+    }
 }
