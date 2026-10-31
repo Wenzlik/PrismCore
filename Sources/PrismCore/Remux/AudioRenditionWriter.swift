@@ -848,10 +848,18 @@ final class AudioRenditionWriter {
             // also keeps AVFoundation from auto-selecting them for anyone who
             // hasn't asked, AUTOSELECT=YES notwithstanding — accessibility
             // renditions engage on the user's system preference.
-            characteristics: route.mode.dialogueBoostLevel != nil
-                ? [dialogueBoostCharacteristic]
-                : []
+            characteristics: Self.characteristics(
+                isDialogueBoost: route.mode.dialogueBoostLevel != nil,
+                isAudioDescription: track.isAudioDescription
+            )
         )
+    }
+
+    /// A boost derived from an audio-description track still narrates the
+    /// picture, so it carries both.
+    static func characteristics(isDialogueBoost: Bool, isAudioDescription: Bool) -> [String] {
+        (isDialogueBoost ? [dialogueBoostCharacteristic] : [])
+            + (isAudioDescription ? [audioDescriptionCharacteristic] : [])
     }
 
     /// This rendition's entry in the session's dialogue-boost report, or nil

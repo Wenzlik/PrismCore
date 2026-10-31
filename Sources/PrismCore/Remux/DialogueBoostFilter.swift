@@ -51,6 +51,11 @@ public struct DialogueBoostRendition: Sendable, Equatable {
 /// the boost options in a selection group without matching display names.
 let dialogueBoostCharacteristic = "public.accessibility.enhances-speech-intelligibility"
 
+/// The HLS `CHARACTERISTICS` value an audio-description rendition declares
+/// (`AudioTrackInfo.isAudioDescription`), matching
+/// `AVMediaCharacteristic.describesVideoForAccessibility`.
+let audioDescriptionCharacteristic = "public.accessibility.describes-video"
+
 /// An avfilter graph that pulls dialogue forward in decoded audio:
 /// `abuffer → pan → abuffersink`, where the `pan` keeps the source layout and
 /// attenuates every channel except the front centre.

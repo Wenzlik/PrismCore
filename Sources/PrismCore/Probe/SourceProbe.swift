@@ -497,6 +497,13 @@ public struct AudioTrackInfo: Sendable, Equatable {
     /// `avformat_find_stream_info`, which `probe` always runs.
     public let isObjectAudio: Bool
     public let copyability: StreamCopyability
+    /// The container flags this track as audio description — a narration of
+    /// the picture for blind and low-vision viewers
+    /// (`AV_DISPOSITION_VISUAL_IMPAIRED`). The master declares it as
+    /// `public.accessibility.describes-video`, which is what keeps
+    /// AVFoundation from auto-selecting a narrated track for everyone and lets
+    /// a host find it by characteristic instead of by title.
+    public let isAudioDescription: Bool
 
     /// Explicit, with new-field defaults — same rule as `VideoTrackInfo`.
     public init(
@@ -510,8 +517,10 @@ public struct AudioTrackInfo: Sendable, Equatable {
         language: String?,
         title: String?,
         isObjectAudio: Bool,
-        copyability: StreamCopyability
+        copyability: StreamCopyability,
+        isAudioDescription: Bool = false
     ) {
+        self.isAudioDescription = isAudioDescription
         self.streamIndex = streamIndex
         self.codecName = codecName
         self.profileName = profileName
@@ -1287,7 +1296,8 @@ public enum SourceProbe {
             language: avMetadataValue(stream.pointee.metadata, "language"),
             title: avMetadataValue(stream.pointee.metadata, "title"),
             isObjectAudio: isObjectAudio,
-            copyability: copyability
+            copyability: copyability,
+            isAudioDescription: stream.pointee.disposition & AV_DISPOSITION_VISUAL_IMPAIRED != 0
         )
     }
 
