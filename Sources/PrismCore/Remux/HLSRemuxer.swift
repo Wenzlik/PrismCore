@@ -1305,7 +1305,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     identity: cacheIdentity,
                     timeBaseNum: timeBase.num,
                     timeBaseDen: timeBase.den,
-                    keyframePTS: indexed.sorted()
+                    keyframePTS: indexed.sorted(),
+                    keyframePositions: SegmentPlan.indexedKeyframePositions(of: stream)
                 ))
             }
         }
@@ -1593,11 +1594,23 @@ final class HLSRemuxer: @unchecked Sendable {
                     // selectable; the preference moves the flag, not the menu.
                     rendition.rendition(groupID: Self.audioGroupID, isDefault: ordinal == 0)
                 }
-                // LPCM heights outweigh the TrueHD they replace (13.8 Mbit/s for 7.1.4) and the
-                // source's own rate cannot know it: add the largest in full. Over-stating only
-                // grows AVPlayer's buffer (see `sourceBandwidth`).
-                variant.bandwidth += renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
-                    .map { $0.heightsLayout.channelCount * 24 * Int(HeightsBridgeConstants.sampleRate) }.max() ?? 0
+                // An average under-declares a VBR source: AVPlayer meets the dense segments
+                // above BANDWIDTH and can stall or fail (-12318). Declared from the densest
+                // planned segment when the demuxer index gives byte positions; otherwise the
+                // average plus LPCM heights, which outweigh the TrueHD they replace (13.8 Mbit/s
+                // for 7.1.4) where the source's own rate cannot know it. Over-stating only grows
+                // AVPlayer's buffer (see `sourceBandwidth`).
+                // A cache hit skipped the index load (Matroska Cues stay unread), so the
+                // stored positions stand in for the ones the live index lacks.
+                let keyframePositions = SegmentPlan.indexedKeyframePositions(
+                    of: input.pointee.streams[Int(videoIndex)]!
+                ).merging(cachedEntry?.positionsByPTS ?? [:]) { live, _ in live }
+                variant.bandwidth = Self.peakSegmentBandwidth(
+                    boundaries: Self.segmentBoundaries(plan: plannedPlan, positions: keyframePositions),
+                    average: variant.bandwidth == Self.unknownSourceBandwidth ? nil : variant.bandwidth,
+                    audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0
+                ) ?? variant.bandwidth + (renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
+                    .map(\.bitRateCeilingOverSource).max() ?? 0)
                 // The WebVTT renditions `prepare` set up above. Declaring them
                 // here is what makes them exist for AVPlayer: the segments are
                 // produced either way, but only the master's SUBTITLES group
@@ -3491,7 +3504,65 @@ final class HLSRemuxer: @unchecked Sendable {
             let seconds = Double(input.pointee.duration) / Double(AV_TIME_BASE)
             return max(1, Int(Double(size) * 8 / seconds))
         }
-        return 25_000_000
+        return Self.unknownSourceBandwidth
+    }
+
+    /// `sourceBandwidth`'s last resort: no rate known anywhere (a remote
+    /// source with no `bit_rate`). Not an average, so `peakSegmentBandwidth`
+    /// must not clamp against it — 4 × 25 would cut a measured 120 Mbit/s
+    /// peak to 100, back below what AVPlayer meets.
+    static let unknownSourceBandwidth = 25_000_000
+
+    /// `BANDWIDTH` from the densest segment: its bit rate with 20 % headroom,
+    /// plus `audioCeiling` for a re-encoded audio rendition whose bits the
+    /// source's byte positions do not measure. Held to at least twice and at
+    /// most four times `average`, and never above 160 Mbit/s: one odd index
+    /// entry must neither under-cut the average nor inflate the declaration
+    /// past anything the source can be.
+    ///
+    /// `average` is `nil` when the source declared no rate (only the
+    /// `unknownSourceBandwidth` stub); the clamp then uses the average the
+    /// same boundaries measure.
+    ///
+    /// `nil` — use the average — when fewer than two whole segments are
+    /// measurable, or the positions run backwards (an index not to trust).
+    ///
+    /// - Parameter boundaries: segment starts in play order, as the byte
+    ///   position of the keyframe and its time in seconds.
+    static func peakSegmentBandwidth(
+        boundaries: [(position: Int64, seconds: Double)],
+        average: Int?,
+        audioCeiling: Int
+    ) -> Int? {
+        guard boundaries.count >= 3, let first = boundaries.first, let last = boundaries.last else { return nil }
+        var peak = 0.0
+        for (start, end) in zip(boundaries, boundaries.dropFirst()) {
+            let bytes = end.position - start.position
+            let seconds = end.seconds - start.seconds
+            guard bytes >= 0, seconds > 0 else { return nil }
+            peak = max(peak, Double(bytes) * 8 / seconds)
+        }
+        // Every step moved forward in time, so the span is positive.
+        let base = average ?? Int(Double(last.position - first.position) * 8 / (last.seconds - first.seconds))
+        guard peak > 0, base > 0 else { return nil }
+        let declared = Int(peak * 1.2) + audioCeiling
+        // The 160 Mbit/s cap is applied last: a floor of 2 × a high average
+        // must not lift the declaration past it.
+        return min(160_000_000, min(4 * base, max(2 * base, declared)))
+    }
+
+    /// The planned segment starts `positions` has a byte position for. Empty
+    /// without a keyframe plan — `peakSegmentBandwidth` then falls back. A
+    /// plan entry with no position (a partial plan's uniform tail) merges
+    /// into the segment before it.
+    static func segmentBoundaries(
+        plan: SegmentPlan?, positions: [Int64: Int64]
+    ) -> [(position: Int64, seconds: Double)] {
+        guard let plan, plan.timeBaseDen != 0 else { return [] }
+        let tick = Double(plan.timeBaseNum) / Double(plan.timeBaseDen)
+        return plan.entries.compactMap { entry in
+            positions[entry.startPTS].map { (position: $0, seconds: Double(entry.startPTS) * tick) }
+        }
     }
 }
 

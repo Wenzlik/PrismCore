@@ -80,7 +80,11 @@ struct KeyframeIndexCache: Sendable {
     /// `Identity.key`; entries before it (no field) were keyed by a readable
     /// URL with the query stripped and no version proof, and are misses —
     /// their key could not match anyway, this says so without relying on it.
-    static let formatVersion = 2
+    /// 3 = may carry `keyframePositions`. A format-2 entry never has them,
+    /// and a hit skips the index load that would supply them — so without
+    /// the bump a source played before them would declare the average
+    /// `BANDWIDTH` on every later play instead of its densest segment.
+    static let formatVersion = 3
 
     /// What vouches that the bytes behind an address are the ones a map was
     /// learned from. Deliberately only two kinds: anything weaker — a weak
@@ -222,10 +226,17 @@ struct KeyframeIndexCache: Sendable {
         /// contiguous run, past which the map says nothing.
         var complete: Bool = true
         var coveredThroughPTS: Int64? = nil
+        /// The byte position of each `keyframePTS` entry (-1 where unknown),
+        /// from the demuxer index; `nil` from the harvest, which keeps PTS
+        /// only. A hit skips the index load, and without these `BANDWIDTH`
+        /// could not measure the densest segment and would fall back to the
+        /// average — the under-declaration it exists to avoid.
+        var keyframePositions: [Int64]? = nil
 
         init(
             identity: String, timeBaseNum: Int32, timeBaseDen: Int32, keyframePTS: [Int64],
-            complete: Bool = true, coveredThroughPTS: Int64? = nil
+            complete: Bool = true, coveredThroughPTS: Int64? = nil,
+            keyframePositions: [Int64: Int64] = [:]
         ) {
             self.identity = identity
             self.format = KeyframeIndexCache.formatVersion
@@ -234,6 +245,19 @@ struct KeyframeIndexCache: Sendable {
             self.keyframePTS = keyframePTS
             self.complete = complete
             self.coveredThroughPTS = coveredThroughPTS
+            self.keyframePositions = keyframePositions.isEmpty
+                ? nil : keyframePTS.map { keyframePositions[$0] ?? -1 }
+        }
+
+        /// `keyframePositions` keyed by PTS, unknown ones left out; empty when
+        /// none were stored or they do not line up with the PTS.
+        var positionsByPTS: [Int64: Int64] {
+            guard let keyframePositions, keyframePositions.count == keyframePTS.count else { return [:] }
+            var positions: [Int64: Int64] = [:]
+            for (pts, position) in zip(keyframePTS, keyframePositions) where position >= 0 {
+                positions[pts] = position
+            }
+            return positions
         }
 
         // Entries written before `complete` existed were only ever stored at
@@ -248,6 +272,7 @@ struct KeyframeIndexCache: Sendable {
             keyframePTS = try container.decode([Int64].self, forKey: .keyframePTS)
             complete = try container.decodeIfPresent(Bool.self, forKey: .complete) ?? true
             coveredThroughPTS = try container.decodeIfPresent(Int64.self, forKey: .coveredThroughPTS)
+            keyframePositions = try container.decodeIfPresent([Int64].self, forKey: .keyframePositions)
         }
     }
 
@@ -293,9 +318,23 @@ struct KeyframeIndexCache: Sendable {
         // every session's cache value points at the same directory.
         Self.storeLock.lock()
         defer { Self.storeLock.unlock() }
-        if !entry.complete, let existing = lookup(identity: entry.identity) {
-            if existing.complete { return true }
-            if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
+        var entry = entry
+        if let existing = lookup(identity: entry.identity) {
+            if !entry.complete {
+                if existing.complete { return true }
+                if (existing.coveredThroughPTS ?? .min) >= (entry.coveredThroughPTS ?? .min) { return true }
+            }
+            // The harvest keeps PTS only. Landing after the late index load
+            // stored the same map with byte positions, it would erase them,
+            // and the next hit — which skips the index load — could no longer
+            // measure the densest segment for `BANDWIDTH`.
+            if entry.keyframePositions == nil,
+               existing.timeBaseNum == entry.timeBaseNum, existing.timeBaseDen == entry.timeBaseDen {
+                let known = existing.positionsByPTS
+                if !known.isEmpty {
+                    entry.keyframePositions = entry.keyframePTS.map { known[$0] ?? -1 }
+                }
+            }
         }
         guard let data = try? JSONEncoder().encode(entry) else { return false }
         try? FileManager.default.createDirectory(

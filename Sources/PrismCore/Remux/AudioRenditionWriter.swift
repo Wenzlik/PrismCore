@@ -911,6 +911,30 @@ final class AudioRenditionWriter {
         }
     }
 
+    /// The most this rendition's output can carry that the source's bytes do
+    /// not: zero for a copy (its bits are the source's), the encoder's rate
+    /// for a bridge — the ceiling `BANDWIDTH` adds on top of the video peak.
+    var bitRateCeilingOverSource: Int {
+        switch route.mode {
+        case .streamCopy:
+            return 0
+        case .bridge, .boost:
+            if rendersHeights {
+                // LPCM at 24 bits; APAC at the 256 kbps per channel `HeightsBridge` asks for.
+                return heightsOutput == .lpcm
+                    ? heightsLayout.channelCount * 24 * Int(HeightsBridgeConstants.sampleRate)
+                    : heightsLayout.channelCount * 256_000
+            }
+            // An unknown layout is priced as 7.1, the widest a bridge leaves as.
+            let channels = outputChannelCount ?? 8
+            let codec = bridge?.outputCodecName ?? negotiatedCodecName ?? AudioBridge.defaultTargetCodecName
+            // FLAC has no rate; its ceiling is the 24-bit PCM it compresses.
+            return codec == "flac"
+                ? channels * 24 * max(track.sampleRate, 48_000)
+                : channels * 128_000   // `AudioBridge`'s lossy rate
+        }
+    }
+
     /// `CHANNELS` — the bridge renegotiates the layout (a 7.1 source can leave
     /// as 5.1), so the encoder is the authority when one is in the path.
     private var outputChannelCount: Int? {
