@@ -40,4 +40,12 @@ package enum PrismCoreLog {
         logger.notice("\(message, privacy: .public)")
         observer?(message)
     }
+
+    /// Per-frame detail for a device investigation. Debug level, so the
+    /// unified log neither persists it nor builds the string unless someone
+    /// is streaming with `--level debug`; and not mirrored to `observer`,
+    /// which would turn a film into a test transcript.
+    static func debug(_ message: @autoclosure @escaping () -> String) {
+        logger.debug("\(message(), privacy: .public)")
+    }
 }

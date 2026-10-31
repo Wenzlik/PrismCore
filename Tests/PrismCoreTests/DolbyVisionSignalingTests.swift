@@ -427,6 +427,109 @@ struct DolbyVisionConversionDeclarationTests {
     }
 }
 
+@Suite("Profile 7 FEL black screen (#177)")
+struct DolbyVisionP7FELTests {
+
+    private func profile(_ profile: UInt8, level: UInt8, compatibility: UInt8) -> DolbyVisionConfiguration {
+        DolbyVisionConfiguration(
+            versionMajor: 1,
+            versionMinor: 0,
+            profile: profile,
+            level: level,
+            rpuPresent: true,
+            enhancementLayerPresent: false,
+            baseLayerPresent: profile != 5,
+            baseLayerSignalCompatibilityID: compatibility
+        )
+    }
+
+    private func variant(
+        _ dv: DolbyVisionConfiguration,
+        resolution: MasterPlaylistBuilder.Resolution?,
+        frameRate: Double = 23.976
+    ) throws -> MasterPlaylistBuilder.VariantDescription {
+        let record = try #require(
+            HEVCConfigurationRecord.parse(hvcC: hvcC(arrays: [(type: 33, complete: true, units: [sps])]))
+        )
+        return MasterPlaylistBuilder.VariantDescription(
+            bandwidth: 30_000_000,
+            resolution: resolution,
+            frameRate: frameRate,
+            dynamicRange: .pq,
+            videoCodec: .hevc(record),
+            dolbyVision: dv,
+            displayIsDolbyVisionCapable: true
+        )
+    }
+
+    @Test("dv_level 0 is derived from resolution and frame rate, never printed as 00")
+    func levelZeroIsDerived() throws {
+        let uhd = MasterPlaylistBuilder.Resolution(width: 3840, height: 2160)
+        let hd = MasterPlaylistBuilder.Resolution(width: 1920, height: 1080)
+        let p81 = profile(8, level: 0, compatibility: 1)
+        let uhd24 = try variant(p81, resolution: uhd)
+        let uhd60 = try variant(p81, resolution: uhd, frameRate: 59.94)
+        let hd60 = try variant(p81, resolution: hd, frameRate: 60)
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: uhd24) == "dvh1.08.06/db1p")
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: uhd60) == "dvh1.08.09/db1p")
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: hd60) == "dvh1.08.05/db1p")
+        // P5 has only the primary tag, and it gets the derived level too.
+        let p5 = try variant(profile(5, level: 0, compatibility: 0), resolution: uhd)
+        #expect(MasterPlaylistBuilder.primaryVideoCodecString(for: p5) == "dvh1.05.06")
+    }
+
+    @Test("a valid record level is kept even where the picture would derive another")
+    func validLevelIsKept() throws {
+        let hd = MasterPlaylistBuilder.Resolution(width: 1920, height: 1080)
+        let v = try variant(profile(8, level: 9, compatibility: 1), resolution: hd)
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: v) == "dvh1.08.09/db1p")
+    }
+
+    @Test("dv_level 0 with no resolution drops the DV claim instead of guessing")
+    func underivableLevelDropsClaim() throws {
+        let v = try variant(profile(8, level: 0, compatibility: 1), resolution: nil)
+        #expect(MasterPlaylistBuilder.supplementalCodecsString(for: v) == nil)
+        #expect(!MasterPlaylistBuilder.declaresDolbyVision(v))
+        let master = try MasterPlaylistBuilder.build(v)
+        #expect(!master.contains("dvh1.08.00"))
+    }
+
+    @Test("vps_max_layers_minus1 is read from the VPS header bits")
+    func vpsLayerCount() {
+        func layers(_ bytes: [UInt8]) -> UInt8? {
+            bytes.withUnsafeBufferPointer { HEVCNALUnits.vpsMaxLayersMinus1($0) }
+        }
+        #expect(layers(vps) == 0)
+        #expect(layers([0x40, 0x01, 0x0C, 0x11, 0xFF]) == 1)
+        #expect(layers([0x40, 0x01, 0x0F, 0xF1, 0xFF]) == 63)
+        #expect(layers(sps) == nil)
+        #expect(layers([0x40, 0x01, 0x0C]) == nil)
+    }
+
+    @Test("an access unit that was only RPU + enhancement layer is dropped, not written empty")
+    func picturelessPacketIsDropped() throws {
+        guard DolbyVisionRPUConverter.isAvailable else { return }
+        let converter = try #require(DolbyVisionRPUConverter(lengthSize: 4))
+
+        // Base picture + EL: rewritten, picture kept.
+        #expect(converter.convert(packet: packet([nal(type: 1), nal(type: 63)])) != nil)
+        #expect(!converter.lastPacketCarriesNoPicture)
+
+        // EL only: nothing left to decode.
+        _ = converter.convert(packet: packet([nal(type: 63), nal(type: 63, payload: 0xBB)]))
+        #expect(converter.lastPacketCarriesNoPicture)
+        #expect(converter.picturelessPackets == 1)
+
+        // A packet the converter leaves alone clears the flag, and a
+        // picture-less packet it did NOT change is the source's business.
+        #expect(converter.convert(packet: packet([nal(type: 1)])) == nil)
+        #expect(!converter.lastPacketCarriesNoPicture)
+        #expect(converter.convert(packet: packet([nal(type: 35)])) == nil)
+        #expect(!converter.lastPacketCarriesNoPicture)
+        #expect(converter.picturelessPackets == 1)
+    }
+}
+
 // MARK: - Normalization end to end
 
 /// Walks an ISO-BMFF box tree looking for `hvcC`, returning its payload.

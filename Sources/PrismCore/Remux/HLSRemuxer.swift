@@ -704,7 +704,8 @@ final class HLSRemuxer: @unchecked Sendable {
             convertedRPUs: converter.convertedRPUs,
             failedRPUs: converter.failedRPUs,
             droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs,
-            staleUnconvertedPackets: converter.staleUnconvertedPackets
+            staleUnconvertedPackets: converter.staleUnconvertedPackets,
+            picturelessPackets: converter.picturelessPackets
         )
         conversionStatsLock.withLock { storedConversionStats = stats }
     }
@@ -2474,6 +2475,7 @@ final class HLSRemuxer: @unchecked Sendable {
                     // before the bits reach the muxer. Returns nil for a packet
                     // that needed neither, which is every packet of every other
                     // source — the cost there is one NAL walk, no copy.
+                    var strippedToNoPicture = false
                     if let dolbyVisionConverter, packet.pointee.data != nil,
                        packet.pointee.size > 0 {
                         // The walk runs on the packet's own buffer, and a changed
@@ -2483,6 +2485,7 @@ final class HLSRemuxer: @unchecked Sendable {
                         try Self.rewritePayload(of: packet) { source, allocate in
                             dolbyVisionConverter.convert(packet: source, into: allocate)
                         }
+                        strippedToNoPicture = dolbyVisionConverter.lastPacketCarriesNoPicture
                     }
                     if needsParameterSetHarvest, harvestedParameterSets[33] == nil,
                        packet.pointee.flags & AV_PKT_FLAG_KEY != 0,
@@ -2501,7 +2504,11 @@ final class HLSRemuxer: @unchecked Sendable {
                             }
                         }
                     }
-                    if let mapped = streamMap[streamIndex] {
+                    // An access unit that was only RPU + enhancement layer has
+                    // nothing left to decode: written, it would be a sample
+                    // with no picture. Skipped AFTER the harvest above, which
+                    // may still want its parameter sets.
+                    if !strippedToNoPicture, let mapped = streamMap[streamIndex] {
                         try write(packet, to: mapped, from: sourceTimeBase, writer: writer, grid: videoGrid)
                     }
                     continue

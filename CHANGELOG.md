@@ -8,6 +8,22 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Fixed
+
+- A Dolby Vision record with `dv_level 0` no longer produces `dvh1.08.00`:
+  the level is derived from resolution × frame rate (DV level table), and the
+  `SUPPLEMENTAL-CODECS` claim is dropped when it cannot be. A valid record
+  level is kept. (#177)
+- Profile 7 → 8.1: an access unit left with no base-layer picture after the
+  EL strip (only RPU + EL) is dropped instead of muxed as an empty sample;
+  counted in `DolbyVisionConversionStats.picturelessPackets`. (#177)
+
+### Added
+
+- Per-frame debug log of the P7 RPU's `el_type` (FEL/MEL) and
+  `disable_residual_flag`, and a one-time notice if the base-layer VPS still
+  declares more than one layer after the EL strip. (#177)
+
 ## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any

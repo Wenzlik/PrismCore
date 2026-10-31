@@ -36,6 +36,16 @@ enum HEVCNALUnits {
         return Int(bytes[21] & 0x03) + 1
     }
 
+    /// `vps_max_layers_minus1` of a VPS NAL (header included), or `nil` when
+    /// it is not a VPS or is too short. H.265 §7.3.2.1: four bits of VPS id,
+    /// two flags, then the six bits asked for — straddling payload bytes 0 and
+    /// 1. No emulation-prevention byte can sit there: one needs two zero
+    /// bytes before it, and those would be the NAL header, which is never zero.
+    static func vpsMaxLayersMinus1(_ nal: UnsafeBufferPointer<UInt8>) -> UInt8? {
+        guard nal.count >= 4, (nal[0] >> 1) & 0x3F == 32 else { return nil }
+        return ((nal[2] & 0x03) << 4) | (nal[3] >> 4)
+    }
+
     /// Every NAL unit in the packet, or `nil` if the lengths don't frame it
     /// exactly (a truncated packet, or Annex-B data misread as length-prefixed).
     ///
