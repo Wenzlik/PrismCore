@@ -992,6 +992,7 @@ final class HLSRemuxer: @unchecked Sendable {
         // which is why it forces the rewind below. See `ClosedCaptionScout`
         // for the cost this adds and why absence cannot be proven cheaper.
         var closedCaptions: ClosedCaptionScout.Finding?
+        var preferredTransfer: Int?
         if let pb = input.pointee.pb, pb.pointee.seekable != 0,
            let carriage = ClosedCaptionScout.carriage(
                codecID: input.pointee.streams[Int(videoIndex)]!.pointee.codecpar.pointee.codec_id,
@@ -1012,7 +1013,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 _ = av_seek_frame(input, -1, 0, AVSEEK_FLAG_BACKWARD)
                 avformat_flush(input)
             }
-            closedCaptions = ClosedCaptionScout.scan(
+            (closedCaptions, preferredTransfer) = ClosedCaptionScout.scan(
                 input: input, videoStreamIndex: videoIndex,
                 framing: carriage.framing, codec: carriage.codec
             )
@@ -1087,7 +1088,20 @@ final class HLSRemuxer: @unchecked Sendable {
         // `sourceDolbyVision`, never the probe's record. A genuine P5 leaves
         // its VUI unspecified and reads no packet here.
         var sourceDolbyVision = videoTrack.dolbyVision
-        var servedProbeRange = videoTrack.dynamicRange
+        // Broadcast HLG behind an SDR VUI (`AlternativeTransferSEI`). Only for
+        // a display that takes HDR: on any other the backward-compatible SDR
+        // reading is the intended picture, and claiming HLG there would cost
+        // the master (`masterVariantPermitted`) for nothing.
+        let servesBroadcastHLG = displayIsHDRReady && AlternativeTransferSEI.signalsHLG(
+            probed: videoTrack.dynamicRange,
+            dolbyVision: videoTrack.dolbyVision,
+            colorTransferName: videoTrack.colorTransferName,
+            preferredTransfer: preferredTransfer
+        )
+        if servesBroadcastHLG {
+            PrismCoreLog.notice("video: alternative-transfer SEI prefers ARIB STD-B67 over VUI trc=\(videoTrack.colorTransferName ?? "-"); serving HLG")
+        }
+        var servedProbeRange = servesBroadcastHLG ? DynamicRange.hlg : videoTrack.dynamicRange
         var auditedRPUProfile: UInt8?
         let recordAudited = DolbyVisionRecordAudit.recordIsContradicted(
             videoTrack.dolbyVision,
@@ -1403,7 +1417,8 @@ final class HLSRemuxer: @unchecked Sendable {
                     // A display that cannot present Dolby Vision must not be
                     // sent a `dvvC` box, whatever the manifest says — and a
                     // base layer presented alone must not be sent one at all.
-                    stripDolbyVisionRecord: stripsDolbyVisionRecord
+                    stripDolbyVisionRecord: stripsDolbyVisionRecord,
+                    servesHLGTransfer: servesBroadcastHLG
                 )
                 // movenc takes the track timescale from the stream's time base.
                 if let videoGrid { outStream.pointee.time_base = videoGrid.outputTimeBase }
@@ -3032,7 +3047,8 @@ final class HLSRemuxer: @unchecked Sendable {
         videoIndex: Int32,
         declaredDolbyVision: DolbyVisionConfiguration?,
         rewriteDolbyVisionRecord: Bool,
-        stripDolbyVisionRecord: Bool
+        stripDolbyVisionRecord: Bool,
+        servesHLGTransfer: Bool = false
     ) throws {
         let inStream = input.pointee.streams[Int(videoIndex)]!
         try FFmpegError.check(
@@ -3079,6 +3095,12 @@ final class HLSRemuxer: @unchecked Sendable {
         // IPT picture is shown unmapped. The tuple is fixed by the profile, so
         // writing it is a repair, never a guess; only the range is the
         // source's own (full-range P5 is legal).
+        // Broadcast HLG served as HLG: the `colr` box is what AVPlayer reads
+        // the transfer from, and the VUI's SDR claim must not reach it, or the
+        // manifest's VIDEO-RANGE=HLG and the sample entry disagree.
+        if servesHLGTransfer {
+            par.pointee.color_trc = AVCOL_TRC_ARIB_STD_B67
+        }
         if declaredDolbyVision?.isSingleLayerDVOnly == true {
             let colour = Self.profile5Colour(sourceRange: par.pointee.color_range)
             par.pointee.color_primaries = colour.primaries

@@ -59,13 +59,18 @@ enum ClosedCaptionScout {
 
     /// Consume packets from `input` looking for captions. **Leaves the read
     /// position where it stopped** — the caller must rewind.
+    ///
+    /// The same packets answer one more question for free: the first
+    /// `alternative_transfer_characteristics` SEI's preferred transfer
+    /// (`AlternativeTransferSEI`), which is how broadcast HLG hides behind an
+    /// SDR VUI.
     static func scan(
         input: UnsafeMutablePointer<AVFormatContext>,
         videoStreamIndex: Int32,
         framing: HEVCNALUnits.Framing,
         codec: HEVCNALUnits.Codec
-    ) -> Finding? {
-        guard let packet = av_packet_alloc() else { return nil }
+    ) -> (captions: Finding?, preferredTransfer: Int?) {
+        guard let packet = av_packet_alloc() else { return (nil, nil) }
         var packetRef: UnsafeMutablePointer<AVPacket>? = packet
         defer { av_packet_free(&packetRef) }
 
@@ -81,6 +86,7 @@ enum ClosedCaptionScout {
         var fieldSeen = [false, false]
         var videoPackets = 0
         var packets = 0
+        var preferredTransfer: Int?
 
         while videoPackets < maximumVideoPackets, packets < maximumPackets,
               av_read_frame(input, packet) >= 0 {
@@ -92,6 +98,11 @@ enum ClosedCaptionScout {
             videoPackets += 1
 
             let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+            if preferredTransfer == nil {
+                preferredTransfer = AlternativeTransferSEI.preferredTransfer(
+                    inPacket: bytes, framing: framing, codec: codec
+                )
+            }
             for triplet in A53CaptionData.triplets(in: bytes, framing: framing, codec: codec) {
                 if let field = triplet.cea608Field { fieldSeen[field - 1] = true }
             }
@@ -112,7 +123,7 @@ enum ClosedCaptionScout {
         if reader.hasPrintedText(channel: 2) { channels.append(2) }
         if fieldSeen[1] { channels.append(3) }
         if reader.hasPrintedText(channel: 4) { channels.append(4) }
-        guard !channels.isEmpty else { return nil }
-        return Finding(channels: channels.sorted(), framing: framing, codec: codec)
+        guard !channels.isEmpty else { return (nil, preferredTransfer) }
+        return (Finding(channels: channels.sorted(), framing: framing, codec: codec), preferredTransfer)
     }
 }
