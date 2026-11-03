@@ -71,7 +71,7 @@ let package = Package(
             // Apple's privacy manifest, so an app linking PrismCore declares
             // the required-reason APIs it uses (file timestamps: the keyframe
             // index cache; system uptime: stall and deadline clocks).
-            resources: [.copy("PrivacyInfo.xcprivacy")],
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .executableTarget(
             name: "prismcore-fuzz",
