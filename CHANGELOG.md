@@ -8,6 +8,10 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.1] — 2026-11-03
+
+Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.
+
 - The coordinated HTTP reader now also ends a connection that drips: once reads have starved for a stall period (15 s) of the last 20 s and under 2 MiB arrived in that window, the connection is closed like a silent one, its delivered bytes kept, and the next fill reconnects.
 - Audio-description tracks (`AV_DISPOSITION_VISUAL_IMPAIRED`) are reported as
   `AudioTrackInfo.isAudioDescription` and declared

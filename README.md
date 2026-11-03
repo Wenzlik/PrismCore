@@ -92,7 +92,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.0")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.1")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -1169,7 +1169,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.0")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.1")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
