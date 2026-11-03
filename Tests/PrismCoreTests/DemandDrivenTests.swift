@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 import AVFoundation
 @testable import PrismCore
 
@@ -477,11 +478,13 @@ struct ParkedProducerTests {
     func producerThreadQualityOfService() async {
         // The heights chain (decode, render, APAC encode) runs on this thread: a
         // background class can leave a slower device's chain under real time.
-        final class Seen: @unchecked Sendable { var qos: QualityOfService? }
-        let seen = Seen()
-        let producer = ProducerThread(name: "prismcore.tests.qos") { seen.qos = Thread.current.qualityOfService }
+        let seen = OSAllocatedUnfairLock<QualityOfService?>(initialState: nil)
+        let producer = ProducerThread(name: "prismcore.tests.qos") {
+            let qos = Thread.current.qualityOfService
+            seen.withLock { $0 = qos }
+        }
         await producer.join()
-        #expect(seen.qos == .userInitiated)
+        #expect(seen.withLock { $0 } == .userInitiated)
     }
 }
 

@@ -41,6 +41,7 @@ struct SessionCloneTests {
     }
 
     /// Collects `TimedTextCue`s across the remux thread and the test task.
+    // Safety: mutable state is read and written only under `lock`.
     private final class CueCollector: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [TimedTextCue] = []

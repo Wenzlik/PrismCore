@@ -171,6 +171,7 @@ struct ReadInterruptGuardTests {
 /// without closing the connection. That is what a dead NAS, a sleeping disk
 /// or a saturated link look like to libavformat: not an error, a read that
 /// simply does not return.
+// Safety: the configuration is immutable and `isStopped` is guarded by `stopped`.
 private final class StallingHTTPServer: @unchecked Sendable {
 
     let port: UInt16

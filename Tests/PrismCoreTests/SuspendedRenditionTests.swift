@@ -299,7 +299,8 @@ struct SuspendedRenditionTests {
         coordinator.setProducing(index: 3)
         var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
         provider.productionTimeout = timeout
-        // The writer's seams are lock-guarded; the type just is not marked.
+        // Safety: the writer's seams these closures call are lock-guarded; the
+        // type just is not Sendable, since it also owns producer-only C state.
         nonisolated(unsafe) let rendition = writer
         provider.audioDemand = { _ in rendition.arm() }
         provider.audioRearm = { _ in rendition.arm() }
@@ -691,6 +692,7 @@ struct SuspendedRenditionTests {
     }
 }
 
+// Safety: the value is reachable only under `lock`.
 private final class SuspendLockedBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: Value

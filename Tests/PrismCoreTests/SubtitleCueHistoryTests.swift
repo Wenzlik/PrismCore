@@ -12,6 +12,7 @@ import CoreGraphics
 @Suite("Subtitle cue history", .serialized)
 struct SubtitleCueHistoryTests {
 
+    // Safety: mutable state is read and written only under `lock`.
     private final class CueBox: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: [TimedTextCue] = []
