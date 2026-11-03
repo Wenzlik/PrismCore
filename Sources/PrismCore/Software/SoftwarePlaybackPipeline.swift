@@ -165,10 +165,23 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     /// What each decoder ended up doing, for diagnostics: which route the video
     /// took (VideoToolbox zero-copy vs CPU) and the audio's output format.
+    ///
+    /// A snapshot published from `feedQueue`: reading the decoders from the
+    /// host thread would race `selectAudioTrack` and `stop()` replacing and
+    /// releasing them.
     public var routeDescription: String {
-        [videoDecoder?.routeDescription, audioDecoder?.routeDescription]
+        stateLock.withLock { storedRouteDescription }
+    }
+
+    /// Re-publishes `routeDescription`. Feed-queue only — it reads the
+    /// decoders. Called wherever a decoder is replaced, and after a video
+    /// packet whose frame changed the pixel route (VideoToolbox fallback).
+    private func publishRouteDescription() {
+        publishedVideoRoute = videoDecoder?.route
+        let description = [videoDecoder?.routeDescription, audioDecoder?.routeDescription]
             .compactMap { $0 }
             .joined(separator: "; ")
+        stateLock.withLock { storedRouteDescription = description }
     }
 
     /// The probe's description of the loaded source — the same facts
@@ -290,6 +303,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private var storedSelectableAudioTracks: [AudioTrackInfo] = []
     /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
     private var storedSelectedAudioStreamIndex: Int32 = -1
+    private var storedRouteDescription = ""
+    /// Feed-queue confined: the video route `storedRouteDescription` was built
+    /// from, so a per-frame route change re-publishes without rebuilding the
+    /// string on every packet.
+    private var publishedVideoRoute: SoftwareVideoDecoder.PixelRoute?
     public var audioDelivery: AudioDelivery {
         stateLock.withLock {
             guard let info = storedSourceInfo else { return .pending }
@@ -856,6 +874,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 audioDecoder?.close()
                 audioDecoder = newDecoder
                 audioStreamIndex = Int32(streamIndex)
+                publishRouteDescription()
                 stateLock.withLock { storedSelectedAudioStreamIndex = Int32(streamIndex) }
             }
 
@@ -1064,6 +1083,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         guard videoDecoder != nil || audioDecoder != nil else {
             throw Failure.noDecodableStream
         }
+        publishRouteDescription()
     }
 
     /// Both renderers pull on the same serial queue, so a callback can never run
@@ -1341,6 +1361,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         switch Int32(packet.pointee.stream_index) {
         case videoStreamIndex:
             try videoDecoder?.decode(packet, emit: acceptVideo)
+            if videoDecoder?.route != publishedVideoRoute { publishRouteDescription() }
         case audioStreamIndex:
             try audioDecoder?.decode(packet, emit: acceptAudio)
         default:
@@ -1444,6 +1465,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         videoDecoder = nil
         audioDecoder?.close()
         audioDecoder = nil
+        publishRouteDescription()
         clearPendingVideo()
         pendingAudio.removeAll()
         timeline.detach(videoSink)
