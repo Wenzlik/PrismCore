@@ -127,14 +127,24 @@ final class HTTPRangeInput {
     private var prewarmOutcome: SourcePrewarmUse = .none
     var prewarmUse: SourcePrewarmUse { failureLock.withLock { prewarmOutcome } }
 
+    /// The volume half of the delivery watchdog (see `TrickleWatchdog`).
+    /// Touched only on the reader's own thread: by `fill` and by the poll
+    /// inside the fetch it blocks on.
+    private var watchdog: TrickleWatchdog
+    private let now: () -> TimeInterval
+
     init(
         url: URL,
         headers: [String: String],
         hints: SourceOpenHints? = nil,
         prewarmStore: SourcePrewarmStore? = .shared,
         yieldsToPlayback: Bool = false,
+        trickle: TrickleWatchdog.Thresholds = .standard,
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         interrupted: @escaping () -> Bool
     ) {
+        self.watchdog = TrickleWatchdog(thresholds: trickle)
+        self.now = now
         self.prewarmStore = prewarmStore
         self.yieldsToPlayback = yieldsToPlayback
         self.url = url
@@ -240,14 +250,36 @@ final class HTTPRangeInput {
             guard admitted else { throw Failure.request }
             let requestSize = firstFillSize ?? Self.blockSize
             let response: RangeResponse
+            // Blocked only while a connection is open: an admission wait or a
+            // `Retry-After` backoff is not a connection that drips, and ending
+            // one would end nothing.
+            watchdog.readBlocked(at: now())
+            var seen = 0
             do {
                 var requestHeaders = headers
                 if let validator { requestHeaders["If-Range"] = validator }
                 response = try RangeResponse.fetch(url: url, headers: requestHeaders, start: position,
-                    size: requestSize, cancelled: cancelled)
-            } catch { HTTPOriginCoordinator.shared.release(origin); throw error }
+                    size: requestSize, cancelled: cancelled, trickling: { [self] received in
+                        let at = now()
+                        watchdog.delivered(received - seen, at: at)
+                        seen = received
+                        return watchdog.judge(at: at)
+                    })
+            } catch {
+                watchdog.readUnblocked(at: now())
+                HTTPOriginCoordinator.shared.release(origin)
+                throw error
+            }
+            // Bytes that landed between the last poll and completion.
+            watchdog.delivered(response.data.count - seen, at: now())
+            watchdog.readUnblocked(at: now())
             let status = response.response?.statusCode ?? 0
-            if response.error != nil && (status == 0 || status == 206) {
+            // A connection the watchdog ended keeps what it did deliver: the
+            // read blocked on it gets those bytes now, and the next fill is
+            // the reconnect. Discarding them would make a slow-but-moving
+            // origin pay the same bytes again on every judgement.
+            let partial = response.abandonedAsTrickle && status == 206 && !response.data.isEmpty
+            if response.error != nil && (status == 0 || status == 206) && !partial {
                 // No status, even when the origin answered 206 first. The two
                 // are about different things: the status describes a *response*
                 // that succeeded, the error describes a *transfer* that did
@@ -295,10 +327,13 @@ final class HTTPRangeInput {
                     ? .originRefused(status: status, url: url)
                     : .originUnreachable(status: status, url: url, underlying: nil))
             }
-            guard status == 206, response.error == nil,
+            guard status == 206, response.error == nil || partial,
                   let raw = response.response?.value(forHTTPHeaderField: "Content-Range"),
                   let range = Self.contentRange(raw), range.start == position,
-                  range.end - range.start + 1 == Int64(response.data.count),
+                  // `<=`: the transfer may have finished in the same instant
+                  // the watchdog cancelled it.
+                  partial ? Int64(response.data.count) <= range.end - range.start + 1
+                          : range.end - range.start + 1 == Int64(response.data.count),
                   response.data.count <= requestSize else { throw Failure.request }
             if let length, length != range.total { throw Failure.request }
             let currentValidator = Self.validator(of: response.response)
@@ -481,12 +516,101 @@ final class HTTPRangeInput {
     enum Failure: Error { case allocation, request }
 }
 
+/// The volume half of the reader's delivery watchdog.
+///
+/// The time half is URLSession's own: `RangeResponse.stallPeriod` without a
+/// byte ends the request. A connection that drips — 256 KB every few tens of
+/// seconds, as debrid origins do when they throttle one connection — resets
+/// that clock on every drip and never trips it, while the player drains its
+/// buffer and stalls. This ends such a connection the same way a silent one
+/// ends, once all of these hold:
+///
+/// - a read is blocked on the connection right now — a paused or parked
+///   player has no read pending, and this reader has no read-ahead of its own
+///   that could sit full, so there is nothing else to tell apart;
+/// - reads were blocked for at least one stall period of the last `window`,
+///   however many reads that took;
+/// - fewer than `floorBytes` arrived in that same `window`.
+///
+/// Live sources never reach it: `HTTPRangeInput` serves finite files only and
+/// refuses a response without a total length.
+///
+/// Pure and clock-free (every call takes its own `at:`), so the thresholds
+/// and the timeline are a test's to choose.
+struct TrickleWatchdog {
+    struct Thresholds: Sendable {
+        var stallPeriod: TimeInterval
+        var window: TimeInterval
+        var floorBytes: Int
+
+        static let standard = Thresholds(
+            stallPeriod: RangeResponse.stallPeriod,
+            window: RangeResponse.trickleWindow,
+            floorBytes: RangeResponse.trickleFloorBytes
+        )
+    }
+
+    let thresholds: Thresholds
+    private var deliveries: [(at: TimeInterval, bytes: Int)] = []
+    private var starved: [(from: TimeInterval, to: TimeInterval)] = []
+    private var blockedSince: TimeInterval?
+
+    init(thresholds: Thresholds) { self.thresholds = thresholds }
+
+    mutating func readBlocked(at now: TimeInterval) {
+        if blockedSince == nil { blockedSince = now }
+    }
+
+    mutating func readUnblocked(at now: TimeInterval) {
+        guard let since = blockedSince else { return }
+        starved.append((from: since, to: now))
+        blockedSince = nil
+    }
+
+    mutating func delivered(_ bytes: Int, at now: TimeInterval) {
+        guard bytes > 0 else { return }
+        deliveries.append((at: now, bytes: bytes))
+    }
+
+    /// Whether to end the blocked read's connection now. A `true` also
+    /// clears the history, so the reconnect gets a full stall period of its
+    /// own rather than inheriting the verdict on the connection it replaces.
+    mutating func judge(at now: TimeInterval) -> Bool {
+        let horizon = now - thresholds.window
+        deliveries.removeAll { $0.at < horizon }
+        starved.removeAll { $0.to < horizon }
+        guard let since = blockedSince else { return false }
+        let starvedTime = starved.reduce(now - max(since, horizon)) { $0 + ($1.to - max($1.from, horizon)) }
+        guard starvedTime >= thresholds.stallPeriod,
+              deliveries.reduce(0, { $0 + $1.bytes }) < thresholds.floorBytes else { return false }
+        deliveries.removeAll()
+        starved.removeAll()
+        blockedSince = nil
+        return true
+    }
+}
+
 final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    /// How long a request may go without a byte before it is ended — the
+    /// time half of the delivery watchdog, enforced by URLSession.
+    static let stallPeriod: TimeInterval = 15
+    /// The volume half (`TrickleWatchdog`): under `trickleFloorBytes` in the
+    /// last `trickleWindow` while reads starve is a drip, not a stream —
+    /// ~0.8 Mbit/s, below any video worth playing.
+    static let trickleWindow: TimeInterval = 20
+    static let trickleFloorBytes = 2 << 20
+
     var response: HTTPURLResponse?
     var data = Data()
     var error: Error?
+    /// The watchdog ended this transfer; `data` is what arrived before it.
+    var abandonedAsTrickle = false
     let limit: Int
     private let completed = DispatchSemaphore(value: 0)
+    /// `data.count` for the polling thread, which must not read `data` while
+    /// the delegate queue appends to it.
+    private let receivedLock = NSLock()
+    private var receivedCount = 0
 
     init(limit: Int) { self.limit = limit }
 
@@ -512,7 +636,7 @@ final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable
     /// requests, which a session per fill could never do.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForRequest = stallPeriod
         config.timeoutIntervalForResource = 30
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
@@ -522,7 +646,8 @@ final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable
     }()
 
     static func fetch(url: URL, headers: [String: String], start: Int64, size: Int,
-                      cancelled: () -> Bool) throws -> RangeResponse {
+                      cancelled: () -> Bool,
+                      trickling: (_ received: Int) -> Bool = { _ in false }) throws -> RangeResponse {
         let result = RangeResponse(limit: size)
         var request = URLRequest(url: url)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
@@ -536,6 +661,16 @@ final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable
         task.resume()
         while result.completed.wait(timeout: .now() + 0.05) == .timedOut {
             if cancelled() { task.cancel(); throw HTTPRangeInput.Failure.request }
+            if trickling(result.receivedLock.withLock { result.receivedCount }) {
+                task.cancel()
+                // `data` is only safe to read once the delegate is done with
+                // it, and a cancelled task always reports completion.
+                guard result.completed.wait(timeout: .now() + 2) == .success else {
+                    throw HTTPRangeInput.Failure.request
+                }
+                result.abandonedAsTrickle = true
+                return result
+            }
         }
         return result
     }
@@ -556,6 +691,7 @@ final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard self.data.count + data.count <= limit else { dataTask.cancel(); return }
         self.data.append(data)
+        receivedLock.withLock { receivedCount = self.data.count }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
