@@ -299,8 +299,8 @@ struct SuspendedRenditionTests {
         coordinator.setProducing(index: 3)
         var provider = PlanSegmentProvider(root: root, coordinator: coordinator)
         provider.productionTimeout = timeout
-        // Safety: the writer's seams these closures call are lock-guarded; the
-        // type just is not Sendable, since it also owns producer-only C state.
+        // Safety: the writer's seams these closures call are lock-guarded;
+        // the type just is not marked Sendable.
         nonisolated(unsafe) let rendition = writer
         provider.audioDemand = { _ in rendition.arm() }
         provider.audioRearm = { _ in rendition.arm() }
