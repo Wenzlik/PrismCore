@@ -9,6 +9,16 @@ source-compatible.)
 ## [Unreleased]
 
 - The coordinated HTTP reader now also ends a connection that drips: once reads have starved for a stall period (15 s) of the last 20 s and under 2 MiB arrived in that window, the connection is closed like a silent one, its delivered bytes kept, and the next fill reconnects.
+- Audio-description tracks (`AV_DISPOSITION_VISUAL_IMPAIRED`) are reported as
+  `AudioTrackInfo.isAudioDescription` and declared
+  `public.accessibility.describes-video` in the master.
+- `bridgedAudioProcessing:` (`BridgedAudioProcessing`): opt-in night mode
+  (`acompressor`) and a channel cap for re-encoded audio only; off by default.
+- Broadcast HLG signalled only by an `alternative_transfer_characteristics`
+  SEI (preferred transfer 18) over an SDR or unspecified VUI is served as HLG
+  (`VIDEO-RANGE`, display criteria, `colr`) to an HDR display.
+  New fuzz target `alternative-transfer-sei` with seeds.
+- `PrivacyInfo.xcprivacy` ships as a resource of the PrismCore target.
 
 ## [4.0.0] — 2026-10-30
 

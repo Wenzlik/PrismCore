@@ -218,8 +218,9 @@ final class AudioBridge {
     private var swrInRate: Int32 = 0
     private var swrInLayout = AVChannelLayout()
 
-    /// Present only on a dialogue-boost rendition's bridge: decoded frames
-    /// detour through `abuffer → pan → abuffersink` before the resampler.
+    /// Present only on a dialogue-boost rendition's bridge, or with night mode
+    /// on: decoded frames detour through `abuffer → pan/acompressor →
+    /// abuffersink` before the resampler.
     private var boostFilter: DialogueBoostFilter?
 
     private var clock: BridgeClock
@@ -253,12 +254,15 @@ final class AudioBridge {
     ///     Throws `dialogueBoostIneligible` for a source whose declared layout
     ///     has no centre to favour, so the caller can skip the rendition
     ///     instead of serving a duplicate of the base track.
+    ///   - processing: night mode and the channel cap
+    ///     (`BridgedAudioProcessing`); the default changes nothing.
     init(
         codecpar: UnsafePointer<AVCodecParameters>,
         timeBase: AVRational,
         globalHeader: Bool,
         dialogueBoost: DialogueBoostLevel? = nil,
-        targetCodec: AVCodecID = AudioBridge.defaultTargetCodec
+        targetCodec: AVCodecID = AudioBridge.defaultTargetCodec,
+        processing: BridgedAudioProcessing = .init()
     ) throws {
         self.sourceTimeBase = timeBase
 
@@ -328,7 +332,23 @@ final class AudioBridge {
                     "\(Self.describe(sourceLayout)) has no centre channel to favour"
                 )
             }
-            boostFilter = DialogueBoostFilter(level: dialogueBoost, timeBase: timeBase)
+        }
+        // Night mode without the filter is skipped, not fatal: a track that
+        // plays uncompressed beats one that does not play.
+        let nightMode = processing.nightMode && DialogueBoostFilter.isNightModeAvailable
+        if processing.nightMode, !nightMode {
+            PrismCoreLog.notice("audio bridge: night mode skipped, this FFmpeg build has no acompressor filter")
+        }
+        if dialogueBoost != nil || nightMode {
+            boostFilter = DialogueBoostFilter(level: dialogueBoost, nightMode: nightMode, timeBase: timeBase)
+        }
+
+        // The cap narrows what the encoder is negotiated for, after the boost
+        // precheck read the real layout: the boost works on decoded frames,
+        // and the resampler folds its output down to the capped layout.
+        if let cap = processing.maxChannels, cap >= 1, Int(sourceLayout.nb_channels) > cap {
+            av_channel_layout_uninit(&sourceLayout)
+            av_channel_layout_default(&sourceLayout, Int32(cap))
         }
 
         var encoderLayout = try Self.negotiateLayout(for: encoder, source: sourceLayout)
@@ -546,7 +566,8 @@ final class AudioBridge {
         guard let decoderCtx, let encoderCtx else { return "audio bridge (closed)" }
         let from = avcodec_get_name(decoderCtx.pointee.codec_id).map { String(cString: $0) } ?? "?"
         let to = avcodec_get_name(encoderCtx.pointee.codec_id).map { String(cString: $0) } ?? "?"
-        let boost = boostFilter.map { " + dialogue boost (\($0.level.rawValue))" } ?? ""
+        let boost = (boostFilter?.level.map { " + dialogue boost (\($0.rawValue))" } ?? "")
+            + (boostFilter?.nightMode == true ? " + night mode" : "")
         return "\(from) \(Self.describe(decoderCtx.pointee.ch_layout))"
             + " → \(to) \(Self.describe(encoderCtx.pointee.ch_layout))"
             + (encoderCtx.pointee.bit_rate > 0 ? " @ \(encoderCtx.pointee.bit_rate / 1000) kbps" : " lossless")
