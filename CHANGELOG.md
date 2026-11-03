@@ -8,6 +8,8 @@ source-compatible.)
 
 ## [Unreleased]
 
+- The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
+
 ## [4.0.1] — 2026-11-03
 
 Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.
