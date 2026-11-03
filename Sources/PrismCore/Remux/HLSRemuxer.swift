@@ -815,14 +815,14 @@ final class HLSRemuxer: @unchecked Sendable {
     ///
     /// Returns `nil` when a `cancel()` ended the open; the context is closed
     /// by then. On success the guard is published as `activeGuard`.
-    private func openSourceContext() throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
+    private func openSourceContext(role: SourceOpenTuning.OpenRole) throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
         let interruptGuard = ReadInterruptGuard()
         var prepared = false
         let input: UnsafeMutablePointer<AVFormatContext>?
         do {
             input = try SourceOpener.open(
                 url: sourceURL, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
-                inputFactory: inputFactory, interruptGuard: interruptGuard,
+                inputFactory: inputFactory, role: role, interruptGuard: interruptGuard,
                 budget: SourceOpenTuning.probeBudget, policy: .remux,
                 prepared: {
                     prepared = true
@@ -861,7 +861,7 @@ final class HLSRemuxer: @unchecked Sendable {
     }
 
     static func streamSignatures(of context: UnsafeMutablePointer<AVFormatContext>) -> [StreamSignature] {
-        (0..<Int(context.pointee.nb_streams)).map { index in
+        trimmingTrailingAttachments((0..<Int(context.pointee.nb_streams)).map { index in
             let stream = context.pointee.streams[index]!.pointee
             return StreamSignature(
                 mediaType: stream.codecpar.pointee.codec_type,
@@ -869,7 +869,19 @@ final class HLSRemuxer: @unchecked Sendable {
                 timeBaseNum: stream.time_base.num,
                 timeBaseDen: stream.time_base.den
             )
-        }
+        })
+    }
+
+    /// Re-opens skip Matroska attachments (`SourceOpenTuning.OpenRole`) while
+    /// the first open may not have, so the attachment streams can be there in
+    /// one context and gone in the other. They carry no packets and the
+    /// demuxer appends them after every track, so dropping them from the tail
+    /// keeps every packet-bearing index where it was; an attachment anywhere
+    /// else still counts, and a source that differs there is still refused.
+    static func trimmingTrailingAttachments(_ signatures: [StreamSignature]) -> [StreamSignature] {
+        var trimmed = signatures
+        while trimmed.last?.mediaType == AVMEDIA_TYPE_ATTACHMENT { trimmed.removeLast() }
+        return trimmed
     }
 
     /// Runs the whole demux → remux loop synchronously; call on a **dedicated
@@ -917,7 +929,11 @@ final class HLSRemuxer: @unchecked Sendable {
             needsRewindToHead = true
             adoptedInfo = probed.info
         } else {
-            guard let opened = try openSourceContext() else { return }
+            // A probe that was handed over but whose context is gone (taken
+            // elsewhere) already read the attachments once.
+            guard let opened = try openSourceContext(
+                role: probed == nil ? .first(skipAttachments: false) : .reopen
+            ) else { return }
             openedInput = opened.context
             interruptGuard = opened.guard
             adoptedInfo = nil
@@ -2242,7 +2258,7 @@ final class HLSRemuxer: @unchecked Sendable {
                 retiredGuard.releaseHostInput()
                 let reopened: (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)
                 do {
-                    guard let opened = try openSourceContext() else { return }
+                    guard let opened = try openSourceContext(role: .reopen) else { return }
                     reopened = opened
                 } catch {
                     failure = error

@@ -216,6 +216,10 @@ public enum FFmpegBuild {
         /// a "playback is slow on interlaced broadcast content" report wants
         /// this line.
         public let gpuDeinterlacer: String?
+        /// Whether the Matroska demuxer has `skip_attachments`, without which
+        /// re-opens and `SourceProbe.open(skipAttachments:)` read embedded
+        /// fonts in full like any first open (the bundled n8.1.2 lacks it).
+        public let skipsMatroskaAttachments: Bool
     }
 
     public static var capabilities: Capabilities {
@@ -226,7 +230,8 @@ public enum FFmpegBuild {
                 .map { String(cString: $0.pointee.name) },
             isAV1HardwareSupported: HardwareDecodeSupport.isAV1Supported,
             hasDialogueBoost: PrismCoreSession.isDialogueBoostAvailable,
-            gpuDeinterlacer: SoftwareVideoDecoder.gpuDeinterlaceName
+            gpuDeinterlacer: SoftwareVideoDecoder.gpuDeinterlaceName,
+            skipsMatroskaAttachments: SourceOpenTuning.matroskaSkipsAttachments
         )
     }
 
@@ -245,6 +250,7 @@ public enum FFmpegBuild {
         )
         lines.append("  dialogue boost: \(capabilities.hasDialogueBoost ? "yes" : "no")")
         lines.append("  gpu deinterlacer: \(capabilities.gpuDeinterlacer ?? "none — CPU route")")
+        lines.append("  mkv attachment skip: \(capabilities.skipsMatroskaAttachments ? "yes" : "no — attachments always read")")
         if !isABIMatched {
             lines.append(
                 "  ⚠︎ ABI mismatch: "

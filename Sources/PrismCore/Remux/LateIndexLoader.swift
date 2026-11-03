@@ -100,7 +100,7 @@ final class LateIndexLoader: @unchecked Sendable {
     /// The sorted keyframe map and the plan's segment count, or `nil` for
     /// anything short of a whole, trusted index of the producer's version.
     private func load() -> ([Int64], Int)? {
-        var options = SourceOpenTuning.makeOptions(httpHeaders: target.httpHeaders)
+        var options = SourceOpenTuning.makeOptions(httpHeaders: target.httpHeaders, role: .reopen)
         defer { av_dict_free(&options) }
         var context = interruptGuard.makeContext()
         guard let allocated = context else { return nil }

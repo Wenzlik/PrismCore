@@ -1,5 +1,6 @@
 import Foundation
 import Libavformat
+import Libavutil
 
 /// How much of a source libavformat may read before it has to answer what is
 /// in it — the setting that decides what "opening a file" costs over a network.
@@ -46,9 +47,16 @@ public enum SourceOpenTuning {
     /// reconnect policy the demux side needs, and the caps above.
     ///
     /// Returns an owned dictionary — the caller frees it with `av_dict_free`.
-    static func makeOptions(httpHeaders: [String: String]) -> OpaquePointer? {
+    static func makeOptions(
+        httpHeaders: [String: String],
+        role: OpenRole = .first(skipAttachments: false),
+        attachmentSkipSupported: Bool = matroskaSkipsAttachments
+    ) -> OpaquePointer? {
         var options: OpaquePointer?
         applyHTTPHeaders(httpHeaders, to: &options)
+        if let skip = attachmentOption(role: role, supported: attachmentSkipSupported) {
+            av_dict_set(&options, skip.key, skip.value, 0)
+        }
         // Reconnect on dropped HTTP connections — the demuxer read side.
         av_dict_set(&options, "reconnect", "1", 0)
         av_dict_set(&options, "reconnect_streamed", "1", 0)
@@ -71,4 +79,58 @@ public enum SourceOpenTuning {
         }
     }
 
+    // MARK: - Matroska attachments
+
+    /// Which open of a source this is — the one thing that decides whether
+    /// its Matroska attachments are worth reading.
+    ///
+    /// Attachments (ASS fonts, mostly; tens of MB on anime releases) sit in
+    /// the header and are read in full before the first packet — measured
+    /// at ~11 s over a WAN link. Nothing in the engine reads them, and a
+    /// source that is already open has had them read once: every side reader
+    /// and re-open after that pays the full cost again for nothing.
+    enum OpenRole: Equatable, Sendable {
+        /// The first open of a source. Reads attachments unless the host
+        /// opted out (`SourceProbe.open(skipAttachments:)`).
+        case first(skipAttachments: Bool)
+        /// A side reader (preview, late index, segment plan) or a re-open of
+        /// a source that was already opened once. Never reads attachments.
+        case reopen
+
+        var skipsAttachments: Bool {
+            switch self {
+            case .first(let skip): skip
+            case .reopen: true
+            }
+        }
+    }
+
+    /// The demuxer option that skips attachments, or `nil` when this role
+    /// keeps them or the linked FFmpeg does not have the option. Pure, so the
+    /// policy is testable on a build that lacks the option.
+    ///
+    /// Never set when unsupported: an unknown key is left in the dictionary
+    /// by `avformat_open_input` and silently ignored, which would be a no-op
+    /// pretending to be a feature.
+    static func attachmentOption(role: OpenRole, supported: Bool) -> (key: String, value: String)? {
+        guard role.skipsAttachments, supported else { return nil }
+        return (attachmentSkipKey, "1")
+    }
+
+    static let attachmentSkipKey = "skip_attachments"
+
+    /// Whether the linked FFmpeg's Matroska demuxer has `skip_attachments`.
+    /// Asked of the demuxer's own option table at runtime, not assumed from a
+    /// version: the bundled build (FFmpeg n8.1.2) does not have it, and the
+    /// day an update does, this turns the skip on with no code change.
+    static let matroskaSkipsAttachments: Bool = {
+        guard let demuxer = av_find_input_format("matroska"),
+              var privClass = demuxer.pointee.priv_class
+        else { return false }
+        // AV_OPT_SEARCH_FAKE_OBJ: search a class (passed as a pointer to its
+        // pointer) without an instance of the demuxer's private context.
+        return withUnsafeMutablePointer(to: &privClass) {
+            av_opt_find($0, attachmentSkipKey, nil, 0, AV_OPT_SEARCH_FAKE_OBJ) != nil
+        }
+    }()
 }
