@@ -63,6 +63,10 @@ let package = Package(
                 .product(name: "MPVKit", package: "MPVKit"),
                 "TrueHDObjects",
             ],
+            // Apple's privacy manifest, so an app linking PrismCore declares
+            // the required-reason APIs it uses (file timestamps: the keyframe
+            // index cache; system uptime: stall and deadline clocks).
+            resources: [.copy("PrivacyInfo.xcprivacy")],
             swiftSettings: [
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.

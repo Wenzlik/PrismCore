@@ -24,9 +24,19 @@ package enum FuzzSeeds {
         "a53-captions": [captionedAccessUnit, xdsAccessUnit],
         "container-layout": [matroskaHead, faststartMP4Head],
         "hdr10plus-sei": [hdr10PlusAccessUnit(annexB: false), hdr10PlusAccessUnit(annexB: true)],
+        "alternative-transfer-sei": [alternativeTransferUnit, [0, 0, 0, 1] + alternativeTransferNAL],
         "truehd-major-sync": [trueHDAtmosUnits],
         "flac-streaminfo": [flacMatroskaPrivate],
     ]
+
+    /// An HEVC prefix SEI whose 147 message (preferred transfer 18, HLG) sits
+    /// behind a user-data-unregistered one, so the loop has to step over a
+    /// message before it reaches the one it wants.
+    package static let alternativeTransferNAL: [UInt8] =
+        [39 << 1, 0x01] + [0x05, 0x02, 0xAA, 0xBB] + [0x93, 0x01, 0x12] + [0x80]
+    /// The same unit, four-byte length-prefixed as MP4/MKV carry it.
+    package static let alternativeTransferUnit: [UInt8] =
+        [0, 0, 0, UInt8(alternativeTransferNAL.count)] + alternativeTransferNAL
 
     /// Matroska's FLAC CodecPrivate: `fLaC`, a last-block STREAMINFO header,
     /// and a STREAMINFO declaring 128-sample blocks (the refused kind).
