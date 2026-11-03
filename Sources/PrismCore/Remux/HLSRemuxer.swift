@@ -57,6 +57,7 @@ import Libavutil
 /// - A Dolby Vision Profile 7 source has its RPUs converted to 8.1 with the
 ///   enhancement layer dropped (`DolbyVisionRPUConverter`), so a dual-layer file
 ///   Apple can't decode arrives as a single-layer one it can.
+// Safety: the FFmpeg contexts and writers are confined to the producer thread; every field another thread reads or sets (audio delay, guards, plan, stats, renditions, ...) has its own lock next to it.
 final class HLSRemuxer: @unchecked Sendable {
     let residentSegments = ResidentSegmentStore()
     let audioDeliveryStore = AudioDeliveryStore()

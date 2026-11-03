@@ -5,6 +5,7 @@ import Libavutil
 /// Keeps the demuxer's text look-ahead separate from the host's presentation
 /// clock. All tracks are cheap to convert, and retaining them lets a paused
 /// language switch show the current cue without rewinding either A/V decoder.
+// Safety: cues and byteCount are read and written only under `lock`; the limits are immutable.
 final class SoftwareSubtitleCueStore: @unchecked Sendable {
     private let lock = NSLock()
     private var cues: [TimedTextCue] = []

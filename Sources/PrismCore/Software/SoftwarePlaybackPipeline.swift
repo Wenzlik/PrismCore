@@ -62,6 +62,7 @@ import Libavutil
 /// `.ended` fires from a synchronizer
 /// boundary at the last presentation end — when the speaker has finished the
 /// last buffer, not when it was enqueued.
+// Safety: decode and renderer feeding run on `feedQueue`; state the host thread also touches is behind `stateLock` / `seekLock`.
 public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     // MARK: - Public surface

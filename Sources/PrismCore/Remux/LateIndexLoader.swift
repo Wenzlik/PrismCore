@@ -38,6 +38,7 @@ import Libavutil
 /// the analysis reads of `avformat_find_stream_info`, and it nudges only a
 /// container whose framing names its index — anywhere else the nudge is a
 /// scan of the whole file.
+// Safety: all stored state is immutable and Sendable except `thread`, which only the owner sets in `start()` and reads afterwards.
 final class LateIndexLoader: @unchecked Sendable {
 
     /// The whole job's wall-clock bound — open, header and the index nudge.
