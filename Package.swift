@@ -67,25 +67,18 @@ let package = Package(
             // the required-reason APIs it uses (file timestamps: the keyframe
             // index cache; system uptime: stall and deadline clocks).
             resources: [.copy("PrivacyInfo.xcprivacy")],
-            swiftSettings: [
-                // v0 pragmatism for the C interop layer; the goal is .v6 once
-                // the remux session's ownership story has settled.
-                .swiftLanguageMode(.v5),
-            ]
+            // Swift 6 language mode (the tools-version default) for every
+            // target: complete strict concurrency checking as errors. What the
+            // checker cannot see — C pointers confined to a lock or a serial
+            // queue — is `@unchecked Sendable` with a `// Safety:` note.
         ),
         .executableTarget(
             name: "prismcore-fuzz",
-            dependencies: ["PrismCore"],
-            swiftSettings: [
-                .swiftLanguageMode(.v5),
-            ]
+            dependencies: ["PrismCore"]
         ),
         .executableTarget(
             name: "prismcore-cli",
-            dependencies: ["PrismCore"],
-            swiftSettings: [
-                .swiftLanguageMode(.v5),
-            ]
+            dependencies: ["PrismCore"]
         ),
         .testTarget(
             name: "PrismCoreTests",

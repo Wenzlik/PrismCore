@@ -1907,7 +1907,7 @@ final class HLSRemuxer: @unchecked Sendable {
             let directories = [outputDirectory] + renditions.map {
                 outputDirectory.appendingPathComponent($0.directoryName)
             }
-            unlinkQueue.async { [residentSegments] in
+            unlinkQueue.async { [residentSegments, victims] in
                 for victim in victims {
                     residentSegments.unlinkRetired(index: victim, directories: directories)
                 }

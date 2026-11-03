@@ -18,7 +18,7 @@ protocol SampleBufferSink: AnyObject {
     /// Ask to be called back whenever the renderer wants data. Each sink pulls
     /// on its own schedule — that independence is what keeps audio fed while
     /// video is full (see `SoftwarePlaybackPipeline`).
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void)
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void)
     func stopRequestingSamples()
     /// The AVFoundation object a `AVSampleBufferRenderSynchronizer` has to be
     /// given so this sink's control timebase is driven by the master clock.
@@ -31,13 +31,13 @@ protocol SampleBufferSink: AnyObject {
     /// flushing and re-priming; without the observation a renderer that lost
     /// its decode session in the background stays black for the rest of the
     /// film, with `isReadyForMoreMediaData` cheerfully true.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void)
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void)
     func stopObservingFailure()
 }
 
 extension SampleBufferSink {
     var queuedRenderer: AVQueuedSampleBufferRendering? { nil }
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) { }
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) { }
     func stopObservingFailure() { }
 }
 
@@ -84,6 +84,14 @@ protocol RenderTimeline: AnyObject {
 /// for everything, because the synchronizer must be given the same object the
 /// samples go to — attaching the layer while enqueuing to its
 /// `sampleBufferRenderer` leaves the samples on a timebase nothing drives.
+///
+/// Current SDKs mark `AVSampleBufferDisplayLayer` main-actor isolated (it is a
+/// `CALayer`), but this sink is built and driven from the pipeline's queues,
+/// as it always was: the renderer is documented safe off the main thread, and
+/// the layer's own queue-management calls are what iOS 16 had instead. So the
+/// layer is only ever reached through its non-isolated faces — the
+/// `AVQueuedSampleBufferRendering` protocol, `NSObject` KVC/KVO and selectors
+/// — never through an isolated Swift member, which would be an error here.
 final class DisplayLayerVideoSink: VideoSampleSink {
 
     let layer: AVSampleBufferDisplayLayer
@@ -99,18 +107,21 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     init(layer: AVSampleBufferDisplayLayer = AVSampleBufferDisplayLayer()) {
         self.layer = layer
         if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *) {
-            let videoRenderer = layer.sampleBufferRenderer
+            // KVC, not `layer.sampleBufferRenderer`: see the type's note.
+            let videoRenderer = (layer as NSObject).value(forKey: "sampleBufferRenderer")
+                as! AVSampleBufferVideoRenderer
             self.renderer = videoRenderer
             self.flushHandler = { removingDisplayedImage in
                 videoRenderer.flush(removingDisplayedImage: removingDisplayedImage) { }
             }
         } else {
-            self.renderer = layer
+            let queued: AVQueuedSampleBufferRendering = layer
+            self.renderer = queued
             self.flushHandler = { removingDisplayedImage in
                 if removingDisplayedImage {
-                    layer.flushAndRemoveImage()
+                    _ = (layer as NSObject).perform(#selector(AVSampleBufferDisplayLayer.flushAndRemoveImage))
                 } else {
-                    layer.flush()
+                    queued.flush()
                 }
             }
         }
@@ -119,13 +130,13 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     var isReadyForMoreSamples: Bool { renderer.isReadyForMoreMediaData }
     var queuedRenderer: AVQueuedSampleBufferRendering? { renderer }
 
-    private var observations: [NSKeyValueObservation] = []
+    private var observations: [KeyObservation] = []
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
     }
 
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void) {
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void) {
         renderer.requestMediaDataWhenReady(on: queue, using: block)
     }
 
@@ -145,14 +156,14 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     /// again until flushed — the classic "came back to a black player". Both
     /// observed on the LAYER, which reflects its renderer's state on every OS
     /// the package supports, so the availability split above stays in `init`.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         stopObservingFailure()
-        let statusObservation = layer.observe(\.status, options: [.new]) { layer, _ in
-            guard layer.status == .failed else { return }
+        let statusObservation = KeyObservation(layer, keyPath: "status") { new in
+            guard (new as? Int) == AVQueuedSampleBufferRenderingStatus.failed.rawValue else { return }
             queue.async(execute: handler)
         }
-        let flushObservation = layer.observe(\.requiresFlushToResumeDecoding, options: [.new]) { layer, _ in
-            guard layer.requiresFlushToResumeDecoding else { return }
+        let flushObservation = KeyObservation(layer, keyPath: "requiresFlushToResumeDecoding") { new in
+            guard (new as? Bool) == true else { return }
             queue.async(execute: handler)
         }
         observations = [statusObservation, flushObservation]
@@ -162,6 +173,40 @@ final class DisplayLayerVideoSink: VideoSampleSink {
         observations.forEach { $0.invalidate() }
         observations.removeAll()
     }
+}
+
+/// KVO by key string, delivering the `.new` value. A Swift key path to a
+/// main-actor-isolated property cannot be formed off the main actor, while
+/// the observation itself is thread-agnostic (see `DisplayLayerVideoSink`).
+/// Invalidated on deinit, like `NSKeyValueObservation`.
+private final class KeyObservation: NSObject {
+    private let target: NSObject
+    private let keyPath: String
+    private let changed: (Any?) -> Void
+    private var active = true
+
+    init(_ target: NSObject, keyPath: String, changed: @escaping (Any?) -> Void) {
+        self.target = target
+        self.keyPath = keyPath
+        self.changed = changed
+        super.init()
+        target.addObserver(self, forKeyPath: keyPath, options: [.new], context: nil)
+    }
+
+    override func observeValue(
+        forKeyPath keyPath: String?, of object: Any?,
+        change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?
+    ) {
+        changed(change?[.newKey])
+    }
+
+    func invalidate() {
+        guard active else { return }
+        active = false
+        target.removeObserver(self, forKeyPath: keyPath)
+    }
+
+    deinit { invalidate() }
 }
 
 /// `AVSampleBufferAudioRenderer` behind `AudioSampleSink`.
@@ -182,7 +227,7 @@ final class AudioRendererSink: AudioSampleSink {
         renderer.enqueue(sampleBuffer)
     }
 
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void) {
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void) {
         renderer.requestMediaDataWhenReady(on: queue, using: block)
     }
 
@@ -197,7 +242,7 @@ final class AudioRendererSink: AudioSampleSink {
     /// The audio renderer's only failure signal is `status == .failed` (a
     /// route it could not follow, a format it stopped accepting); `error`
     /// carries the reason. Same remedy as video: flush and re-feed.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         stopObservingFailure()
         statusObservation = renderer.observe(\.status, options: [.new]) { renderer, _ in
             guard renderer.status == .failed else { return }

@@ -245,7 +245,7 @@ private final class FirstOutcome<T>: @unchecked Sendable {
         if decided { action() }
     }
 
-    func resolve(_ result: Result<T, any Error>) {
+    func resolve(_ result: sending Result<T, any Error>) {
         let (continuation, cleanup) = lock.withLock { () -> (CheckedContinuation<T, any Error>?, (() -> Void)?) in
             defer { self.continuation = nil; self.cleanup = nil }
             return (self.continuation, self.cleanup)

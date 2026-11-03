@@ -66,9 +66,19 @@ public actor SeekPreviewService {
     /// session's, or the two derive different keys and the map is not shared.
     private let cacheIdentity: SourceCacheIdentity?
 
-    private var input: UnsafeMutablePointer<AVFormatContext>?
+    /// The C state this actor owns, in a holder whose own deinit frees it:
+    /// an actor's deinit is nonisolated and Swift 6 forbids it touching
+    /// non-Sendable stored properties, so the release rides on the holder's.
+    private let owned = OwnedDemuxer()
+    private var input: UnsafeMutablePointer<AVFormatContext>? {
+        get { owned.input }
+        set { owned.input = newValue }
+    }
     private var interruptGuard: ReadInterruptGuard?
-    private var decoder: ThumbnailDecoder?
+    private var decoder: ThumbnailDecoder? {
+        get { owned.decoder }
+        set { owned.decoder = newValue }
+    }
     private var videoStreamIndex: Int32 = -1
     private var timeBase = AVRational(num: 1, den: 1)
     private var durationSeconds: Double = 0
@@ -116,13 +126,6 @@ public actor SeekPreviewService {
         self.maxDimension = max(32, maxDimension)
         self.keyframeCacheDirectory = keyframeIndexCacheDirectory
         self.cacheIdentity = keyframeIndexCacheIdentity
-    }
-
-    deinit {
-        // The context is owned here and deinit cannot hop to the actor; by
-        // the time deinit runs nothing else can touch these fields.
-        decoder?.close()
-        if input != nil { avformat_close_input(&input) }
     }
 
     /// Tear the demuxer and decoder down now. Idempotent; later requests
@@ -363,6 +366,19 @@ public actor SeekPreviewService {
 /// The service's decode stage: libavcodec on the CPU, straight through
 /// `sws_scale` into an RGB `CGImage` at thumbnail size. One type so the codec
 /// context, the scaler and their lifetimes live together.
+/// The demuxer and decoder a `SeekPreviewService` owns. Only ever touched
+/// from the actor's isolation; its deinit runs when the actor's does, when
+/// nothing else can reach it.
+private final class OwnedDemuxer {
+    var input: UnsafeMutablePointer<AVFormatContext>?
+    var decoder: ThumbnailDecoder?
+
+    deinit {
+        decoder?.close()
+        if input != nil { avformat_close_input(&input) }
+    }
+}
+
 private final class ThumbnailDecoder {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
