@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import os
 
 /// The seam between "decode" and "render".
 ///
@@ -179,11 +180,19 @@ final class DisplayLayerVideoSink: VideoSampleSink {
 /// main-actor-isolated property cannot be formed off the main actor, while
 /// the observation itself is thread-agnostic (see `DisplayLayerVideoSink`).
 /// Invalidated on deinit, like `NSKeyValueObservation`.
+///
+/// Notifications arrive on whichever thread changed the property (renderer,
+/// main) while `invalidate()` comes from the pipeline's feed queue. `active`
+/// sits behind a lock that `changed` also runs under, so once `invalidate()`
+/// returns no callback is in flight or can still start — without it a
+/// teardown racing a background-time status change fires the handler for a
+/// pipeline that is already gone. `changed` only hops to a queue, so holding
+/// the lock across it costs nothing and cannot re-enter.
 private final class KeyObservation: NSObject {
     private let target: NSObject
     private let keyPath: String
     private let changed: (Any?) -> Void
-    private var active = true
+    private let active = OSAllocatedUnfairLock(initialState: true)
 
     init(_ target: NSObject, keyPath: String, changed: @escaping (Any?) -> Void) {
         self.target = target
@@ -197,13 +206,20 @@ private final class KeyObservation: NSObject {
         forKeyPath keyPath: String?, of object: Any?,
         change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?
     ) {
-        changed(change?[.newKey])
+        let new = change?[.newKey]
+        active.withLockUnchecked { active in
+            if active { changed(new) }
+        }
     }
 
     func invalidate() {
-        guard active else { return }
-        active = false
-        target.removeObserver(self, forKeyPath: keyPath)
+        let wasActive = active.withLock { active in
+            defer { active = false }
+            return active
+        }
+        // Outside the lock: removal may wait on a notification in flight,
+        // which itself needs the lock to finish.
+        if wasActive { target.removeObserver(self, forKeyPath: keyPath) }
     }
 
     deinit { invalidate() }
