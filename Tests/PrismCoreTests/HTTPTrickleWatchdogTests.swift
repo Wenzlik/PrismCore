@@ -17,11 +17,16 @@ struct HTTPTrickleWatchdogTests {
         var watchdog = TrickleWatchdog(thresholds: Self.standard)
         watchdog.readBlocked(at: 0)
         watchdog.delivered(256 << 10, at: 1)
-        #expect(!watchdog.judge(at: 14.5))
-        #expect(watchdog.judge(at: 15))
+        // `judge` is mutating, and `#expect` evaluates its argument in an
+        // immutable closure capture — so each verdict is taken outside it.
+        let early = watchdog.judge(at: 14.5)
+        #expect(!early)
+        let due = watchdog.judge(at: 15)
+        #expect(due)
         // The reconnect starts with a clean slate, not with the old verdict.
         watchdog.readBlocked(at: 15.5)
-        #expect(!watchdog.judge(at: 16))
+        let afterReconnect = watchdog.judge(at: 16)
+        #expect(!afterReconnect)
     }
 
     /// Starvation is the sum over many short blocked reads, each fed in
@@ -48,7 +53,8 @@ struct HTTPTrickleWatchdogTests {
             let start = Double(read) * 0.625
             watchdog.readBlocked(at: start)
             for chunk in 0..<160 { watchdog.delivered(512, at: start + 0.002 * Double(chunk + 1)) }
-            #expect(!watchdog.judge(at: start + 0.5))
+            let verdict = watchdog.judge(at: start + 0.5)
+            #expect(!verdict)
             watchdog.readUnblocked(at: start + 0.5)
         }
     }
@@ -59,7 +65,8 @@ struct HTTPTrickleWatchdogTests {
         watchdog.readBlocked(at: 0)
         for second in 1...60 {
             if second % 5 == 0 { watchdog.delivered(1 << 20, at: Double(second)) }
-            #expect(!watchdog.judge(at: Double(second)))
+            let verdict = watchdog.judge(at: Double(second))
+            #expect(!verdict)
         }
     }
 
@@ -70,9 +77,11 @@ struct HTTPTrickleWatchdogTests {
         var watchdog = TrickleWatchdog(thresholds: Self.standard)
         watchdog.readBlocked(at: 0)
         watchdog.readUnblocked(at: 14)
-        #expect(!watchdog.judge(at: 100), "no read is pending")
+        let parked = watchdog.judge(at: 100)
+        #expect(!parked, "no read is pending")
         watchdog.readBlocked(at: 114)
-        #expect(!watchdog.judge(at: 115), "the pre-pause starvation left the window")
+        let resumed = watchdog.judge(at: 115)
+        #expect(!resumed, "the pre-pause starvation left the window")
     }
 
     /// End to end: the first connection drips, the reader ends it on volume,
