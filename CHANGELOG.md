@@ -8,6 +8,8 @@ source-compatible.)
 
 ## [Unreleased]
 
+- Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. A no-op until the linked FFmpeg has `skip_attachments` (the bundled n8.1.2 does not) — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
+
 ## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any
