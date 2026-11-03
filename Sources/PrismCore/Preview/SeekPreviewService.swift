@@ -74,7 +74,10 @@ public actor SeekPreviewService {
         get { owned.input }
         set { owned.input = newValue }
     }
-    private var interruptGuard: ReadInterruptGuard?
+    private var interruptGuard: ReadInterruptGuard? {
+        get { owned.interruptGuard }
+        set { owned.interruptGuard = newValue }
+    }
     private var decoder: ThumbnailDecoder? {
         get { owned.decoder }
         set { owned.decoder = newValue }
@@ -363,21 +366,29 @@ public actor SeekPreviewService {
     }
 }
 
-/// The service's decode stage: libavcodec on the CPU, straight through
-/// `sws_scale` into an RGB `CGImage` at thumbnail size. One type so the codec
-/// context, the scaler and their lifetimes live together.
 /// The demuxer and decoder a `SeekPreviewService` owns. Only ever touched
 /// from the actor's isolation; its deinit runs when the actor's does, when
 /// nothing else can reach it.
 private final class OwnedDemuxer {
     var input: UnsafeMutablePointer<AVFormatContext>?
     var decoder: ThumbnailDecoder?
+    /// Held here, not on the actor: the context's interrupt callback and avio
+    /// adaptors point at it unretained, so it must outlive
+    /// `avformat_close_input`. Stored-property teardown order is not ours to
+    /// pick, so the guard is released explicitly after the close below —
+    /// otherwise a service dropped without `close()` reads freed memory.
+    var interruptGuard: ReadInterruptGuard?
 
     deinit {
         decoder?.close()
         if input != nil { avformat_close_input(&input) }
+        interruptGuard = nil
     }
 }
+
+/// The service's decode stage: libavcodec on the CPU, straight through
+/// `sws_scale` into an RGB `CGImage` at thumbnail size. One type so the codec
+/// context, the scaler and their lifetimes live together.
 
 private final class ThumbnailDecoder {
 
