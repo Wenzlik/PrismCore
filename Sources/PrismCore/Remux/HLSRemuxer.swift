@@ -858,6 +858,11 @@ final class HLSRemuxer: @unchecked Sendable {
         let codecID: AVCodecID
         let timeBaseNum: Int32
         let timeBaseDen: Int32
+        /// A Matroska attachment: a font is `AVMEDIA_TYPE_ATTACHMENT`, but an
+        /// image becomes a `VIDEO` stream flagged `AV_DISPOSITION_ATTACHED_PIC`.
+        /// Both vanish under `skip_attachments`, so both must be trimmable or
+        /// an MKV with cover art fails every recovery on a build that skips.
+        var isAttachment = false
     }
 
     static func streamSignatures(of context: UnsafeMutablePointer<AVFormatContext>) -> [StreamSignature] {
@@ -867,20 +872,23 @@ final class HLSRemuxer: @unchecked Sendable {
                 mediaType: stream.codecpar.pointee.codec_type,
                 codecID: stream.codecpar.pointee.codec_id,
                 timeBaseNum: stream.time_base.num,
-                timeBaseDen: stream.time_base.den
+                timeBaseDen: stream.time_base.den,
+                isAttachment: stream.codecpar.pointee.codec_type == AVMEDIA_TYPE_ATTACHMENT
+                    || stream.disposition & AV_DISPOSITION_ATTACHED_PIC != 0
             )
         })
     }
 
     /// Re-opens skip Matroska attachments (`SourceOpenTuning.OpenRole`) while
-    /// the first open may not have, so the attachment streams can be there in
+    /// the first open may not have, so the attachment streams (fonts and
+    /// attached pictures, see `StreamSignature.isAttachment`) can be there in
     /// one context and gone in the other. They carry no packets and the
     /// demuxer appends them after every track, so dropping them from the tail
     /// keeps every packet-bearing index where it was; an attachment anywhere
     /// else still counts, and a source that differs there is still refused.
     static func trimmingTrailingAttachments(_ signatures: [StreamSignature]) -> [StreamSignature] {
         var trimmed = signatures
-        while trimmed.last?.mediaType == AVMEDIA_TYPE_ATTACHMENT { trimmed.removeLast() }
+        while trimmed.last?.isAttachment == true { trimmed.removeLast() }
         return trimmed
     }
 

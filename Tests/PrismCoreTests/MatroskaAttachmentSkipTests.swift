@@ -57,7 +57,8 @@ struct MatroskaAttachmentSkipTests {
     /// streams: trailing attachment streams are ignored, others are not.
     @Test func streamSignaturesIgnoreOnlyTrailingAttachments() {
         func signature(_ type: AVMediaType) -> HLSRemuxer.StreamSignature {
-            .init(mediaType: type, codecID: AV_CODEC_ID_NONE, timeBaseNum: 1, timeBaseDen: 1000)
+            .init(mediaType: type, codecID: AV_CODEC_ID_NONE, timeBaseNum: 1, timeBaseDen: 1000,
+                  isAttachment: type == AVMEDIA_TYPE_ATTACHMENT)
         }
         let tracks = [signature(AVMEDIA_TYPE_VIDEO), signature(AVMEDIA_TYPE_AUDIO), signature(AVMEDIA_TYPE_SUBTITLE)]
         let withFonts = tracks + [signature(AVMEDIA_TYPE_ATTACHMENT), signature(AVMEDIA_TYPE_ATTACHMENT)]
@@ -66,6 +67,24 @@ struct MatroskaAttachmentSkipTests {
 
         let interleaved = [signature(AVMEDIA_TYPE_VIDEO), signature(AVMEDIA_TYPE_ATTACHMENT), signature(AVMEDIA_TYPE_AUDIO)]
         #expect(HLSRemuxer.trimmingTrailingAttachments(interleaved) == interleaved)
+    }
+
+    /// Matroska turns an image attachment into a VIDEO stream with
+    /// `AV_DISPOSITION_ATTACHED_PIC`; it vanishes under `skip_attachments`
+    /// like a font does, so a re-open without it must still match.
+    @Test func streamSignaturesIgnoreTrailingAttachedPictures() {
+        func signature(_ type: AVMediaType, attachment: Bool = false) -> HLSRemuxer.StreamSignature {
+            .init(mediaType: type, codecID: AV_CODEC_ID_NONE, timeBaseNum: 1, timeBaseDen: 1000, isAttachment: attachment)
+        }
+        let tracks = [signature(AVMEDIA_TYPE_VIDEO), signature(AVMEDIA_TYPE_AUDIO)]
+        let cover = signature(AVMEDIA_TYPE_VIDEO, attachment: true)
+        let font = signature(AVMEDIA_TYPE_ATTACHMENT, attachment: true)
+        #expect(HLSRemuxer.trimmingTrailingAttachments(tracks + [cover]) == tracks)
+        #expect(HLSRemuxer.trimmingTrailingAttachments(tracks + [font, cover, font]) == tracks)
+
+        // A real video track after an attached picture keeps everything.
+        let coverFirst = [signature(AVMEDIA_TYPE_AUDIO), cover, signature(AVMEDIA_TYPE_VIDEO)]
+        #expect(HLSRemuxer.trimmingTrailingAttachments(coverFirst) == coverFirst)
     }
 
     /// Opting in on this build must be invisible: same streams, same packets.
