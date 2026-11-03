@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Libavcodec
 import Libavutil
 
@@ -123,29 +124,31 @@ public struct TimestampRepairStats: Sendable, Equatable {
 /// rebuilt on each re-anchor (and each rendition has its own), so the counts
 /// have to outlive them; the lock is because the host reads from wherever it
 /// likes while the producer thread writes, and it is only taken on a repair.
-final class TimestampRepairLedger: @unchecked Sendable {
-    private let lock = NSLock()
-    private var missingDTSFilled = 0
-    private var nonMonotonicDTSBumped = 0
-    private var ptsRaisedToDTS = 0
+final class TimestampRepairLedger: Sendable {
+    private struct Counts {
+        var missingDTSFilled = 0
+        var nonMonotonicDTSBumped = 0
+        var ptsRaisedToDTS = 0
+    }
+    private let counts = OSAllocatedUnfairLock(initialState: Counts())
 
     func record(_ repairs: TimestampSanitizer.Repairs) {
-        lock.withLock {
-            if repairs.contains(.missingDTSFilled) { missingDTSFilled += 1 }
-            if repairs.contains(.nonMonotonicDTSBumped) { nonMonotonicDTSBumped += 1 }
-            if repairs.contains(.ptsRaisedToDTS) { ptsRaisedToDTS += 1 }
+        counts.withLock { c in
+            if repairs.contains(.missingDTSFilled) { c.missingDTSFilled += 1 }
+            if repairs.contains(.nonMonotonicDTSBumped) { c.nonMonotonicDTSBumped += 1 }
+            if repairs.contains(.ptsRaisedToDTS) { c.ptsRaisedToDTS += 1 }
         }
     }
 
     /// `nil` until something was repaired, so a clean source reads as "nothing
     /// to report" rather than a row of zeros a host has to inspect.
     var stats: TimestampRepairStats? {
-        lock.withLock {
-            guard missingDTSFilled + nonMonotonicDTSBumped + ptsRaisedToDTS > 0 else { return nil }
+        counts.withLock { c in
+            guard c.missingDTSFilled + c.nonMonotonicDTSBumped + c.ptsRaisedToDTS > 0 else { return nil }
             return TimestampRepairStats(
-                missingDTSFilled: missingDTSFilled,
-                nonMonotonicDTSBumped: nonMonotonicDTSBumped,
-                ptsRaisedToDTS: ptsRaisedToDTS
+                missingDTSFilled: c.missingDTSFilled,
+                nonMonotonicDTSBumped: c.nonMonotonicDTSBumped,
+                ptsRaisedToDTS: c.ptsRaisedToDTS
             )
         }
     }

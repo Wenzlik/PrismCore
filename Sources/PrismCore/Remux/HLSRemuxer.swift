@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Libavformat
 import Libavcodec
 import Libavutil
@@ -3538,15 +3539,14 @@ private struct SourceReadFailure: Error {
 
 /// Tiny lock-protected flag — the cancel signal crossing from the session
 /// actor into the synchronous copy loop.
-final class LockedFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
+final class LockedFlag: Sendable {
+    private let value = OSAllocatedUnfairLock(initialState: false)
 
     var isSet: Bool {
-        lock.withLock { value }
+        value.withLock { $0 }
     }
 
     func set() {
-        lock.withLock { value = true }
+        value.withLock { $0 = true }
     }
 }
