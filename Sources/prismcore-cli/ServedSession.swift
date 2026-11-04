@@ -126,6 +126,7 @@ func probeAndRoute(
 /// stdin at EOF is deliberately *not* a stop: `serve` run from a script or
 /// with `< /dev/null` would otherwise tear the session down the instant it
 /// came up.
+// Safety: `waiters` and `firedReason` are guarded by `lock`; `sources` is filled in init, before the object is shared.
 final class StopSignal: @unchecked Sendable {
     private let lock = NSLock()
     private var waiters: [UUID: CheckedContinuation<String?, Never>] = [:]
@@ -228,6 +229,7 @@ func untilStopped<T: Sendable>(
 
 /// A continuation resumed by the first of several racers; the rest are
 /// ignored.
+// Safety: the continuation and cleanup are taken out under `lock` exactly once; `T` crosses via `sending`.
 private final class FirstOutcome<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T, any Error>?
@@ -245,7 +247,7 @@ private final class FirstOutcome<T>: @unchecked Sendable {
         if decided { action() }
     }
 
-    func resolve(_ result: Result<T, any Error>) {
+    func resolve(_ result: sending Result<T, any Error>) {
         let (continuation, cleanup) = lock.withLock { () -> (CheckedContinuation<T, any Error>?, (() -> Void)?) in
             defer { self.continuation = nil; self.cleanup = nil }
             return (self.continuation, self.cleanup)

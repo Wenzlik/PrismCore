@@ -21,6 +21,7 @@ struct StartupCostBenchmark {
 
     /// First-sighting timestamps, shared between the polling task and the
     /// test body.
+    // Safety: mutable state is read and written only under `lock`.
     private final class Marks: @unchecked Sendable {
         private let lock = NSLock()
         private var masterMs: Int?

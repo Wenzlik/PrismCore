@@ -590,6 +590,7 @@ struct TrickleWatchdog {
     }
 }
 
+// Safety: the delegate fields are written on URLSession's delegate queue and read by the fetching thread only after `completed` is signalled; the one value polled mid-flight (`receivedCount`) sits behind `receivedLock`.
 final class RangeResponse: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     /// How long a request may go without a byte before it is ended — the
     /// time half of the delivery watchdog, enforced by URLSession.

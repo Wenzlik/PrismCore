@@ -20,6 +20,7 @@ import Libavutil
 /// by `SourceProbe` as host-only so a host that wants pixel-accurate rendering
 /// can still draw them itself; on a platform without Vision they are host-only
 /// in practice as well.
+// Safety: the per-packet writers run on the producer thread; everything the host side reads or sets (tracks, cue handler, history, OCR requests) is guarded by `lock`.
 final class SubtitleRenditionSet: @unchecked Sendable {
 
     /// Text subtitle codecs whose packets convert to WebVTT cues.

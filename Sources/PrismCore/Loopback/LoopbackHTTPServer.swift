@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Network
 
 /// A minimal HTTP/1.1 server bound to `127.0.0.1` on an ephemeral port — the
@@ -1002,12 +1003,11 @@ func withTimeout<T: Sendable>(
 /// Runs its block at most once, under a lock — the resume-once guard for
 /// continuation-bridged callbacks (the `ASWebAuthenticationSession.cancel()`
 /// lesson: never trust a callback to fire exactly once).
-final class ResumeOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
+final class ResumeOnce: Sendable {
+    private let done = OSAllocatedUnfairLock(initialState: false)
 
     func run(_ block: () -> Void) {
-        let shouldRun: Bool = lock.withLock {
+        let shouldRun: Bool = done.withLock { done in
             guard !done else { return false }
             done = true
             return true

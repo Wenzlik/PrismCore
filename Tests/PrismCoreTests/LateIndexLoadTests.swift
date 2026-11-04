@@ -365,6 +365,7 @@ struct LateIndexLoadTests {
 /// segment 1's landing until `release()`: a remuxer with a short (or zero)
 /// index budget over the coordinated reader, its events and plan origin
 /// recorded.
+// Safety: the hold state is guarded by `lock`; `thread` is set once by the test before anything else can read it.
 private final class HeldPlay: @unchecked Sendable {
     let remuxer: HLSRemuxer
     private(set) var thread: ProducerThread!
@@ -423,6 +424,7 @@ private final class HeldPlay: @unchecked Sendable {
     }
 }
 
+// Safety: mutable state is read and written only under `lock`.
 private final class LockedValue: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: String

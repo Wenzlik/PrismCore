@@ -8,6 +8,10 @@ source-compatible.)
 
 ## [Unreleased]
 
+- The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
+- `SoftwarePlaybackPipeline.routeDescription` is safe to read from any thread while tracks switch or the pipeline stops.
+- `SoftwarePlaybackPipeline.failureError` is safe to read from any thread, even if a later error replaces it.
+
 ## [4.0.1] — 2026-11-03
 
 Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.

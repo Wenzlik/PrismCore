@@ -6,6 +6,7 @@ import os
 /// A host input that parks its read once `parkAfterBytes` have been handed
 /// over — a share or debrid link that stopped feeding mid-film without
 /// failing. Conforming, so `stop()` can release it and join the producer.
+// Safety: mutable state is touched only while holding `lock` (an NSCondition); the bytes and thresholds are immutable.
 private final class ParkingInput: CancellablePrismCoreInput, @unchecked Sendable {
     private let bytes: [UInt8]
     private let parkAfterBytes: Int
