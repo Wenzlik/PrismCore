@@ -184,6 +184,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         stateLock.withLock { storedRouteDescription = description }
     }
 
+    /// After any video decode — packet or EOF drain — since a VideoToolbox
+    /// failure in either falls back to the CPU route; skipping the drain
+    /// left `routeDescription` reporting VideoToolbox after the switch.
+    private func publishRouteDescriptionIfChanged() {
+        if videoDecoder?.route != publishedVideoRoute { publishRouteDescription() }
+    }
+
     /// The probe's description of the loaded source — the same facts
     /// `SourceProbe` reports for routing (tracks with language/title/channels,
     /// chapters, subtitle streams), read off this pipeline's own context at
@@ -707,6 +714,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             if videoCapped || audioCapped { return }
             if reachedEOF, let videoDecoder {
                 videoTailPending = try videoDecoder.receiveOneAtEOF(emit: acceptVideo)
+                publishRouteDescriptionIfChanged()
             } else {
                 try readAndDecodeOnePacket()
             }
@@ -1130,6 +1138,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 if reachedEOF {
                     if videoTailPending, !videoCapped, let videoDecoder {
                         videoTailPending = try videoDecoder.receiveOneAtEOF(emit: acceptVideo)
+                        publishRouteDescriptionIfChanged()
                         continue
                     }
                     if !videoTailPending, pendingVideo.isEmpty, pendingAudio.isEmpty {
@@ -1361,7 +1370,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         switch Int32(packet.pointee.stream_index) {
         case videoStreamIndex:
             try videoDecoder?.decode(packet, emit: acceptVideo)
-            if videoDecoder?.route != publishedVideoRoute { publishRouteDescription() }
+            publishRouteDescriptionIfChanged()
         case audioStreamIndex:
             try audioDecoder?.decode(packet, emit: acceptAudio)
         default:
@@ -1446,12 +1455,16 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         videoSink.stopRequestingSamples()
         audioSink.stopRequestingSamples()
         timeline.setRate(0, time: timeline.currentTime)
-        failureError = error
+        stateLock.withLock { storedFailureError = error }
         setState(.failed)
     }
 
     /// The terminal error, if any. Polled by a host that saw `.failed`.
-    public private(set) var failureError: (any Error)?
+    /// Behind `stateLock`: `fail` is not necessarily the last write — a
+    /// memory-pressure `.normal` re-pumps a failed pipeline, and a second
+    /// read error would overwrite the error while the host is reading it.
+    public var failureError: (any Error)? { stateLock.withLock { storedFailureError } }
+    private var storedFailureError: (any Error)?
 
     // MARK: - Teardown
 
