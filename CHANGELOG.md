@@ -10,6 +10,7 @@ source-compatible.)
 
 - The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
 - `SoftwarePlaybackPipeline.routeDescription` is safe to read from any thread while tracks switch or the pipeline stops.
+- `SoftwarePlaybackPipeline.failureError` is safe to read from any thread, even if a later error replaces it.
 
 ## [4.0.1] — 2026-11-03
 
