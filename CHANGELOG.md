@@ -8,6 +8,8 @@ source-compatible.)
 
 ## [Unreleased]
 
+- `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
+
 ## [4.0.1] — 2026-11-03
 
 Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.
