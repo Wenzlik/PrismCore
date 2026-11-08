@@ -211,13 +211,15 @@ public enum DisplayCriteriaLogic {
     /// earlier switch's end as its own: a redundant re-`apply` resetting it
     /// before the wait ran; a second concurrent wait finding it consumed by
     /// the first; a wait cancelled mid-drain, or one whose drain cap ran
-    /// out, clearing it while the earlier switch still ran; and a fresh
+    /// out, clearing it while the earlier switch still ran; one cancelled
+    /// after its drain but before the write's own switch, clearing it so
+    /// the next wait trusted the earlier switch's headroom; and a fresh
     /// controller adopting the same criteria with an overlap of its own that
     /// defaulted to "none". So only a real write (or one that writes
     /// nothing) replaces it, every wait reads it without consuming it, only
-    /// a wait that saw the earlier switch end clears it — and only if no
-    /// newer write replaced it meanwhile — and the controller holds exactly
-    /// one, class-wide.
+    /// an uncancelled wait that saw the earlier switch end clears it — and
+    /// only if no newer write replaced it meanwhile — and the controller
+    /// holds exactly one, class-wide.
     struct ActiveWrite {
         /// Nil after a reset: the panel is heading back to its default mode.
         private(set) var criteria: WrittenCriteria?
@@ -246,15 +248,20 @@ public enum DisplayCriteriaLogic {
         }
 
         /// A later wait without a new write has no earlier switch to drain —
-        /// but only once a wait has seen it end. Neither a wait cancelled
-        /// mid-drain nor one whose drain cap ran out has: clearing on "not
-        /// cancelled" let the next wait for the same write (a 4 s switch back
-        /// after reset outlasting a 2 s cap + 1 s grace) skip the drain and
-        /// settle on that old switch's end. Kept, at worst the next wait
-        /// drains the write's own switch and spends a grace seeing nothing
-        /// new start.
-        mutating func endWait(generation: Int, priorSwitch: SettleReport.PriorSwitch?) {
-            guard case .drained? = priorSwitch, generation == self.generation else { return }
+        /// but only once a wait has seen it end *and* gone on to finish its
+        /// own stages uncancelled. A wait whose drain cap ran out never saw the
+        /// end: clearing then let the next wait for the same write (a 4 s
+        /// switch back after reset outlasting a 2 s cap + 1 s grace) skip the
+        /// drain and settle on that old switch's end. A wait cancelled after
+        /// its drain saw the end but not the write's own switch: clearing then
+        /// let the next wait trust the headroom the earlier switch (back to an
+        /// HDR10 home mode) left raised, and return `alreadyPresentingHDR`
+        /// before the requested DV switch had even started. Kept, at worst the
+        /// next wait drains the write's own switch and spends a grace seeing
+        /// nothing new start.
+        mutating func endWait(generation: Int, report: SettleReport) {
+            guard case .drained? = report.priorSwitch, !report.wasCancelled,
+                  generation == self.generation else { return }
             inFlightAtWrite = false
         }
     }
@@ -269,6 +276,20 @@ public enum DisplayCriteriaLogic {
         var startSignalled: () -> Bool
         var endSignalled: () -> Bool
         var clearSignals: () -> Void
+    }
+
+    /// The settle loop's time, injected so tests step a scripted timeline
+    /// instead of racing real sleeps: a test thread woken late under load
+    /// crossed a different stage boundary than the one it scripted.
+    struct SettleClock {
+        var now: () -> ContinuousClock.Instant
+        var sleep: @MainActor (Duration) async -> Void
+
+        static var live: SettleClock {
+            // `try?`: a cancelled sleep throws at once; the loops check
+            // cancellation themselves.
+            .init(now: { .now }, sleep: { d in _ = try? await Task.sleep(for: d) })
+        }
     }
 
     /// The body of `DisplayCriteriaController.waitForSwitch`; see there for
@@ -294,12 +315,13 @@ public enum DisplayCriteriaLogic {
         switchInFlightAtWrite: Bool,
         startGrace: Duration,
         settleCap: Duration,
-        signals: SwitchSignals
+        signals: SwitchSignals,
+        clock: SettleClock = .live
     ) async -> SettleReport {
-        let entry = ContinuousClock.now
+        let entry = clock.now()
         var priorSwitch: SettleReport.PriorSwitch?
         func elapsedMs() -> Int {
-            Int((ContinuousClock.now - entry) / .milliseconds(1))
+            Int((clock.now() - entry) / .milliseconds(1))
         }
         func report(
             _ outcome: SettleReport.Outcome,
@@ -321,10 +343,10 @@ public enum DisplayCriteriaLogic {
         // the write's own switch without the flag ever reading false.
         let overlapped = switchInFlightAtWrite
         if overlapped {
-            let drainDeadline = ContinuousClock.now.advanced(by: settleCap)
+            let drainDeadline = clock.now().advanced(by: settleCap)
             func stillRunning() -> Bool { signals.inProgress() && !signals.endSignalled() }
-            while stillRunning(), ContinuousClock.now < drainDeadline, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(10))
+            while stillRunning(), clock.now() < drainDeadline, !Task.isCancelled {
+                await clock.sleep(.milliseconds(10))
             }
             priorSwitch = stillRunning()
                 ? .drainCapExpired(afterMilliseconds: elapsedMs())
@@ -359,8 +381,8 @@ public enum DisplayCriteriaLogic {
         // down, counts as this write's start.
         var sawIdle = !overlapped
         var startedAt: Int?
-        let graceDeadline = ContinuousClock.now.advanced(by: startGrace)
-        while ContinuousClock.now < graceDeadline, !Task.isCancelled {
+        let graceDeadline = clock.now().advanced(by: startGrace)
+        while clock.now() < graceDeadline, !Task.isCancelled {
             if !overlapped, signals.endSignalled() {
                 return report(.modeSwitchEnd, startedAt: startedAt)
             }
@@ -379,7 +401,7 @@ public enum DisplayCriteriaLogic {
                 }
                 break
             }
-            try? await Task.sleep(for: .milliseconds(10))
+            await clock.sleep(.milliseconds(10))
         }
         guard startedAt != nil else { return report(.noSwitchStarted) }
 
@@ -392,9 +414,9 @@ public enum DisplayCriteriaLogic {
         // watching for a real HDR signal; rate-only writes keep the clear as
         // their exit — there is no range engage left to confirm.
         var clearedAt: Int?
-        let settleDeadline = ContinuousClock.now.advanced(by: settleCap)
-        while ContinuousClock.now < settleDeadline, !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(50))
+        let settleDeadline = clock.now().advanced(by: settleCap)
+        while clock.now() < settleDeadline, !Task.isCancelled {
+            await clock.sleep(.milliseconds(50))
             if signals.endSignalled() { return report(.modeSwitchEnd, startedAt: startedAt) }
             if headroomCounts, signals.headroomRaised() {
                 return report(.headroomRaised, startedAt: startedAt)
@@ -607,7 +629,8 @@ public final class DisplayCriteriaController {
         let manager = window.avDisplayManager
         let screen = window.screen
         // Read, not consumed: a concurrent wait for the same write needs it
-        // too. Cleared only by a wait that saw the earlier switch end (`endWait`).
+        // too. Cleared only by an uncancelled wait that saw the earlier
+        // switch end (`endWait`).
         let (inFlight, generation) = Self.active.beginWait()
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
         // dead startup time on every load.
@@ -641,7 +664,7 @@ public final class DisplayCriteriaController {
                 clearSignals: { started.clear(); ended.clear() }
             )
         )
-        Self.active.endWait(generation: generation, priorSwitch: report.priorSwitch)
+        Self.active.endWait(generation: generation, report: report)
         return report
     }
 

@@ -266,10 +266,11 @@ struct DisplayCriteriaLogicTests {
 
 // MARK: - Settle wait
 
-/// A panel whose switch timeline is scripted in milliseconds from creation:
-/// in-progress windows plus start / end notification instants. A clear
-/// forgets every notification posted up to that moment, like the
-/// controller's flags.
+/// A panel whose switch timeline is scripted in milliseconds of virtual
+/// time: in-progress windows plus start / end notification instants. A
+/// clear forgets every notification posted up to that moment, like the
+/// controller's flags. Time moves only when the settle loop sleeps, so a
+/// busy test machine can't land a wait on a different stage boundary.
 @MainActor
 private final class ScriptedPanel {
     private let t0 = ContinuousClock.now
@@ -277,9 +278,10 @@ private final class ScriptedPanel {
     var starts: [Int] = []
     var ends: [Int] = []
     var headroom: [Range<Int>] = []
+    /// The waiting task is cancelled once a sleep reaches this instant.
+    var cancelAt: Int?
     private var clearedAt = -1
-
-    private var now: Int { Int((ContinuousClock.now - t0) / .milliseconds(1)) }
+    private(set) var now = 0
     private func posted(_ events: [Int]) -> Bool {
         let now = self.now
         return events.contains { $0 > clearedAt && $0 <= now }
@@ -294,6 +296,18 @@ private final class ScriptedPanel {
             clearSignals: { self.clearedAt = self.now }
         )
     }
+
+    var clock: DisplayCriteriaLogic.SettleClock {
+        .init(
+            now: { self.t0.advanced(by: .milliseconds(self.now)) },
+            sleep: { duration in
+                self.now += Int(duration / .milliseconds(1))
+                if let cancelAt = self.cancelAt, self.now >= cancelAt {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        )
+    }
 }
 
 @MainActor
@@ -303,7 +317,7 @@ private func settle(
 ) async -> DisplayCriteriaLogic.SettleReport {
     await DisplayCriteriaLogic.settle(
         wantsHDRPanel: wantsHDR, switchInFlightAtWrite: inFlightAtWrite,
-        startGrace: grace, settleCap: cap, signals: panel.signals
+        startGrace: grace, settleCap: cap, signals: panel.signals, clock: panel.clock
     )
 }
 
@@ -431,6 +445,12 @@ struct DisplayCriteriaSettleTests {
 
     private let criteriaA = DisplayCriteriaLogic.WrittenCriteria(target: .dolbyVision, refreshRate: 24)
 
+    private func finished(
+        _ prior: DisplayCriteriaLogic.SettleReport.PriorSwitch?, cancelled: Bool = false
+    ) -> DisplayCriteriaLogic.SettleReport {
+        .init(outcome: .modeSwitchEnd, totalMilliseconds: 0, priorSwitch: prior, wasCancelled: cancelled)
+    }
+
     @Test("A redundant re-apply between the write and the wait keeps the overlap")
     func overlapSurvivesRedundantApply() {
         var active = DisplayCriteriaLogic.ActiveWrite()
@@ -447,14 +467,14 @@ struct DisplayCriteriaSettleTests {
         let first = active.beginWait()
         let second = active.beginWait()
         #expect(first.inFlight && second.inFlight)
-        active.endWait(generation: first.generation, priorSwitch: .drained(afterMilliseconds: 100))
+        active.endWait(generation: first.generation, report: finished(.drained(afterMilliseconds: 100)))
         #expect(!active.beginWait().inFlight)
 
         // A newer overlapping write during a wait survives that wait's end.
         active.wroteNothing()
         let stale = active.beginWait()
         active.wrote(criteriaA, switchInFlight: true)
-        active.endWait(generation: stale.generation, priorSwitch: .drained(afterMilliseconds: 100))
+        active.endWait(generation: stale.generation, report: finished(.drained(afterMilliseconds: 100)))
         #expect(active.beginWait().inFlight)
     }
 
@@ -463,7 +483,10 @@ struct DisplayCriteriaSettleTests {
         var active = DisplayCriteriaLogic.ActiveWrite()
         active.wrote(criteriaA, switchInFlight: true)
         let cancelled = active.beginWait()
-        active.endWait(generation: cancelled.generation, priorSwitch: .drainCapExpired(afterMilliseconds: 50))
+        active.endWait(
+            generation: cancelled.generation,
+            report: finished(.drainCapExpired(afterMilliseconds: 50), cancelled: true)
+        )
         // Also after a redundant re-apply, which touches nothing.
         #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
         #expect(active.beginWait().inFlight)
@@ -475,11 +498,50 @@ struct DisplayCriteriaSettleTests {
         active.wrote(criteriaA, switchInFlight: true)
         let expired = active.beginWait()
         // Not cancelled, yet the earlier switch never ended — nothing cleared.
-        active.endWait(generation: expired.generation, priorSwitch: .drainCapExpired(afterMilliseconds: 2_000))
+        active.endWait(generation: expired.generation, report: finished(.drainCapExpired(afterMilliseconds: 2_000)))
         #expect(active.beginWait().inFlight)
         // A wait without a prior switch to report clears nothing either.
-        active.endWait(generation: expired.generation, priorSwitch: nil)
+        active.endWait(generation: expired.generation, report: finished(nil))
         #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait cancelled after its drain, before the write's own switch, leaves the overlap; the next wait ignores stale headroom")
+    func overlapSurvivesWaitCancelledAfterDrain() async {
+        // Reset went back to an HDR10 home mode (0–200 ms, headroom up from
+        // 150 ms and lingering); the DV write's own switch runs 400–600 ms.
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<600]
+        panel.starts = [400]
+        panel.ends = [200, 600]
+        panel.headroom = [150..<1_000_000]
+        var shared = DisplayCriteriaLogic.ActiveWrite()
+        shared.wrote(criteriaA, switchInFlight: true)
+
+        // First wait drains at 200 ms and is cancelled at 250 ms, mid-stage 1.
+        let first = shared.beginWait()
+        panel.cancelAt = 250
+        let cancelled = await Task { @MainActor in
+            await settle(panel, inFlightAtWrite: first.inFlight, wantsHDR: true)
+        }.value
+        guard case .drained? = cancelled.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: cancelled.priorSwitch))")
+            return
+        }
+        #expect(cancelled.wasCancelled)
+        shared.endWait(generation: first.generation, report: cancelled)
+
+        // A second controller adopts the same criteria (redundant, touches
+        // nothing) and waits for the same write on the same timeline.
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
+        let second = shared.beginWait()
+        #expect(second.inFlight)
+        panel.cancelAt = nil
+        let report = await settle(panel, inFlightAtWrite: second.inFlight, wantsHDR: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect(report.switchStartedAfterMilliseconds != nil)
+        #expect(panel.now >= 600)
+        shared.endWait(generation: second.generation, report: report)
+        #expect(!shared.beginWait().inFlight)
     }
 
     @Test("A controller adopting criteria written mid-switch inherits the overlap with them")
@@ -523,14 +585,12 @@ struct DisplayCriteriaSettleTests {
     func cancellationEndsWait() async {
         let panel = ScriptedPanel()
         panel.inProgress = [0..<1_000_000]
-        let began = ContinuousClock.now
-        let task = Task { @MainActor in
+        panel.cancelAt = 100
+        // Own task: the cancel must not reach the test's task.
+        let report = await Task { @MainActor in
             await settle(panel, inFlightAtWrite: true, grace: .seconds(5), cap: .seconds(10))
-        }
-        try? await Task.sleep(for: .milliseconds(100))
-        task.cancel()
-        let report = await task.value
-        #expect(ContinuousClock.now - began < .seconds(2))
+        }.value
+        #expect(report.totalMilliseconds == 100)
         #expect(report.wasCancelled)
         #expect(report.summary.hasPrefix("cancelled: "))
     }
