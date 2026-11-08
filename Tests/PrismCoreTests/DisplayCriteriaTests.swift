@@ -264,6 +264,138 @@ struct DisplayCriteriaLogicTests {
     }
 }
 
+// MARK: - Settle wait
+
+/// A panel whose switch timeline is scripted in milliseconds from creation:
+/// in-progress windows plus start / end notification instants. A clear
+/// forgets every notification posted up to that moment, like the
+/// controller's flags.
+@MainActor
+private final class ScriptedPanel {
+    private let t0 = ContinuousClock.now
+    var inProgress: [Range<Int>] = []
+    var starts: [Int] = []
+    var ends: [Int] = []
+    private var clearedAt = -1
+
+    private var now: Int { Int((ContinuousClock.now - t0) / .milliseconds(1)) }
+    private func posted(_ events: [Int]) -> Bool {
+        let now = self.now
+        return events.contains { $0 > clearedAt && $0 <= now }
+    }
+
+    var signals: DisplayCriteriaLogic.SwitchSignals {
+        .init(
+            inProgress: { let now = self.now; return self.inProgress.contains { $0.contains(now) } },
+            headroomRaised: { false },
+            startSignalled: { self.posted(self.starts) },
+            endSignalled: { self.posted(self.ends) },
+            clearSignals: { self.clearedAt = self.now }
+        )
+    }
+}
+
+@MainActor
+private func settle(
+    _ panel: ScriptedPanel, inFlightAtWrite: Bool,
+    grace: Duration = .milliseconds(300), cap: Duration = .milliseconds(800)
+) async -> DisplayCriteriaLogic.SettleReport {
+    await DisplayCriteriaLogic.settle(
+        wantsHDRPanel: false, switchInFlightAtWrite: inFlightAtWrite,
+        startGrace: grace, settleCap: cap, signals: panel.signals
+    )
+}
+
+@Suite("Display criteria settle wait")
+@MainActor
+struct DisplayCriteriaSettleTests {
+
+    /// The reset's switch back to the default mode is running at write time
+    /// (0–200 ms, its end posted at 200 and once more late at 230); the
+    /// write's own switch runs 400–600 ms.
+    private func overlappedPanel() -> ScriptedPanel {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<600]
+        panel.starts = [400]
+        panel.ends = [200, 230, 600]
+        return panel
+    }
+
+    @Test("A write that lands mid-switch settles on its own switch, not the earlier one's end")
+    func overlapSettlesOnOwnSwitch() async {
+        let report = await settle(overlappedPanel(), inFlightAtWrite: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 350)
+        #expect(report.totalMilliseconds >= 550)
+        guard case .drained(let ms)? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+        #expect(ms >= 150 && ms < 400)
+        #expect(report.summary.hasSuffix("(earlier switch drained at \(ms)ms)"))
+    }
+
+    @Test("Without the write-time flag the earlier switch's end settles the wait — the bug")
+    func overlapWithoutFlagSettlesEarly() async {
+        let report = await settle(overlappedPanel(), inFlightAtWrite: false)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect(report.totalMilliseconds < 400)
+        #expect(report.priorSwitch == nil)
+    }
+
+    @Test("A write tvOS folded into the running switch costs at most one grace extra")
+    func overlapWithNoNewSwitch() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200]
+        panel.ends = [200]
+        let report = await settle(panel, inFlightAtWrite: true)
+        #expect(report.outcome == .noSwitchStarted)
+        #expect(report.totalMilliseconds >= 450 && report.totalMilliseconds < 900)
+        guard case .drained? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
+    @Test("Normal switch without an overlap is unchanged")
+    func normalSwitch() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [100..<300]
+        panel.starts = [100]
+        panel.ends = [300]
+        let report = await settle(panel, inFlightAtWrite: false)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? -1) >= 50)
+        #expect(report.totalMilliseconds >= 250 && report.totalMilliseconds < 600)
+        #expect(report.priorSwitch == nil)
+        #expect(!report.wasCancelled)
+    }
+
+    @Test("No switch at all still exits after the grace")
+    func noSwitch() async {
+        let report = await settle(ScriptedPanel(), inFlightAtWrite: false)
+        #expect(report.outcome == .noSwitchStarted)
+        #expect(report.totalMilliseconds >= 250 && report.totalMilliseconds < 700)
+        #expect(report.priorSwitch == nil)
+    }
+
+    @Test("Cancellation ends the wait at once, even mid-drain of a stuck switch")
+    func cancellationEndsWait() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<1_000_000]
+        let began = ContinuousClock.now
+        let task = Task { @MainActor in
+            await settle(panel, inFlightAtWrite: true, grace: .seconds(5), cap: .seconds(10))
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        let report = await task.value
+        #expect(ContinuousClock.now - began < .seconds(2))
+        #expect(report.wasCancelled)
+        #expect(report.summary.hasPrefix("cancelled: "))
+    }
+}
+
 // MARK: - Master-vs-media routing
 
 @Suite("Master variant permission")
