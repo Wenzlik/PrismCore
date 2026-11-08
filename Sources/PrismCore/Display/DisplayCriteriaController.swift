@@ -210,13 +210,14 @@ public enum DisplayCriteriaLogic {
     /// Sequences that used to lose the overlap, each letting a wait take the
     /// earlier switch's end as its own: a redundant re-`apply` resetting it
     /// before the wait ran; a second concurrent wait finding it consumed by
-    /// the first; a wait cancelled mid-drain clearing it while the earlier
-    /// switch still ran; and a fresh controller adopting the same criteria
-    /// with an overlap of its own that defaulted to "none". So only a real
-    /// write (or one that writes nothing) replaces it, every wait reads it
-    /// without consuming it, only a wait that ran to completion clears it —
-    /// and only if no newer write replaced it meanwhile — and the controller
-    /// holds exactly one, class-wide.
+    /// the first; a wait cancelled mid-drain, or one whose drain cap ran
+    /// out, clearing it while the earlier switch still ran; and a fresh
+    /// controller adopting the same criteria with an overlap of its own that
+    /// defaulted to "none". So only a real write (or one that writes
+    /// nothing) replaces it, every wait reads it without consuming it, only
+    /// a wait that saw the earlier switch end clears it — and only if no
+    /// newer write replaced it meanwhile — and the controller holds exactly
+    /// one, class-wide.
     struct ActiveWrite {
         /// Nil after a reset: the panel is heading back to its default mode.
         private(set) var criteria: WrittenCriteria?
@@ -245,12 +246,16 @@ public enum DisplayCriteriaLogic {
         }
 
         /// A later wait without a new write has no earlier switch to drain —
-        /// but only once a wait has really let it finish. A cancelled wait
-        /// may have stopped mid-drain, so it leaves the overlap for the next
-        /// wait (at worst that one drains the write's own switch and spends a
-        /// grace seeing nothing new start).
-        mutating func endWait(generation: Int, completed: Bool) {
-            if completed, generation == self.generation { inFlightAtWrite = false }
+        /// but only once a wait has seen it end. Neither a wait cancelled
+        /// mid-drain nor one whose drain cap ran out has: clearing on "not
+        /// cancelled" let the next wait for the same write (a 4 s switch back
+        /// after reset outlasting a 2 s cap + 1 s grace) skip the drain and
+        /// settle on that old switch's end. Kept, at worst the next wait
+        /// drains the write's own switch and spends a grace seeing nothing
+        /// new start.
+        mutating func endWait(generation: Int, priorSwitch: SettleReport.PriorSwitch?) {
+            guard case .drained? = priorSwitch, generation == self.generation else { return }
+            inFlightAtWrite = false
         }
     }
 
@@ -337,10 +342,12 @@ public enum DisplayCriteriaLogic {
         // switch may have been *to* an HDR default (reset returning to an
         // HDR10/60 Hz home mode), and the raised headroom lingers past its
         // end (see `panelPresentsHDR`). Read as "already HDR" it returned
-        // before this write's own switch — DV/24 Hz — had even started. So a
-        // headroom already raised once the drain ends is ignored for the
-        // whole wait; only one that rises later is this write's signal.
-        let headroomCounts = wantsHDRPanel && !(overlapped && signals.headroomRaised())
+        // before this write's own switch — DV/24 Hz — had even started. Nor
+        // is a rise before that start this write's: when the drain cap runs
+        // out the earlier switch is still going and may raise it moments
+        // later. So after an overlap the headroom is armed only once stage 1
+        // sees the write's own start, and only if it is still down then.
+        var headroomCounts = wantsHDRPanel && !overlapped
         if !overlapped, headroomCounts, signals.headroomRaised() {
             return report(.alreadyPresentingHDR)
         }
@@ -366,7 +373,10 @@ public enum DisplayCriteriaLogic {
                 startedAt = elapsedMs()
                 // Notifications post in order, so a stale end lands before
                 // this start; anything from here on is this switch's.
-                if overlapped { signals.clearSignals() }
+                if overlapped {
+                    signals.clearSignals()
+                    headroomCounts = wantsHDRPanel && !signals.headroomRaised()
+                }
                 break
             }
             try? await Task.sleep(for: .milliseconds(10))
@@ -597,7 +607,7 @@ public final class DisplayCriteriaController {
         let manager = window.avDisplayManager
         let screen = window.screen
         // Read, not consumed: a concurrent wait for the same write needs it
-        // too. Cleared only by a wait that ran to completion (see `endWait`).
+        // too. Cleared only by a wait that saw the earlier switch end (`endWait`).
         let (inFlight, generation) = Self.active.beginWait()
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
         // dead startup time on every load.
@@ -631,7 +641,7 @@ public final class DisplayCriteriaController {
                 clearSignals: { started.clear(); ended.clear() }
             )
         )
-        Self.active.endWait(generation: generation, completed: !report.wasCancelled)
+        Self.active.endWait(generation: generation, priorSwitch: report.priorSwitch)
         return report
     }
 

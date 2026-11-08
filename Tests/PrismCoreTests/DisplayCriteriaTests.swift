@@ -398,6 +398,29 @@ struct DisplayCriteriaSettleTests {
         #expect(report.totalMilliseconds >= 450 && report.totalMilliseconds < 900)
     }
 
+    @Test("After the drain cap runs out, headroom the earlier switch raises later does not settle an HDR write")
+    func overlapIgnoresHeadroomRaisedAfterDrainCap() async {
+        // The switch back after reset runs 0–450 ms and raises the headroom
+        // at 360 ms; the 300 ms drain cap expires before either, with the
+        // headroom still down. The write's own switch runs 600–800 ms.
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<450, 600..<800]
+        panel.starts = [600]
+        panel.ends = [450, 800]
+        panel.headroom = [360..<1_000_000]
+        let report = await settle(
+            panel, inFlightAtWrite: true, wantsHDR: true,
+            grace: .milliseconds(500), cap: .milliseconds(300)
+        )
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 550)
+        #expect(report.totalMilliseconds >= 750)
+        guard case .drainCapExpired? = report.priorSwitch else {
+            Issue.record("expected an expired drain, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
     @Test("Without an overlap, raised headroom is still an immediate no-wait")
     func headroomWithoutOverlap() async {
         let panel = ScriptedPanel()
@@ -424,14 +447,14 @@ struct DisplayCriteriaSettleTests {
         let first = active.beginWait()
         let second = active.beginWait()
         #expect(first.inFlight && second.inFlight)
-        active.endWait(generation: first.generation, completed: true)
+        active.endWait(generation: first.generation, priorSwitch: .drained(afterMilliseconds: 100))
         #expect(!active.beginWait().inFlight)
 
         // A newer overlapping write during a wait survives that wait's end.
         active.wroteNothing()
         let stale = active.beginWait()
         active.wrote(criteriaA, switchInFlight: true)
-        active.endWait(generation: stale.generation, completed: true)
+        active.endWait(generation: stale.generation, priorSwitch: .drained(afterMilliseconds: 100))
         #expect(active.beginWait().inFlight)
     }
 
@@ -440,9 +463,22 @@ struct DisplayCriteriaSettleTests {
         var active = DisplayCriteriaLogic.ActiveWrite()
         active.wrote(criteriaA, switchInFlight: true)
         let cancelled = active.beginWait()
-        active.endWait(generation: cancelled.generation, completed: false)
+        active.endWait(generation: cancelled.generation, priorSwitch: .drainCapExpired(afterMilliseconds: 50))
         // Also after a redundant re-apply, which touches nothing.
         #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait whose drain cap ran out leaves the overlap for the next wait on the same write")
+    func overlapSurvivesExpiredDrain() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let expired = active.beginWait()
+        // Not cancelled, yet the earlier switch never ended — nothing cleared.
+        active.endWait(generation: expired.generation, priorSwitch: .drainCapExpired(afterMilliseconds: 2_000))
+        #expect(active.beginWait().inFlight)
+        // A wait without a prior switch to report clears nothing either.
+        active.endWait(generation: expired.generation, priorSwitch: nil)
         #expect(active.beginWait().inFlight)
     }
 
