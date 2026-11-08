@@ -232,7 +232,8 @@ public enum PrismCoreEngine {
     /// Returned loaded and paused, like `open(url:)`'s software case.
     public static func openSoftware(probed: ProbedSource, audioDelaySeconds: Double = 0) async throws -> SoftwarePlaybackPipeline {
         do {
-            let pipeline = SoftwarePlaybackPipeline(audioDelaySeconds: audioDelaySeconds)
+            // Built on the main actor (its display layer's renderer is read there).
+            let pipeline = await SoftwarePlaybackPipeline(audioDelaySeconds: audioDelaySeconds)
             // `load` is synchronous and blocking (it rewinds the container and
             // opens both decoders), so it runs off whatever actor called us.
             try await Task.detached(priority: .userInitiated) {

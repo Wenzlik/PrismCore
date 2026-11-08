@@ -86,13 +86,12 @@ protocol RenderTimeline: AnyObject {
 /// samples go to — attaching the layer while enqueuing to its
 /// `sampleBufferRenderer` leaves the samples on a timebase nothing drives.
 ///
-/// Current SDKs mark `AVSampleBufferDisplayLayer` main-actor isolated (it is a
-/// `CALayer`), but this sink is built and driven from the pipeline's queues,
-/// as it always was: the renderer is documented safe off the main thread, and
-/// the layer's own queue-management calls are what iOS 16 had instead. So the
-/// layer is only ever reached through its non-isolated faces — the
-/// `AVQueuedSampleBufferRendering` protocol, `NSObject` KVC/KVO and selectors
-/// — never through an isolated Swift member, which would be an error here.
+/// The SDK marks `AVSampleBufferDisplayLayer` main-actor isolated (it is a
+/// `CALayer`), so `init` — the one place that reads `sampleBufferRenderer` — is
+/// `@MainActor`. Everything after it runs on the pipeline's queues and touches
+/// only the renderer, which the SDK documents as safe to feed from a
+/// background thread, and on iOS 16 the layer's non-isolated
+/// `AVQueuedSampleBufferRendering` face, which is what that OS had instead.
 final class DisplayLayerVideoSink: VideoSampleSink {
 
     let layer: AVSampleBufferDisplayLayer
@@ -100,38 +99,24 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     /// synchronizer.
     let renderer: AVQueuedSampleBufferRendering
 
-    /// Resolved alongside `renderer`, because the flush API moved with it. A
-    /// stored closure rather than a branch at every call site: the availability
-    /// decision belongs to `init`, not to seek.
-    private let flushHandler: (Bool) -> Void
-
+    @MainActor
     init(layer: AVSampleBufferDisplayLayer = AVSampleBufferDisplayLayer()) {
         self.layer = layer
         if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *) {
-            // KVC, not `layer.sampleBufferRenderer`: see the type's note.
-            let videoRenderer = (layer as NSObject).value(forKey: "sampleBufferRenderer")
-                as! AVSampleBufferVideoRenderer
-            self.renderer = videoRenderer
-            self.flushHandler = { removingDisplayedImage in
-                videoRenderer.flush(removingDisplayedImage: removingDisplayedImage) { }
-            }
+            self.renderer = layer.sampleBufferRenderer
         } else {
-            let queued: AVQueuedSampleBufferRendering = layer
-            self.renderer = queued
-            self.flushHandler = { removingDisplayedImage in
-                if removingDisplayedImage {
-                    _ = (layer as NSObject).perform(#selector(AVSampleBufferDisplayLayer.flushAndRemoveImage))
-                } else {
-                    queued.flush()
-                }
-            }
+            self.renderer = layer
         }
     }
 
     var isReadyForMoreSamples: Bool { renderer.isReadyForMoreMediaData }
     var queuedRenderer: AVQueuedSampleBufferRendering? { renderer }
 
-    private var observations: [KeyObservation] = []
+    /// What `stopObservingFailure` has to undo: a KVO observation and/or a
+    /// notification token, plus the switch that silences deliveries already
+    /// queued.
+    private var failureObservers: [AnyObject] = []
+    private var failureDeliveryActive: OSAllocatedUnfairLock<Bool>?
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
@@ -146,83 +131,91 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     }
 
     func flush(removingDisplayedImage: Bool) {
-        flushHandler(removingDisplayedImage)
+        if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *),
+           let videoRenderer = renderer as? AVSampleBufferVideoRenderer {
+            videoRenderer.flush(removingDisplayedImage: removingDisplayedImage, completionHandler: nil)
+            return
+        }
+        // iOS 16: the queued samples go synchronously, through the layer's
+        // non-isolated rendering face, so nothing enqueued after this call is
+        // lost. Removing the picture is a main-actor call on the layer; only
+        // teardown asks for it and the pipeline is single-use afterwards, so
+        // landing it a main-queue turn later cannot wipe a later frame.
+        renderer.flush()
+        if removingDisplayedImage {
+            Task { @MainActor [layer] in layer.flushAndRemoveImage() }
+        }
     }
 
-    /// Two signals, both KVO. `status == .failed` is the renderer giving up
-    /// (its `error` says why — logged by the pipeline's host, not acted on
-    /// differently here, because the remedy is the same). The layer's
-    /// `requiresFlushToResumeDecoding` is the softer one: the decode session
-    /// was lost (backgrounding, a display change) and the layer will not draw
-    /// again until flushed — the classic "came back to a black player". Both
-    /// observed on the LAYER, which reflects its renderer's state on every OS
-    /// the package supports, so the availability split above stays in `init`.
+    /// Two signals. `status == .failed` is the renderer giving up (its `error`
+    /// says why — logged by the pipeline's host, not acted on differently
+    /// here, because the remedy is the same). `requiresFlushToResumeDecoding`
+    /// is the softer one: the decode session was lost (backgrounding, a
+    /// display change) and nothing draws again until flushed — the classic
+    /// "came back to a black player".
+    ///
+    /// iOS 17+: `status` by typed KVO on the renderer, the flag by the
+    /// renderer's notification (the SDK documents it as not KVO-observable).
+    /// iOS 16: the layer's notification, read back on the main actor because
+    /// the layer's properties are isolated there; the SDK flips `status` to
+    /// failed together with the flag, so the lost-session case is covered.
+    ///
+    /// Every delivery hops to `queue` and re-checks the switch there, and
+    /// `stopObservingFailure` flips it — the pipeline calls both on `queue`, so
+    /// once it returns no handler runs, not even one a notification already
+    /// queued. Without that a teardown racing a background-time status change
+    /// fires the handler for a pipeline that is already gone.
     func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         stopObservingFailure()
-        let statusObservation = KeyObservation(layer, keyPath: "status") { new in
-            guard (new as? Int) == AVQueuedSampleBufferRenderingStatus.failed.rawValue else { return }
-            queue.async(execute: handler)
+        let active = OSAllocatedUnfairLock(initialState: true)
+        let fire: @Sendable () -> Void = {
+            queue.async { if active.withLock({ $0 }) { handler() } }
         }
-        let flushObservation = KeyObservation(layer, keyPath: "requiresFlushToResumeDecoding") { new in
-            guard (new as? Bool) == true else { return }
-            queue.async(execute: handler)
+        failureDeliveryActive = active
+        if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *),
+           let videoRenderer = renderer as? AVSampleBufferVideoRenderer {
+            let status = videoRenderer.observe(\.status, options: [.new]) { renderer, _ in
+                guard renderer.status == .failed else { return }
+                fire()
+            }
+            let flush = NotificationCenter.default.addObserver(
+                forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
+                object: videoRenderer, queue: nil
+            ) { notification in
+                guard (notification.object as? AVSampleBufferVideoRenderer)?.requiresFlushToResumeDecoding == true
+                else { return }
+                fire()
+            }
+            failureObservers = [status, flush]
+        } else {
+            let layer = layer
+            let flush = NotificationCenter.default.addObserver(
+                forName: .AVSampleBufferDisplayLayerRequiresFlushToResumeDecodingDidChange,
+                object: layer, queue: nil
+            ) { _ in
+                Task { @MainActor in
+                    guard layer.requiresFlushToResumeDecoding || layer.status == .failed else { return }
+                    fire()
+                }
+            }
+            failureObservers = [flush]
         }
-        observations = [statusObservation, flushObservation]
     }
 
     func stopObservingFailure() {
-        observations.forEach { $0.invalidate() }
-        observations.removeAll()
-    }
-}
-
-/// KVO by key string, delivering the `.new` value. A Swift key path to a
-/// main-actor-isolated property cannot be formed off the main actor, while
-/// the observation itself is thread-agnostic (see `DisplayLayerVideoSink`).
-/// Invalidated on deinit, like `NSKeyValueObservation`.
-///
-/// Notifications arrive on whichever thread changed the property (renderer,
-/// main) while `invalidate()` comes from the pipeline's feed queue. `active`
-/// sits behind a lock that `changed` also runs under, so once `invalidate()`
-/// returns no callback is in flight or can still start — without it a
-/// teardown racing a background-time status change fires the handler for a
-/// pipeline that is already gone. `changed` only hops to a queue, so holding
-/// the lock across it costs nothing and cannot re-enter.
-private final class KeyObservation: NSObject {
-    private let target: NSObject
-    private let keyPath: String
-    private let changed: (Any?) -> Void
-    private let active = OSAllocatedUnfairLock(initialState: true)
-
-    init(_ target: NSObject, keyPath: String, changed: @escaping (Any?) -> Void) {
-        self.target = target
-        self.keyPath = keyPath
-        self.changed = changed
-        super.init()
-        target.addObserver(self, forKeyPath: keyPath, options: [.new], context: nil)
-    }
-
-    override func observeValue(
-        forKeyPath keyPath: String?, of object: Any?,
-        change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?
-    ) {
-        let new = change?[.newKey]
-        active.withLockUnchecked { active in
-            if active { changed(new) }
+        failureDeliveryActive?.withLock { $0 = false }
+        failureDeliveryActive = nil
+        for observer in failureObservers {
+            if let observation = observer as? NSKeyValueObservation {
+                observation.invalidate()
+            } else {
+                NotificationCenter.default.removeObserver(observer)
+            }
         }
+        failureObservers.removeAll()
     }
 
-    func invalidate() {
-        let wasActive = active.withLock { active in
-            defer { active = false }
-            return active
-        }
-        // Outside the lock: removal may wait on a notification in flight,
-        // which itself needs the lock to finish.
-        if wasActive { target.removeObserver(self, forKeyPath: keyPath) }
-    }
-
-    deinit { invalidate() }
+    deinit { stopObservingFailure() }
 }
 
 /// `AVSampleBufferAudioRenderer` behind `AudioSampleSink`.

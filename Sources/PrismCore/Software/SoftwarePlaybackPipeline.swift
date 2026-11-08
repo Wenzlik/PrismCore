@@ -15,7 +15,7 @@ import Libavutil
 /// URL to, so this type owns the transport and the clock.
 ///
 /// ```swift
-/// let pipeline = SoftwarePlaybackPipeline()
+/// let pipeline = SoftwarePlaybackPipeline()   // on the main actor
 /// try pipeline.load(url: webmURL)          // synchronous; call off the main thread
 /// // or, after a routing probe: try pipeline.load(probed: probedSource)
 /// hostView.layer.addSublayer(pipeline.displayLayer!)
@@ -416,6 +416,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
 
     /// The shipping configuration: a real display layer, audio renderer and
     /// synchronizer.
+    ///
+    /// `@MainActor` because resolving the layer's `sampleBufferRenderer` is a
+    /// main-actor read in the SDK (see `DisplayLayerVideoSink`). Construction
+    /// only — `load`, transport and teardown stay callable from any thread.
+    @MainActor
     public convenience init(allowHardwareDecode: Bool = true, audioDelaySeconds: Double = 0) {
         let video = DisplayLayerVideoSink()
         let audio = AudioRendererSink()
