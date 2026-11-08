@@ -343,6 +343,22 @@ struct DisplayCriteriaSettleTests {
         #expect(report.priorSwitch == nil)
     }
 
+    @Test("A chained switch (old end and new start together, flag never down) settles on its own end")
+    func overlapChainedWithoutIdle() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<700]
+        panel.starts = [200]
+        panel.ends = [200, 700]
+        let report = await settle(panel, inFlightAtWrite: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 150)
+        #expect(report.totalMilliseconds >= 650)
+        guard case .drained? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
     @Test("A write tvOS folded into the running switch costs at most one grace extra")
     func overlapWithNoNewSwitch() async {
         let panel = ScriptedPanel()

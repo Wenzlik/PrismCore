@@ -273,7 +273,13 @@ public enum DisplayCriteriaLogic {
             priorSwitch = stillRunning()
                 ? .drainCapExpired(afterMilliseconds: elapsedMs())
                 : .drained(afterMilliseconds: elapsedMs())
-            signals.clearSignals()
+            // Keep a start notification: the earlier switch's start posted
+            // before the observers existed, so one seen now is this write's.
+            // When tvOS chains (old end and new start inside one sleep tick,
+            // flag never down), clearing it would leave stage 1 nothing to
+            // see and the wait would report `noSwitchStarted` mid-switch.
+            // Stage 1 takes the start and clears the stale end with it.
+            if !signals.startSignalled() { signals.clearSignals() }
         }
 
         // Checked after the drain: a headroom raised by the earlier
