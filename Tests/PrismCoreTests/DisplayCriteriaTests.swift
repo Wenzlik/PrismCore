@@ -406,30 +406,59 @@ struct DisplayCriteriaSettleTests {
         #expect(report.outcome == .alreadyPresentingHDR)
     }
 
+    private let criteriaA = DisplayCriteriaLogic.WrittenCriteria(target: .dolbyVision, refreshRate: 24)
+
     @Test("A redundant re-apply between the write and the wait keeps the overlap")
     func overlapSurvivesRedundantApply() {
-        var overlap = DisplayCriteriaLogic.WriteOverlap()
-        overlap.record(switchInFlightAtWrite: true)
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
         // A redundant apply touches nothing — that is the whole fix.
-        #expect(overlap.beginWait().inFlight)
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
+        #expect(active.beginWait().inFlight)
     }
 
     @Test("Concurrent waits for one write both drain; a finished wait clears only its own write")
     func overlapSharedByConcurrentWaits() {
-        var overlap = DisplayCriteriaLogic.WriteOverlap()
-        overlap.record(switchInFlightAtWrite: true)
-        let first = overlap.beginWait()
-        let second = overlap.beginWait()
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let first = active.beginWait()
+        let second = active.beginWait()
         #expect(first.inFlight && second.inFlight)
-        overlap.endWait(generation: first.generation)
-        #expect(!overlap.beginWait().inFlight)
+        active.endWait(generation: first.generation, completed: true)
+        #expect(!active.beginWait().inFlight)
 
         // A newer overlapping write during a wait survives that wait's end.
-        overlap.record(switchInFlightAtWrite: false)
-        let stale = overlap.beginWait()
-        overlap.record(switchInFlightAtWrite: true)
-        overlap.endWait(generation: stale.generation)
-        #expect(overlap.beginWait().inFlight)
+        active.wroteNothing()
+        let stale = active.beginWait()
+        active.wrote(criteriaA, switchInFlight: true)
+        active.endWait(generation: stale.generation, completed: true)
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait cancelled mid-drain leaves the overlap for the next wait on the same write")
+    func overlapSurvivesCancelledWait() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let cancelled = active.beginWait()
+        active.endWait(generation: cancelled.generation, completed: false)
+        // Also after a redundant re-apply, which touches nothing.
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A controller adopting criteria written mid-switch inherits the overlap with them")
+    func adoptedCriteriaCarryTheOverlap() {
+        // One shared value, as the controller holds it class-wide: controller
+        // A writes mid-switch, controller B's same-criteria apply is
+        // redundant and touches nothing, B's wait still drains.
+        var shared = DisplayCriteriaLogic.ActiveWrite()
+        shared.wrote(criteriaA, switchInFlight: true)
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
+        #expect(shared.beginWait().inFlight)
+        // A reset drops the criteria, so the next apply really writes and
+        // records its own overlap.
+        shared.reset()
+        #expect(!DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
     }
 
     @Test("Normal switch without an overlap is unchanged")

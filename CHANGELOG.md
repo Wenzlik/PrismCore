@@ -8,7 +8,7 @@ source-compatible.)
 
 ## [Unreleased]
 
-- `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. A redundant re-apply or a second concurrent wait keeps that protection, and a headroom left raised by the earlier switch no longer settles an HDR write. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
+- `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. A redundant re-apply, a second concurrent wait, a wait cancelled mid-drain, or a fresh controller adopting the same criteria keeps that protection, and a headroom left raised by the earlier switch no longer settles an HDR write. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
 
 ## [4.0.1] — 2026-11-03
 
