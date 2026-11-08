@@ -276,6 +276,7 @@ private final class ScriptedPanel {
     var inProgress: [Range<Int>] = []
     var starts: [Int] = []
     var ends: [Int] = []
+    var headroom: [Range<Int>] = []
     private var clearedAt = -1
 
     private var now: Int { Int((ContinuousClock.now - t0) / .milliseconds(1)) }
@@ -287,7 +288,7 @@ private final class ScriptedPanel {
     var signals: DisplayCriteriaLogic.SwitchSignals {
         .init(
             inProgress: { let now = self.now; return self.inProgress.contains { $0.contains(now) } },
-            headroomRaised: { false },
+            headroomRaised: { let now = self.now; return self.headroom.contains { $0.contains(now) } },
             startSignalled: { self.posted(self.starts) },
             endSignalled: { self.posted(self.ends) },
             clearSignals: { self.clearedAt = self.now }
@@ -297,11 +298,11 @@ private final class ScriptedPanel {
 
 @MainActor
 private func settle(
-    _ panel: ScriptedPanel, inFlightAtWrite: Bool,
+    _ panel: ScriptedPanel, inFlightAtWrite: Bool, wantsHDR: Bool = false,
     grace: Duration = .milliseconds(300), cap: Duration = .milliseconds(800)
 ) async -> DisplayCriteriaLogic.SettleReport {
     await DisplayCriteriaLogic.settle(
-        wantsHDRPanel: false, switchInFlightAtWrite: inFlightAtWrite,
+        wantsHDRPanel: wantsHDR, switchInFlightAtWrite: inFlightAtWrite,
         startGrace: grace, settleCap: cap, signals: panel.signals
     )
 }
@@ -371,6 +372,64 @@ struct DisplayCriteriaSettleTests {
             Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
             return
         }
+    }
+
+    @Test("After an overlap, headroom left raised by the earlier HDR switch does not settle an HDR write")
+    func overlapIgnoresStaleHeadroom() async {
+        // Reset returned the panel to an HDR10 home mode (headroom up from
+        // 150 ms and lingering); the write asks for DV and switches 400–600.
+        let panel = overlappedPanel()
+        panel.headroom = [150..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: true, wantsHDR: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 350)
+        #expect(report.totalMilliseconds >= 550)
+    }
+
+    @Test("After an overlap, headroom that rises only during the write's own switch still settles it")
+    func overlapCountsFreshHeadroom() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<1_000_000]
+        panel.starts = [400]
+        panel.ends = [200]
+        panel.headroom = [500..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: true, wantsHDR: true)
+        #expect(report.outcome == .headroomRaised)
+        #expect(report.totalMilliseconds >= 450 && report.totalMilliseconds < 900)
+    }
+
+    @Test("Without an overlap, raised headroom is still an immediate no-wait")
+    func headroomWithoutOverlap() async {
+        let panel = ScriptedPanel()
+        panel.headroom = [0..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: false, wantsHDR: true)
+        #expect(report.outcome == .alreadyPresentingHDR)
+    }
+
+    @Test("A redundant re-apply between the write and the wait keeps the overlap")
+    func overlapSurvivesRedundantApply() {
+        var overlap = DisplayCriteriaLogic.WriteOverlap()
+        overlap.record(switchInFlightAtWrite: true)
+        // A redundant apply touches nothing — that is the whole fix.
+        #expect(overlap.beginWait().inFlight)
+    }
+
+    @Test("Concurrent waits for one write both drain; a finished wait clears only its own write")
+    func overlapSharedByConcurrentWaits() {
+        var overlap = DisplayCriteriaLogic.WriteOverlap()
+        overlap.record(switchInFlightAtWrite: true)
+        let first = overlap.beginWait()
+        let second = overlap.beginWait()
+        #expect(first.inFlight && second.inFlight)
+        overlap.endWait(generation: first.generation)
+        #expect(!overlap.beginWait().inFlight)
+
+        // A newer overlapping write during a wait survives that wait's end.
+        overlap.record(switchInFlightAtWrite: false)
+        let stale = overlap.beginWait()
+        overlap.record(switchInFlightAtWrite: true)
+        overlap.endWait(generation: stale.generation)
+        #expect(overlap.beginWait().inFlight)
     }
 
     @Test("Normal switch without an overlap is unchanged")

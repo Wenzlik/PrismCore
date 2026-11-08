@@ -203,6 +203,39 @@ public enum DisplayCriteriaLogic {
             : (startGrace: .seconds(1), settleCap: .seconds(2))
     }
 
+    /// Whether the last real write landed mid-switch, carried from `apply`
+    /// to the waits that follow it.
+    ///
+    /// Two sequences used to lose it: a redundant re-`apply` of the same
+    /// criteria reset it before the wait ran, and a second concurrent wait
+    /// found it already consumed by the first — either way the wait took the
+    /// earlier switch's end as its own. So only a real write (or one that
+    /// writes nothing) replaces it, every wait reads it without consuming it,
+    /// and a finished wait clears it only if no newer write has replaced it
+    /// meanwhile.
+    struct WriteOverlap {
+        private(set) var inFlightAtWrite = false
+        private var generation = 0
+
+        /// A write that replaced the criteria — or wrote nothing, so no
+        /// switch of its own is coming. Not for a redundant write: the switch
+        /// still running then is the earlier real write's, toward these same
+        /// criteria.
+        mutating func record(switchInFlightAtWrite: Bool) {
+            inFlightAtWrite = switchInFlightAtWrite
+            generation += 1
+        }
+
+        func beginWait() -> (inFlight: Bool, generation: Int) {
+            (inFlightAtWrite, generation)
+        }
+
+        /// A later wait without a new write has no earlier switch to drain.
+        mutating func endWait(generation: Int) {
+            if generation == self.generation { inFlightAtWrite = false }
+        }
+    }
+
     /// What the settle loop reads each tick, injected so the loop runs — and
     /// is tested — away from `AVDisplayManager`.
     struct SwitchSignals {
@@ -282,9 +315,15 @@ public enum DisplayCriteriaLogic {
             if !signals.startSignalled() { signals.clearSignals() }
         }
 
-        // Checked after the drain: a headroom raised by the earlier
-        // transition is not this write's HDR.
-        if wantsHDRPanel, signals.headroomRaised() {
+        // After an overlap the headroom can't be attributed: the earlier
+        // switch may have been *to* an HDR default (reset returning to an
+        // HDR10/60 Hz home mode), and the raised headroom lingers past its
+        // end (see `panelPresentsHDR`). Read as "already HDR" it returned
+        // before this write's own switch — DV/24 Hz — had even started. So a
+        // headroom already raised once the drain ends is ignored for the
+        // whole wait; only one that rises later is this write's signal.
+        let headroomCounts = wantsHDRPanel && !(overlapped && signals.headroomRaised())
+        if !overlapped, headroomCounts, signals.headroomRaised() {
             return report(.alreadyPresentingHDR)
         }
 
@@ -300,7 +339,7 @@ public enum DisplayCriteriaLogic {
             if !overlapped, signals.endSignalled() {
                 return report(.modeSwitchEnd, startedAt: startedAt)
             }
-            if wantsHDRPanel, signals.headroomRaised() {
+            if headroomCounts, signals.headroomRaised() {
                 return report(.headroomRaised, startedAt: startedAt)
             }
             let inProgress = signals.inProgress()
@@ -329,7 +368,7 @@ public enum DisplayCriteriaLogic {
         while ContinuousClock.now < settleDeadline, !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(50))
             if signals.endSignalled() { return report(.modeSwitchEnd, startedAt: startedAt) }
-            if wantsHDRPanel, signals.headroomRaised() {
+            if headroomCounts, signals.headroomRaised() {
                 return report(.headroomRaised, startedAt: startedAt)
             }
             if !signals.inProgress() {
@@ -400,7 +439,7 @@ public final class DisplayCriteriaController {
     /// Whether a mode switch was already running when `apply` wrote — read
     /// at write time because by the time `waitForSwitch` installs its
     /// observers, the earlier switch and the write's own look the same.
-    private var switchInFlightAtWrite = false
+    private var overlap = DisplayCriteriaLogic.WriteOverlap()
 
     /// The criteria still active on the panel, shared across controller
     /// instances. Hosts build a fresh controller per playback, and the
@@ -456,8 +495,10 @@ public final class DisplayCriteriaController {
     @discardableResult
     public func apply(_ choice: DisplayCriteriaChoice) -> ApplyResult {
         let manager = window.avDisplayManager
-        switchInFlightAtWrite = false
-        guard manager.isDisplayCriteriaMatchingEnabled else { return .matchingDisabled }
+        guard manager.isDisplayCriteriaMatchingEnabled else {
+            overlap.record(switchInFlightAtWrite: false)
+            return .matchingDisabled
+        }
 
         // Match Frame Rate keys off the rate even when the range doesn't
         // change, so an unknown rate still needs a plausible value for the
@@ -469,7 +510,10 @@ public final class DisplayCriteriaController {
             // Adopt the active criteria rather than merely observing them:
             // this session now depends on the mode a previous controller
             // programmed, so this controller's `reset()` must be willing to
-            // return the panel to default on teardown.
+            // return the panel to default on teardown. `overlap` is left as
+            // is: a re-apply of the same criteria mid-switch must not drop
+            // the earlier write's overlap (its wait would settle on the
+            // previous switch's end).
             written = next
             lastWriteWantedHDR = choice.wantsHDRPanel
             return .alreadyActive
@@ -479,11 +523,10 @@ public final class DisplayCriteriaController {
             // A CoreMedia refusal to build a 4-field description is not a
             // state this can recover from; play without the pre-switch and
             // let the media-direct fallback catch a rejection.
+            overlap.record(switchInFlightAtWrite: false)
             return .matchingDisabled
         }
-        // A redundant write above skips this on purpose: a switch running
-        // then is toward these same criteria, so its end is a valid settle.
-        switchInFlightAtWrite = manager.isDisplayModeSwitchInProgress
+        overlap.record(switchInFlightAtWrite: manager.isDisplayModeSwitchInProgress)
         manager.preferredDisplayCriteria = AVDisplayCriteria(
             refreshRate: Float(rate), formatDescription: description
         )
@@ -534,10 +577,10 @@ public final class DisplayCriteriaController {
         let bounds = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: lastWriteWantedHDR)
         let manager = window.avDisplayManager
         let screen = window.screen
-        // Consumed: a second wait without a new write has no earlier switch
-        // of its own to drain.
-        let inFlight = switchInFlightAtWrite
-        switchInFlightAtWrite = false
+        // Read, not consumed: a concurrent wait for the same write needs it
+        // too. Cleared when this wait ends, unless a newer write replaced it.
+        let (inFlight, generation) = overlap.beginWait()
+        defer { overlap.endWait(generation: generation) }
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
         // dead startup time on every load.
         guard manager.isDisplayCriteriaMatchingEnabled else {
