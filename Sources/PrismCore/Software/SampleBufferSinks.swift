@@ -156,9 +156,12 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     ///
     /// iOS 17+: `status` by typed KVO on the renderer, the flag by the
     /// renderer's notification (the SDK documents it as not KVO-observable).
-    /// iOS 16: the layer's notification, read back on the main actor because
-    /// the layer's properties are isolated there; the SDK flips `status` to
-    /// failed together with the flag, so the lost-session case is covered.
+    /// iOS 16: two layer notifications, one per signal. A bad sample fails
+    /// the layer without touching the flush flag, so watching the flag alone
+    /// would leave that player black with `isReadyForMoreMediaData` still
+    /// true. The failed-to-decode notification *is* the failure, so it fires
+    /// directly; the flag change is read back on the main actor because the
+    /// layer's properties are isolated there.
     ///
     /// Every delivery hops to `queue` and re-checks the switch there, and
     /// `stopObservingFailure` flips it — the pipeline calls both on `queue`, so
@@ -198,7 +201,11 @@ final class DisplayLayerVideoSink: VideoSampleSink {
                     fire()
                 }
             }
-            failureObservers = [flush]
+            let failed = NotificationCenter.default.addObserver(
+                forName: .AVSampleBufferDisplayLayerFailedToDecode,
+                object: layer, queue: nil
+            ) { _ in fire() }
+            failureObservers = [flush, failed]
         }
     }
 
