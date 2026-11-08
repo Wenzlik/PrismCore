@@ -143,7 +143,7 @@ final class DisplayLayerVideoSink: VideoSampleSink {
         // landing it a main-queue turn later cannot wipe a later frame.
         renderer.flush()
         if removingDisplayedImage {
-            Task { @MainActor [layer] in layer.flushAndRemoveImage() }
+            Task { @MainActor [layer = self.layer] in layer.flushAndRemoveImage() }
         }
     }
 
@@ -188,7 +188,7 @@ final class DisplayLayerVideoSink: VideoSampleSink {
             }
             failureObservers = [status, flush]
         } else {
-            let layer = layer
+            let layer = self.layer
             let flush = NotificationCenter.default.addObserver(
                 forName: .AVSampleBufferDisplayLayerRequiresFlushToResumeDecodingDidChange,
                 object: layer, queue: nil
