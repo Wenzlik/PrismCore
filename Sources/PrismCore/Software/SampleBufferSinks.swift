@@ -98,10 +98,17 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     /// The object samples are enqueued to, and the one handed to the
     /// synchronizer.
     let renderer: AVQueuedSampleBufferRendering
+    /// The same layer, reachable only on the main actor. The layer is not
+    /// `Sendable`, so the iOS 16 paths that must touch it from a background
+    /// notification or a flush cannot capture it into a main-actor hop; the
+    /// box is main-actor isolated, hence `Sendable`, and the compiler proves
+    /// the layer is only dereferenced on the main actor.
+    private let mainActorLayer: MainActorLayer
 
     @MainActor
     init(layer: AVSampleBufferDisplayLayer = AVSampleBufferDisplayLayer()) {
         self.layer = layer
+        self.mainActorLayer = MainActorLayer(layer)
         if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *) {
             self.renderer = layer.sampleBufferRenderer
         } else {
@@ -143,7 +150,7 @@ final class DisplayLayerVideoSink: VideoSampleSink {
         // landing it a main-queue turn later cannot wipe a later frame.
         renderer.flush()
         if removingDisplayedImage {
-            Task { @MainActor [layer = self.layer] in layer.flushAndRemoveImage() }
+            Task { @MainActor [box = self.mainActorLayer] in box.layer.flushAndRemoveImage() }
         }
     }
 
@@ -191,12 +198,13 @@ final class DisplayLayerVideoSink: VideoSampleSink {
             }
             failureObservers = [status, flush]
         } else {
-            let layer = self.layer
+            let box = self.mainActorLayer
             let flush = NotificationCenter.default.addObserver(
                 forName: .AVSampleBufferDisplayLayerRequiresFlushToResumeDecodingDidChange,
                 object: layer, queue: nil
             ) { _ in
                 Task { @MainActor in
+                    let layer = box.layer
                     guard layer.requiresFlushToResumeDecoding || layer.status == .failed else { return }
                     fire()
                 }
@@ -223,6 +231,15 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     }
 
     deinit { stopObservingFailure() }
+}
+
+/// Holds a display layer so it can cross into main-actor hops without being
+/// captured as a non-`Sendable` value: being main-actor isolated makes the box
+/// `Sendable`, and reading `layer` compiles only on the main actor.
+@MainActor
+private final class MainActorLayer {
+    let layer: AVSampleBufferDisplayLayer
+    init(_ layer: AVSampleBufferDisplayLayer) { self.layer = layer }
 }
 
 /// `AVSampleBufferAudioRenderer` behind `AudioSampleSink`.
