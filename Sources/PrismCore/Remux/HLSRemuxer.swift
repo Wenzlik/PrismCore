@@ -1632,7 +1632,9 @@ final class HLSRemuxer: @unchecked Sendable {
                 ).merging(cachedEntry?.positionsByPTS ?? [:]) { live, _ in live }
                 variant.bandwidth = Self.peakSegmentBandwidth(
                     boundaries: Self.segmentBoundaries(plan: plannedPlan, positions: keyframePositions),
-                    average: variant.bandwidth == Self.unknownSourceBandwidth ? nil : variant.bandwidth,
+                    // Provenance asked of the source, not read off the number: a real
+                    // 25 Mbit/s average equals the stub and must still set the clamp.
+                    average: measuredSourceBandwidth(input: input),
                     audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0
                 ) ?? variant.bandwidth + (renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
                     .map(\.bitRateCeilingOverSource).max() ?? 0)
@@ -3523,6 +3525,13 @@ final class HLSRemuxer: @unchecked Sendable {
     /// over-stating it costs a bigger buffer, under-stating it can make AVPlayer
     /// pace fetches below what the stream needs.
     private func sourceBandwidth(input: UnsafeMutablePointer<AVFormatContext>) -> Int {
+        measuredSourceBandwidth(input: input) ?? Self.unknownSourceBandwidth
+    }
+
+    /// The source's average rate, or `nil` when nothing declares or measures
+    /// one — kept apart from the `unknownSourceBandwidth` stub so a source
+    /// that really averages 25 Mbit/s is not mistaken for an unknown one.
+    private func measuredSourceBandwidth(input: UnsafeMutablePointer<AVFormatContext>) -> Int? {
         if input.pointee.bit_rate > 0 { return Int(input.pointee.bit_rate) }
 
         var summed: Int64 = 0
@@ -3538,7 +3547,7 @@ final class HLSRemuxer: @unchecked Sendable {
             let seconds = Double(input.pointee.duration) / Double(AV_TIME_BASE)
             return max(1, Int(Double(size) * 8 / seconds))
         }
-        return Self.unknownSourceBandwidth
+        return nil
     }
 
     /// `sourceBandwidth`'s last resort: no rate known anywhere (a remote
@@ -3554,8 +3563,8 @@ final class HLSRemuxer: @unchecked Sendable {
     /// entry must neither under-cut the average nor inflate the declaration
     /// past anything the source can be.
     ///
-    /// `average` is `nil` when the source declared no rate (only the
-    /// `unknownSourceBandwidth` stub); the clamp then uses the average the
+    /// `average` is `nil` when the source declared no rate
+    /// (`measuredSourceBandwidth`); the clamp then uses the average the
     /// same boundaries measure.
     ///
     /// `nil` — use the average — when fewer than two whole segments are
@@ -3585,18 +3594,23 @@ final class HLSRemuxer: @unchecked Sendable {
         return min(160_000_000, min(4 * base, max(2 * base, declared)))
     }
 
-    /// The planned segment starts `positions` has a byte position for. Empty
-    /// without a keyframe plan — `peakSegmentBandwidth` then falls back. A
-    /// plan entry with no position (a partial plan's uniform tail) merges
-    /// into the segment before it.
+    /// The planned segment starts with their byte positions. Empty — so
+    /// `peakSegmentBandwidth` falls back to the average — without a keyframe
+    /// plan or when any planned start has no position (a partial plan's
+    /// uniform tail, keyframes a harvest added past the stored positions):
+    /// skipping that start would measure two segments as one and average a
+    /// dense one away (90 + 2 Mbit/s read as 46).
     static func segmentBoundaries(
         plan: SegmentPlan?, positions: [Int64: Int64]
     ) -> [(position: Int64, seconds: Double)] {
         guard let plan, plan.timeBaseDen != 0 else { return [] }
         let tick = Double(plan.timeBaseNum) / Double(plan.timeBaseDen)
-        return plan.entries.compactMap { entry in
-            positions[entry.startPTS].map { (position: $0, seconds: Double(entry.startPTS) * tick) }
+        var boundaries: [(position: Int64, seconds: Double)] = []
+        for entry in plan.entries {
+            guard let position = positions[entry.startPTS] else { return [] }
+            boundaries.append((position: position, seconds: Double(entry.startPTS) * tick))
         }
+        return boundaries
     }
 }
 

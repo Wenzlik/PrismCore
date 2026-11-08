@@ -94,16 +94,48 @@ struct PeakSegmentBandwidthTests {
         #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: backwards, average: 6_000_000, audioCeiling: 0) == nil)
     }
 
-    @Test("boundaries are the planned starts with a position; the rest merge into the segment before")
+    @Test("a real 25 Mbit/s average still sets the clamp")
+    func realAverageEqualToStubClamps() {
+        // 4, 4, 4 and 88 Mbit/s segments of 2 s: the declared 25 Mbit/s is a
+        // real average, so the floor is 50 — not 8 from the 4 Mbit/s the
+        // starts alone measure.
+        let spikeLast: [(position: Int64, seconds: Double)] = [
+            (position: 0, seconds: 0), (position: 1_000_000, seconds: 2),
+            (position: 2_000_000, seconds: 4), (position: 3_000_000, seconds: 6),
+        ]
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: spikeLast, average: 25_000_000, audioCeiling: 0)
+            == 50_000_000)
+    }
+
+    @Test("boundaries are the planned starts with their byte positions")
     func boundariesFromPlanAndPositions() {
         let plan = SegmentPlan(
             entries: [.init(startPTS: 0, duration: 2), .init(startPTS: 2000, duration: 2), .init(startPTS: 4000, duration: 2)],
             basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
         )
-        let boundaries = HLSRemuxer.segmentBoundaries(plan: plan, positions: [0: 100, 4000: 900])
-        #expect(boundaries.map { $0.position } == [100, 900])
-        #expect(boundaries.map { $0.seconds } == [0, 4])
+        let boundaries = HLSRemuxer.segmentBoundaries(plan: plan, positions: [0: 100, 2000: 500, 4000: 900])
+        #expect(boundaries.map { $0.position } == [100, 500, 900])
+        #expect(boundaries.map { $0.seconds } == [0, 2, 4])
         #expect(HLSRemuxer.segmentBoundaries(plan: nil, positions: [0: 100]).isEmpty)
+    }
+
+    @Test("a planned start with no position falls back instead of merging segments")
+    func missingPositionFallsBack() {
+        // 90, 2, 2, 2 and 24 Mbit/s segments of 2 s, the start at 2 s
+        // unknown: merged, the first two would read as 46 and the peak as
+        // 55.2 instead of 108 (clamped to 96).
+        let plan = SegmentPlan(
+            entries: (0..<6).map { SegmentPlan.Entry(startPTS: Int64($0) * 2000, duration: 2) },
+            basis: .keyframeIndex, timeBaseNum: 1, timeBaseDen: 1000
+        )
+        let positions: [Int64: Int64] = [0: 0, 4000: 23_000_000, 6000: 23_500_000, 8000: 24_000_000, 10000: 30_000_000]
+        let boundaries = HLSRemuxer.segmentBoundaries(plan: plan, positions: positions)
+        #expect(boundaries.isEmpty)
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: boundaries, average: 24_000_000, audioCeiling: 0) == nil)
+        // With the position known, the spike is measured.
+        let complete = HLSRemuxer.segmentBoundaries(plan: plan, positions: positions.merging([2000: 22_500_000]) { a, _ in a })
+        #expect(HLSRemuxer.peakSegmentBandwidth(boundaries: complete, average: 24_000_000, audioCeiling: 0)
+            == 96_000_000)
     }
 
     @Test("the keyframe cache keeps the positions, so a hit can still measure the peak")
