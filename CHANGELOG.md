@@ -18,7 +18,7 @@ source-compatible.)
   or failed with -12318. The keyframe cache keeps the positions — also across
   a later PTS-only harvest — so a cache hit measures the peak too; its
   format goes to 3, so a map stored without positions is re-learned once. Without a
-  keyframe plan or index positions it stays the average.
+  keyframe plan or a position for every planned start it stays the average.
 
 ## [4.0.1] — 2026-11-03
 
