@@ -610,7 +610,15 @@ struct SuspendedRenditionTests {
 
     @Test("A switch back mid-film, with the old track's fetch still in flight, is served promptly on the plan")
     func midFilmSwitchBackUnderConcurrentFetches() async throws {
-        let session = try PrismCoreSession(url: try fixture("h264_opus_opus_60s.mkv"))
+        // 4 s segments, so the mid-film hole is guaranteed by the producer's
+        // 30 s lead cap rather than by how fast it happens to run. The
+        // suspension is asked for at the third alternate segment, with demand
+        // at index 3 (12 s): production may run to the segment opening at
+        // 42 s (10), the fetch of 4 lets a producer parked there cut one more
+        // (11), and that cut applies the suspension — so the hole is at 12 at
+        // the latest, two before the last (14). At the default 6 s the same
+        // cap reaches the last segments, and a fast producer filled the hole.
+        let session = try PrismCoreSession(url: try fixture("h264_opus_opus_60s.mkv"), segmentTargetDuration: 4)
         let master = try await session.start()
         defer { Task { await session.stop() } }
         let base = master.deletingLastPathComponent()
@@ -636,7 +644,9 @@ struct SuspendedRenditionTests {
         let defaultInit = try await fetch("audio0/init.mp4")
         _ = try await fetch(segment("audio0", 0))
         _ = try await fetch("audio1/init.mp4")
-        for index in 1...3 {
+        // Through 4, not 3: a producer parked on its lead cap applies a
+        // suspension only at its next cut, and demand at 4 is what gives it one.
+        for index in 1...4 {
             _ = try await fetch(segment("", index))
             _ = try await fetch(segment("audio1", index))
         }
