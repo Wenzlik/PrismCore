@@ -8,8 +8,8 @@ import Libavformat
 /// on a build without `skip_attachments` changes nothing.
 ///
 /// The policy is tested through the pure option builder with `supported`
-/// forced, so it holds on the bundled FFmpeg (which lacks the option) and on
-/// a future one alike.
+/// forced, so it holds on any FFmpeg; the linked build (Wenzlik/MPVKit 1.0.2,
+/// FFmpeg n8.1.3) is checked separately to really have the option.
 struct MatroskaAttachmentSkipTests {
 
     @Test func defaultFirstOpenDoesNotRequestSkip() {
@@ -46,6 +46,29 @@ struct MatroskaAttachmentSkipTests {
             // headers absent: reconnect, reconnect_streamed, probesize, analyzeduration.
             #expect(av_dict_count(options) == 4)
         }
+    }
+
+    /// The package floor is MPVKit 1.0.2, whose FFmpeg has the option. A
+    /// `false` here means an older FFmpeg got linked and every re-open is
+    /// back to reading the fonts in full.
+    @Test func linkedFFmpegHasTheOption() {
+        #expect(SourceOpenTuning.matroskaSkipsAttachments)
+    }
+
+    /// The capability must describe the demuxer that actually opens files, not
+    /// just an option table: `avformat_open_input` consumes the keys it knows
+    /// and hands unknown ones back in the dictionary, so a leftover key would
+    /// mean the skip is silently ignored.
+    @Test func linkedDemuxerConsumesTheOption() throws {
+        let url = try #require(Bundle.module.url(forResource: "h264_aac_srt", withExtension: "mkv", subdirectory: "Fixtures"))
+        var options: OpaquePointer?
+        av_dict_set(&options, SourceOpenTuning.attachmentSkipKey, "1", 0)
+        defer { av_dict_free(&options) }
+        var input: UnsafeMutablePointer<AVFormatContext>?
+        try FFmpegError.check(avformat_open_input(&input, url.path, nil, &options), "avformat_open_input")
+        defer { avformat_close_input(&input) }
+        let leftover = av_dict_get(options, SourceOpenTuning.attachmentSkipKey, nil, 0) != nil
+        #expect(leftover == !SourceOpenTuning.matroskaSkipsAttachments)
     }
 
     @Test func detectionIsReportedInCapabilities() {
@@ -87,9 +110,9 @@ struct MatroskaAttachmentSkipTests {
         #expect(HLSRemuxer.trimmingTrailingAttachments(coverFirst) == coverFirst)
     }
 
-    /// Opting in on this build must be invisible: same streams, same packets.
-    /// (Where the option is supported this fixture has no attachments, so the
-    /// expectation holds there too.)
+    /// Opting in must be invisible on a file without attachments: same
+    /// streams, same packets. The fixture has none, so this holds whether or
+    /// not the linked demuxer honours the skip.
     @Test func optInLeavesTracksAndPacketsUnchanged() throws {
         let url = try #require(Bundle.module.url(forResource: "h264_aac_srt", withExtension: "mkv", subdirectory: "Fixtures"))
         let plain = try snapshot(SourceProbe.open(url: url))
