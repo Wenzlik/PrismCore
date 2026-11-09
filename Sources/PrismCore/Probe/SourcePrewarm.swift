@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// What a prewarm did, for the host's log line.
 ///
@@ -367,10 +368,9 @@ enum SourcePrewarmFetcher {
         }
     }
 
-    private final class CancellationFlag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        var isSet: Bool { lock.withLock { value } }
-        func set() { lock.withLock { value = true } }
+    private final class CancellationFlag: Sendable {
+        private let value = OSAllocatedUnfairLock(initialState: false)
+        var isSet: Bool { value.withLock { $0 } }
+        func set() { value.withLock { $0 = true } }
     }
 }

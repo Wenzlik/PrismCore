@@ -16,6 +16,7 @@ struct SlidingWindowPlaybackTests {
     }
 
     /// The window's grace-period clock, moved by the test.
+    // Safety: mutable state is read and written only under `lock`.
     private final class SteppedClock: @unchecked Sendable {
         private let lock = NSLock()
         private var value: TimeInterval = 0

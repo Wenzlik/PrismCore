@@ -14,6 +14,7 @@ import Foundation
 /// it skipped. It sleeps on this condition and a `requestProduction` wakes it —
 /// no interval, so the first hop of a cold seek's latency is gone rather than
 /// merely short (#44).
+// Safety: every mutable field is touched only while holding `lock` (an NSCondition).
 final class DemandCoordinator: @unchecked Sendable {
 
     private let lock = NSCondition()

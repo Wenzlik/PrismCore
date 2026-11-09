@@ -781,6 +781,7 @@ struct KeyframeIndexCacheTests {
 
 /// A value the scripted origin's handler reads on its own queue while the
 /// test changes it — the "file replaced on the server" switch.
+// Safety: mutable state is read and written only under `lock`.
 private final class LockedString: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: String
@@ -792,6 +793,7 @@ private final class LockedString: @unchecked Sendable {
 }
 
 /// An error a producer thread threw, readable back on the test's thread.
+// Safety: mutable state is read and written only under `lock`.
 private final class FailureBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: (any Error)?
@@ -802,6 +804,7 @@ private final class FailureBox: @unchecked Sendable {
 }
 
 /// The plan origin a remuxer reported, readable back on the test's thread.
+// Safety: mutable state is read and written only under `lock`.
 private final class PlanOriginBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: SegmentPlanOrigin?
@@ -813,6 +816,7 @@ private final class PlanOriginBox: @unchecked Sendable {
 
 /// Whether a `TailSealedInput` is still refusing its tail, shared by every
 /// input the factory hands out for one play.
+// Safety: mutable state is read and written only under `lock`.
 private final class TailSeal: @unchecked Sendable {
     private let lock = NSLock()
     private var sealedAtOrNil: Int?
@@ -834,6 +838,7 @@ private final class TailSeal: @unchecked Sendable {
 /// counted rather than timed, so the same prefix comes out on every machine —
 /// a local file's linear scan is otherwise far too fast for a read budget to
 /// interrupt.
+// Safety: the cursor is read and written only under `lock`; the bytes are immutable and the seal is itself locked.
 private final class TailSealedInput: PrismCoreInput, @unchecked Sendable {
     private let bytes: [UInt8]
     private let seal: TailSeal

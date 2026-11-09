@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Everything the engine knows about one playback, as one value a host can
 /// attach to a bug report: which build, what the source turned out to be,
@@ -768,16 +769,15 @@ extension SessionDiagnosticReport.Runtime.Event {
 /// stages regardless, and the producer thread emits them, hence the lock.
 /// Five stages per session; the cap only guards against a future emitter
 /// that forgets startup ends.
-final class StartupRecord: @unchecked Sendable {
-    private let lock = NSLock()
-    private var marks: [StartupCheckpoint] = []
+final class StartupRecord: Sendable {
+    private let marks = OSAllocatedUnfairLock<[StartupCheckpoint]>(initialState: [])
     private static let cap = 16
 
     func append(_ mark: StartupCheckpoint) {
-        lock.withLock { if marks.count < Self.cap { marks.append(mark) } }
+        marks.withLock { if $0.count < Self.cap { $0.append(mark) } }
     }
 
-    var checkpoints: [StartupCheckpoint] { lock.withLock { marks } }
+    var checkpoints: [StartupCheckpoint] { marks.withLock { $0 } }
 }
 
 // MARK: - Routing without a session

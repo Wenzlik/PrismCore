@@ -20,6 +20,11 @@ source-compatible.)
   format goes to 3, so a map stored without positions is re-learned once. Without a
   keyframe plan or a position for every planned start it stays the average.
 
+- The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
+- `SoftwarePlaybackPipeline.routeDescription` is safe to read from any thread while tracks switch or the pipeline stops.
+- `SoftwarePlaybackPipeline.failureError` is safe to read from any thread, even if a later error replaces it.
+- `SoftwarePlaybackPipeline()` (the shipping init) is now `@MainActor`: it reads the display layer's main-actor `sampleBufferRenderer`. Callers off the main actor `await` it.
+
 ## [4.0.1] — 2026-11-03
 
 Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.

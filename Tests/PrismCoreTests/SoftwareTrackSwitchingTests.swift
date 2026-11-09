@@ -53,6 +53,7 @@ struct SoftwareTrackSwitchingTests {
         return box.get() ?? false
     }
 
+    // Safety: mutable state is read and written only under `lock`.
     final class LockedResult: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Bool?

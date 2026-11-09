@@ -401,6 +401,7 @@ struct ProducerRecoveryTests {
 
 /// What the scripted origin does with the copy loop's second block, and with
 /// the re-opens that follow it.
+// Safety: mutable state is read and written only under `lock`.
 final class OriginScript: @unchecked Sendable {
     private let lock = NSLock()
     private var failures: [ScriptedHTTPServer.Reply]
@@ -439,6 +440,7 @@ final class OriginScript: @unchecked Sendable {
 }
 
 /// Collects a session's events from the moment it is built.
+// Safety: mutable state is read and written only under `lock`.
 final class EventLog: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [PlaybackEvent] = []
@@ -459,6 +461,7 @@ final class EventLog: @unchecked Sendable {
 /// Hands out inputs over `media`, instance `n` behaving as `behaviours[n]`
 /// (`otherwise` past the end) — a share that went away, bytes that never
 /// read, a re-open that never answers.
+// Safety: the counters are touched only while holding `condition`; the behaviour and media are immutable.
 final class FlakyInputFactory: @unchecked Sendable {
     enum Behaviour {
         case healthy
@@ -536,6 +539,7 @@ final class FlakyInputFactory: @unchecked Sendable {
     fileprivate var bytes: [UInt8] { media }
 }
 
+// Safety: the cursor is touched only by the engine's single reader of this instance; anything another thread sees sits behind a lock.
 private final class FlakyInput: CancellablePrismCoreInput, @unchecked Sendable {
     struct ShareWentAway: Error {}
     private let factory: FlakyInputFactory

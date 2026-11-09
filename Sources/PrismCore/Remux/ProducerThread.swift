@@ -14,6 +14,7 @@ import Foundation
 /// So the producer gets a real thread. Nothing here is a general-purpose task
 /// primitive — it does what a blocking producer needs and no more: carry the
 /// thrown error out, and let an actor `await` the exit without blocking.
+// Safety: `finished`, `failure` and `waiters` are read and written only under `lock`.
 final class ProducerThread: @unchecked Sendable {
 
     /// Guards `finished`, `failure` and `waiters`, and is what a `join` sleeps

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Libavformat
 import Libavcodec
 import Libavutil
@@ -56,6 +57,7 @@ import Libavutil
 /// - A Dolby Vision Profile 7 source has its RPUs converted to 8.1 with the
 ///   enhancement layer dropped (`DolbyVisionRPUConverter`), so a dual-layer file
 ///   Apple can't decode arrives as a single-layer one it can.
+// Safety: the FFmpeg contexts and writers are confined to the producer thread; every field another thread reads or sets (audio delay, guards, plan, stats, renditions, ...) has its own lock next to it.
 final class HLSRemuxer: @unchecked Sendable {
     let residentSegments = ResidentSegmentStore()
     let audioDeliveryStore = AudioDeliveryStore()
@@ -1922,7 +1924,7 @@ final class HLSRemuxer: @unchecked Sendable {
             let directories = [outputDirectory] + renditions.map {
                 outputDirectory.appendingPathComponent($0.directoryName)
             }
-            unlinkQueue.async { [residentSegments] in
+            unlinkQueue.async { [residentSegments, victims] in
                 for victim in victims {
                     residentSegments.unlinkRetired(index: victim, directories: directories)
                 }
@@ -3623,15 +3625,14 @@ private struct SourceReadFailure: Error {
 
 /// Tiny lock-protected flag — the cancel signal crossing from the session
 /// actor into the synchronous copy loop.
-final class LockedFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
+final class LockedFlag: Sendable {
+    private let value = OSAllocatedUnfairLock(initialState: false)
 
     var isSet: Bool {
-        lock.withLock { value }
+        value.withLock { $0 }
     }
 
     func set() {
-        lock.withLock { value = true }
+        value.withLock { $0 = true }
     }
 }
