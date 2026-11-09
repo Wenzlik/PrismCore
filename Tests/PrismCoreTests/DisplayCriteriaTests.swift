@@ -264,6 +264,338 @@ struct DisplayCriteriaLogicTests {
     }
 }
 
+// MARK: - Settle wait
+
+/// A panel whose switch timeline is scripted in milliseconds of virtual
+/// time: in-progress windows plus start / end notification instants. A
+/// clear forgets every notification posted up to that moment, like the
+/// controller's flags. Time moves only when the settle loop sleeps, so a
+/// busy test machine can't land a wait on a different stage boundary.
+@MainActor
+private final class ScriptedPanel {
+    private let t0 = ContinuousClock.now
+    var inProgress: [Range<Int>] = []
+    var starts: [Int] = []
+    var ends: [Int] = []
+    var headroom: [Range<Int>] = []
+    /// The waiting task is cancelled once a sleep reaches this instant.
+    var cancelAt: Int?
+    private var clearedAt = -1
+    private(set) var now = 0
+    private func posted(_ events: [Int]) -> Bool {
+        let now = self.now
+        return events.contains { $0 > clearedAt && $0 <= now }
+    }
+
+    var signals: DisplayCriteriaLogic.SwitchSignals {
+        .init(
+            inProgress: { let now = self.now; return self.inProgress.contains { $0.contains(now) } },
+            headroomRaised: { let now = self.now; return self.headroom.contains { $0.contains(now) } },
+            startSignalled: { self.posted(self.starts) },
+            endSignalled: { self.posted(self.ends) },
+            clearSignals: { self.clearedAt = self.now }
+        )
+    }
+
+    var clock: DisplayCriteriaLogic.SettleClock {
+        .init(
+            now: { self.t0.advanced(by: .milliseconds(self.now)) },
+            sleep: { duration in
+                self.now += Int(duration / .milliseconds(1))
+                if let cancelAt = self.cancelAt, self.now >= cancelAt {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        )
+    }
+}
+
+@MainActor
+private func settle(
+    _ panel: ScriptedPanel, inFlightAtWrite: Bool, wantsHDR: Bool = false,
+    grace: Duration = .milliseconds(300), cap: Duration = .milliseconds(800)
+) async -> DisplayCriteriaLogic.SettleReport {
+    await DisplayCriteriaLogic.settle(
+        wantsHDRPanel: wantsHDR, switchInFlightAtWrite: inFlightAtWrite,
+        startGrace: grace, settleCap: cap, signals: panel.signals, clock: panel.clock
+    )
+}
+
+@Suite("Display criteria settle wait")
+@MainActor
+struct DisplayCriteriaSettleTests {
+
+    /// The reset's switch back to the default mode is running at write time
+    /// (0–200 ms, its end posted at 200 and once more late at 230); the
+    /// write's own switch runs 400–600 ms.
+    private func overlappedPanel() -> ScriptedPanel {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<600]
+        panel.starts = [400]
+        panel.ends = [200, 230, 600]
+        return panel
+    }
+
+    @Test("A write that lands mid-switch settles on its own switch, not the earlier one's end")
+    func overlapSettlesOnOwnSwitch() async {
+        let report = await settle(overlappedPanel(), inFlightAtWrite: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 350)
+        #expect(report.totalMilliseconds >= 550)
+        guard case .drained(let ms)? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+        #expect(ms >= 150 && ms < 400)
+        #expect(report.summary.hasSuffix("(earlier switch drained at \(ms)ms)"))
+    }
+
+    @Test("Without the write-time flag the earlier switch's end settles the wait — the bug")
+    func overlapWithoutFlagSettlesEarly() async {
+        let report = await settle(overlappedPanel(), inFlightAtWrite: false)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect(report.totalMilliseconds < 400)
+        #expect(report.priorSwitch == nil)
+    }
+
+    @Test("A chained switch (old end and new start together, flag never down) settles on its own end")
+    func overlapChainedWithoutIdle() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<700]
+        panel.starts = [200]
+        panel.ends = [200, 700]
+        let report = await settle(panel, inFlightAtWrite: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 150)
+        #expect(report.totalMilliseconds >= 650)
+        guard case .drained? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
+    @Test("A write tvOS folded into the running switch costs at most one grace extra")
+    func overlapWithNoNewSwitch() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200]
+        panel.ends = [200]
+        let report = await settle(panel, inFlightAtWrite: true)
+        #expect(report.outcome == .noSwitchStarted)
+        #expect(report.totalMilliseconds >= 450 && report.totalMilliseconds < 900)
+        guard case .drained? = report.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
+    @Test("After an overlap, headroom left raised by the earlier HDR switch does not settle an HDR write")
+    func overlapIgnoresStaleHeadroom() async {
+        // Reset returned the panel to an HDR10 home mode (headroom up from
+        // 150 ms and lingering); the write asks for DV and switches 400–600.
+        let panel = overlappedPanel()
+        panel.headroom = [150..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: true, wantsHDR: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 350)
+        #expect(report.totalMilliseconds >= 550)
+    }
+
+    @Test("After an overlap, headroom that rises only during the write's own switch still settles it")
+    func overlapCountsFreshHeadroom() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<1_000_000]
+        panel.starts = [400]
+        panel.ends = [200]
+        panel.headroom = [500..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: true, wantsHDR: true)
+        #expect(report.outcome == .headroomRaised)
+        #expect(report.totalMilliseconds >= 450 && report.totalMilliseconds < 900)
+    }
+
+    @Test("After the drain cap runs out, headroom the earlier switch raises later does not settle an HDR write")
+    func overlapIgnoresHeadroomRaisedAfterDrainCap() async {
+        // The switch back after reset runs 0–450 ms and raises the headroom
+        // at 360 ms; the 300 ms drain cap expires before either, with the
+        // headroom still down. The write's own switch runs 600–800 ms.
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<450, 600..<800]
+        panel.starts = [600]
+        panel.ends = [450, 800]
+        panel.headroom = [360..<1_000_000]
+        let report = await settle(
+            panel, inFlightAtWrite: true, wantsHDR: true,
+            grace: .milliseconds(500), cap: .milliseconds(300)
+        )
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? 0) >= 550)
+        #expect(report.totalMilliseconds >= 750)
+        guard case .drainCapExpired? = report.priorSwitch else {
+            Issue.record("expected an expired drain, got \(String(describing: report.priorSwitch))")
+            return
+        }
+    }
+
+    @Test("Without an overlap, raised headroom is still an immediate no-wait")
+    func headroomWithoutOverlap() async {
+        let panel = ScriptedPanel()
+        panel.headroom = [0..<1_000_000]
+        let report = await settle(panel, inFlightAtWrite: false, wantsHDR: true)
+        #expect(report.outcome == .alreadyPresentingHDR)
+    }
+
+    private let criteriaA = DisplayCriteriaLogic.WrittenCriteria(target: .dolbyVision, refreshRate: 24)
+
+    private func finished(
+        _ prior: DisplayCriteriaLogic.SettleReport.PriorSwitch?, cancelled: Bool = false
+    ) -> DisplayCriteriaLogic.SettleReport {
+        .init(outcome: .modeSwitchEnd, totalMilliseconds: 0, priorSwitch: prior, wasCancelled: cancelled)
+    }
+
+    @Test("A redundant re-apply between the write and the wait keeps the overlap")
+    func overlapSurvivesRedundantApply() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        // A redundant apply touches nothing — that is the whole fix.
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("Concurrent waits for one write both drain; a finished wait clears only its own write")
+    func overlapSharedByConcurrentWaits() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let first = active.beginWait()
+        let second = active.beginWait()
+        #expect(first.inFlight && second.inFlight)
+        active.endWait(generation: first.generation, report: finished(.drained(afterMilliseconds: 100)))
+        #expect(!active.beginWait().inFlight)
+
+        // A newer overlapping write during a wait survives that wait's end.
+        active.wroteNothing()
+        let stale = active.beginWait()
+        active.wrote(criteriaA, switchInFlight: true)
+        active.endWait(generation: stale.generation, report: finished(.drained(afterMilliseconds: 100)))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait cancelled mid-drain leaves the overlap for the next wait on the same write")
+    func overlapSurvivesCancelledWait() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let cancelled = active.beginWait()
+        active.endWait(
+            generation: cancelled.generation,
+            report: finished(.drainCapExpired(afterMilliseconds: 50), cancelled: true)
+        )
+        // Also after a redundant re-apply, which touches nothing.
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: active.criteria, next: criteriaA))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait whose drain cap ran out leaves the overlap for the next wait on the same write")
+    func overlapSurvivesExpiredDrain() {
+        var active = DisplayCriteriaLogic.ActiveWrite()
+        active.wrote(criteriaA, switchInFlight: true)
+        let expired = active.beginWait()
+        // Not cancelled, yet the earlier switch never ended — nothing cleared.
+        active.endWait(generation: expired.generation, report: finished(.drainCapExpired(afterMilliseconds: 2_000)))
+        #expect(active.beginWait().inFlight)
+        // A wait without a prior switch to report clears nothing either.
+        active.endWait(generation: expired.generation, report: finished(nil))
+        #expect(active.beginWait().inFlight)
+    }
+
+    @Test("A wait cancelled after its drain, before the write's own switch, leaves the overlap; the next wait ignores stale headroom")
+    func overlapSurvivesWaitCancelledAfterDrain() async {
+        // Reset went back to an HDR10 home mode (0–200 ms, headroom up from
+        // 150 ms and lingering); the DV write's own switch runs 400–600 ms.
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<200, 400..<600]
+        panel.starts = [400]
+        panel.ends = [200, 600]
+        panel.headroom = [150..<1_000_000]
+        var shared = DisplayCriteriaLogic.ActiveWrite()
+        shared.wrote(criteriaA, switchInFlight: true)
+
+        // First wait drains at 200 ms and is cancelled at 250 ms, mid-stage 1.
+        let first = shared.beginWait()
+        panel.cancelAt = 250
+        let cancelled = await Task { @MainActor in
+            await settle(panel, inFlightAtWrite: first.inFlight, wantsHDR: true)
+        }.value
+        guard case .drained? = cancelled.priorSwitch else {
+            Issue.record("expected a drained prior switch, got \(String(describing: cancelled.priorSwitch))")
+            return
+        }
+        #expect(cancelled.wasCancelled)
+        shared.endWait(generation: first.generation, report: cancelled)
+
+        // A second controller adopts the same criteria (redundant, touches
+        // nothing) and waits for the same write on the same timeline.
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
+        let second = shared.beginWait()
+        #expect(second.inFlight)
+        panel.cancelAt = nil
+        let report = await settle(panel, inFlightAtWrite: second.inFlight, wantsHDR: true)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect(report.switchStartedAfterMilliseconds != nil)
+        #expect(panel.now >= 600)
+        shared.endWait(generation: second.generation, report: report)
+        #expect(!shared.beginWait().inFlight)
+    }
+
+    @Test("A controller adopting criteria written mid-switch inherits the overlap with them")
+    func adoptedCriteriaCarryTheOverlap() {
+        // One shared value, as the controller holds it class-wide: controller
+        // A writes mid-switch, controller B's same-criteria apply is
+        // redundant and touches nothing, B's wait still drains.
+        var shared = DisplayCriteriaLogic.ActiveWrite()
+        shared.wrote(criteriaA, switchInFlight: true)
+        #expect(DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
+        #expect(shared.beginWait().inFlight)
+        // A reset drops the criteria, so the next apply really writes and
+        // records its own overlap.
+        shared.reset()
+        #expect(!DisplayCriteriaLogic.writeIsRedundant(previous: shared.criteria, next: criteriaA))
+    }
+
+    @Test("Normal switch without an overlap is unchanged")
+    func normalSwitch() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [100..<300]
+        panel.starts = [100]
+        panel.ends = [300]
+        let report = await settle(panel, inFlightAtWrite: false)
+        #expect(report.outcome == .modeSwitchEnd)
+        #expect((report.switchStartedAfterMilliseconds ?? -1) >= 50)
+        #expect(report.totalMilliseconds >= 250 && report.totalMilliseconds < 600)
+        #expect(report.priorSwitch == nil)
+        #expect(!report.wasCancelled)
+    }
+
+    @Test("No switch at all still exits after the grace")
+    func noSwitch() async {
+        let report = await settle(ScriptedPanel(), inFlightAtWrite: false)
+        #expect(report.outcome == .noSwitchStarted)
+        #expect(report.totalMilliseconds >= 250 && report.totalMilliseconds < 700)
+        #expect(report.priorSwitch == nil)
+    }
+
+    @Test("Cancellation ends the wait at once, even mid-drain of a stuck switch")
+    func cancellationEndsWait() async {
+        let panel = ScriptedPanel()
+        panel.inProgress = [0..<1_000_000]
+        panel.cancelAt = 100
+        // Own task: the cancel must not reach the test's task.
+        let report = await Task { @MainActor in
+            await settle(panel, inFlightAtWrite: true, grace: .seconds(5), cap: .seconds(10))
+        }.value
+        #expect(report.totalMilliseconds == 100)
+        #expect(report.wasCancelled)
+        #expect(report.summary.hasPrefix("cancelled: "))
+    }
+}
+
 // MARK: - Master-vs-media routing
 
 @Suite("Master variant permission")
