@@ -3,6 +3,7 @@ import Network
 
 /// A test-only origin with real Range replies and one bandwidth schedule
 /// shared by every connection. Playback and probe traffic compete for it.
+// Safety: the listener, its connections and the pacing state are touched only on `queue`.
 final class RangeFixtureServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "prismcore.tests.origin")
     private let listener: NWListener

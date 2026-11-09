@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// One measured startup, rendered as the line a host prints: probe phases,
 /// then `start()`'s checkpoints.
@@ -133,10 +134,9 @@ package struct StartupCheckpointRun: Sendable {
 
     package static func ms(_ duration: Duration) -> Int { Int(duration / .milliseconds(1)) }
 
-    private final class Collected: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored: [String] = []
-        func append(_ line: String) { lock.withLock { stored.append(line) } }
-        var marks: [String] { lock.withLock { stored } }
+    private final class Collected: Sendable {
+        private let stored = OSAllocatedUnfairLock<[String]>(initialState: [])
+        func append(_ line: String) { stored.withLock { $0.append(line) } }
+        var marks: [String] { stored.withLock { $0 } }
     }
 }

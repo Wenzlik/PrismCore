@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import os
 
 /// The seam between "decode" and "render".
 ///
@@ -18,7 +19,7 @@ protocol SampleBufferSink: AnyObject {
     /// Ask to be called back whenever the renderer wants data. Each sink pulls
     /// on its own schedule — that independence is what keeps audio fed while
     /// video is full (see `SoftwarePlaybackPipeline`).
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void)
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void)
     func stopRequestingSamples()
     /// The AVFoundation object a `AVSampleBufferRenderSynchronizer` has to be
     /// given so this sink's control timebase is driven by the master clock.
@@ -31,13 +32,13 @@ protocol SampleBufferSink: AnyObject {
     /// flushing and re-priming; without the observation a renderer that lost
     /// its decode session in the background stays black for the rest of the
     /// film, with `isReadyForMoreMediaData` cheerfully true.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void)
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void)
     func stopObservingFailure()
 }
 
 extension SampleBufferSink {
     var queuedRenderer: AVQueuedSampleBufferRendering? { nil }
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) { }
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) { }
     func stopObservingFailure() { }
 }
 
@@ -84,48 +85,51 @@ protocol RenderTimeline: AnyObject {
 /// for everything, because the synchronizer must be given the same object the
 /// samples go to — attaching the layer while enqueuing to its
 /// `sampleBufferRenderer` leaves the samples on a timebase nothing drives.
+///
+/// The SDK marks `AVSampleBufferDisplayLayer` main-actor isolated (it is a
+/// `CALayer`), so `init` — the one place that reads `sampleBufferRenderer` — is
+/// `@MainActor`. Everything after it runs on the pipeline's queues and touches
+/// only the renderer, which the SDK documents as safe to feed from a
+/// background thread, and on iOS 16 the layer's non-isolated
+/// `AVQueuedSampleBufferRendering` face, which is what that OS had instead.
 final class DisplayLayerVideoSink: VideoSampleSink {
 
     let layer: AVSampleBufferDisplayLayer
     /// The object samples are enqueued to, and the one handed to the
     /// synchronizer.
     let renderer: AVQueuedSampleBufferRendering
+    /// The same layer, reachable only on the main actor. The layer is not
+    /// `Sendable`, so the iOS 16 paths that must touch it from a background
+    /// notification or a flush cannot capture it into a main-actor hop; the
+    /// box is main-actor isolated, hence `Sendable`, and the compiler proves
+    /// the layer is only dereferenced on the main actor.
+    private let mainActorLayer: MainActorLayer
 
-    /// Resolved alongside `renderer`, because the flush API moved with it. A
-    /// stored closure rather than a branch at every call site: the availability
-    /// decision belongs to `init`, not to seek.
-    private let flushHandler: (Bool) -> Void
-
+    @MainActor
     init(layer: AVSampleBufferDisplayLayer = AVSampleBufferDisplayLayer()) {
         self.layer = layer
+        self.mainActorLayer = MainActorLayer(layer)
         if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *) {
-            let videoRenderer = layer.sampleBufferRenderer
-            self.renderer = videoRenderer
-            self.flushHandler = { removingDisplayedImage in
-                videoRenderer.flush(removingDisplayedImage: removingDisplayedImage) { }
-            }
+            self.renderer = layer.sampleBufferRenderer
         } else {
             self.renderer = layer
-            self.flushHandler = { removingDisplayedImage in
-                if removingDisplayedImage {
-                    layer.flushAndRemoveImage()
-                } else {
-                    layer.flush()
-                }
-            }
         }
     }
 
     var isReadyForMoreSamples: Bool { renderer.isReadyForMoreMediaData }
     var queuedRenderer: AVQueuedSampleBufferRendering? { renderer }
 
-    private var observations: [NSKeyValueObservation] = []
+    /// What `stopObservingFailure` has to undo: a KVO observation and/or a
+    /// notification token, plus the switch that silences deliveries already
+    /// queued.
+    private var failureObservers: [AnyObject] = []
+    private var failureDeliveryActive: OSAllocatedUnfairLock<Bool>?
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
     }
 
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void) {
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void) {
         renderer.requestMediaDataWhenReady(on: queue, using: block)
     }
 
@@ -134,34 +138,108 @@ final class DisplayLayerVideoSink: VideoSampleSink {
     }
 
     func flush(removingDisplayedImage: Bool) {
-        flushHandler(removingDisplayedImage)
+        if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *),
+           let videoRenderer = renderer as? AVSampleBufferVideoRenderer {
+            videoRenderer.flush(removingDisplayedImage: removingDisplayedImage, completionHandler: nil)
+            return
+        }
+        // iOS 16: the queued samples go synchronously, through the layer's
+        // non-isolated rendering face, so nothing enqueued after this call is
+        // lost. Removing the picture is a main-actor call on the layer; only
+        // teardown asks for it and the pipeline is single-use afterwards, so
+        // landing it a main-queue turn later cannot wipe a later frame.
+        renderer.flush()
+        if removingDisplayedImage {
+            Task { @MainActor [box = self.mainActorLayer] in box.layer.flushAndRemoveImage() }
+        }
     }
 
-    /// Two signals, both KVO. `status == .failed` is the renderer giving up
-    /// (its `error` says why — logged by the pipeline's host, not acted on
-    /// differently here, because the remedy is the same). The layer's
-    /// `requiresFlushToResumeDecoding` is the softer one: the decode session
-    /// was lost (backgrounding, a display change) and the layer will not draw
-    /// again until flushed — the classic "came back to a black player". Both
-    /// observed on the LAYER, which reflects its renderer's state on every OS
-    /// the package supports, so the availability split above stays in `init`.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+    /// Two signals. `status == .failed` is the renderer giving up (its `error`
+    /// says why — logged by the pipeline's host, not acted on differently
+    /// here, because the remedy is the same). `requiresFlushToResumeDecoding`
+    /// is the softer one: the decode session was lost (backgrounding, a
+    /// display change) and nothing draws again until flushed — the classic
+    /// "came back to a black player".
+    ///
+    /// iOS 17+: `status` by typed KVO on the renderer, the flag by the
+    /// renderer's notification (the SDK documents it as not KVO-observable).
+    /// iOS 16: two layer notifications, one per signal. A bad sample fails
+    /// the layer without touching the flush flag, so watching the flag alone
+    /// would leave that player black with `isReadyForMoreMediaData` still
+    /// true. The failed-to-decode notification *is* the failure, so it fires
+    /// directly; the flag change is read back on the main actor because the
+    /// layer's properties are isolated there.
+    ///
+    /// Every delivery hops to `queue` and re-checks the switch there, and
+    /// `stopObservingFailure` flips it — the pipeline calls both on `queue`, so
+    /// once it returns no handler runs, not even one a notification already
+    /// queued. Without that a teardown racing a background-time status change
+    /// fires the handler for a pipeline that is already gone.
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         stopObservingFailure()
-        let statusObservation = layer.observe(\.status, options: [.new]) { layer, _ in
-            guard layer.status == .failed else { return }
-            queue.async(execute: handler)
+        let active = OSAllocatedUnfairLock(initialState: true)
+        let fire: @Sendable () -> Void = {
+            queue.async { if active.withLock({ $0 }) { handler() } }
         }
-        let flushObservation = layer.observe(\.requiresFlushToResumeDecoding, options: [.new]) { layer, _ in
-            guard layer.requiresFlushToResumeDecoding else { return }
-            queue.async(execute: handler)
+        failureDeliveryActive = active
+        if #available(iOS 17.0, tvOS 17.0, macOS 14.0, visionOS 1.0, *),
+           let videoRenderer = renderer as? AVSampleBufferVideoRenderer {
+            let status = videoRenderer.observe(\.status, options: [.new]) { renderer, _ in
+                guard renderer.status == .failed else { return }
+                fire()
+            }
+            let flush = NotificationCenter.default.addObserver(
+                forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
+                object: videoRenderer, queue: nil
+            ) { notification in
+                guard (notification.object as? AVSampleBufferVideoRenderer)?.requiresFlushToResumeDecoding == true
+                else { return }
+                fire()
+            }
+            failureObservers = [status, flush]
+        } else {
+            let box = self.mainActorLayer
+            let flush = NotificationCenter.default.addObserver(
+                forName: .AVSampleBufferDisplayLayerRequiresFlushToResumeDecodingDidChange,
+                object: layer, queue: nil
+            ) { _ in
+                Task { @MainActor in
+                    let layer = box.layer
+                    guard layer.requiresFlushToResumeDecoding || layer.status == .failed else { return }
+                    fire()
+                }
+            }
+            let failed = NotificationCenter.default.addObserver(
+                forName: .AVSampleBufferDisplayLayerFailedToDecode,
+                object: layer, queue: nil
+            ) { _ in fire() }
+            failureObservers = [flush, failed]
         }
-        observations = [statusObservation, flushObservation]
     }
 
     func stopObservingFailure() {
-        observations.forEach { $0.invalidate() }
-        observations.removeAll()
+        failureDeliveryActive?.withLock { $0 = false }
+        failureDeliveryActive = nil
+        for observer in failureObservers {
+            if let observation = observer as? NSKeyValueObservation {
+                observation.invalidate()
+            } else {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+        failureObservers.removeAll()
     }
+
+    deinit { stopObservingFailure() }
+}
+
+/// Holds a display layer so it can cross into main-actor hops without being
+/// captured as a non-`Sendable` value: being main-actor isolated makes the box
+/// `Sendable`, and reading `layer` compiles only on the main actor.
+@MainActor
+private final class MainActorLayer {
+    let layer: AVSampleBufferDisplayLayer
+    init(_ layer: AVSampleBufferDisplayLayer) { self.layer = layer }
 }
 
 /// `AVSampleBufferAudioRenderer` behind `AudioSampleSink`.
@@ -182,7 +260,7 @@ final class AudioRendererSink: AudioSampleSink {
         renderer.enqueue(sampleBuffer)
     }
 
-    func requestSamples(on queue: DispatchQueue, using block: @escaping () -> Void) {
+    func requestSamples(on queue: DispatchQueue, using block: @escaping @Sendable () -> Void) {
         renderer.requestMediaDataWhenReady(on: queue, using: block)
     }
 
@@ -197,7 +275,7 @@ final class AudioRendererSink: AudioSampleSink {
     /// The audio renderer's only failure signal is `status == .failed` (a
     /// route it could not follow, a format it stopped accepting); `error`
     /// carries the reason. Same remedy as video: flush and re-feed.
-    func observeFailure(on queue: DispatchQueue, handler: @escaping () -> Void) {
+    func observeFailure(on queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         stopObservingFailure()
         statusObservation = renderer.observe(\.status, options: [.new]) { renderer, _ in
             guard renderer.status == .failed else { return }

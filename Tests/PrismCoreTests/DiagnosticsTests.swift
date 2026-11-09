@@ -470,6 +470,7 @@ struct DiagnosticsTests {
 }
 
 /// A thread-safe tick for a handler that must answer differently per call.
+// Safety: mutable state is read and written only under `lock`.
 private final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0

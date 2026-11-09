@@ -151,6 +151,7 @@ struct CLIStopTests {
     }
 }
 
+// Safety: mutable state is read and written only under `lock`.
 private final class Flag: @unchecked Sendable {
     private let lock = NSLock()
     private var raised = false
@@ -160,6 +161,7 @@ private final class Flag: @unchecked Sendable {
 
 /// A continuation held by work that must not finish until the test says so.
 /// Release before hold resumes at once, so the order of the two cannot hang.
+// Safety: mutable state is read and written only under `lock`. The continuation is resumed after it is released.
 private final class Parked: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Never>?
@@ -182,6 +184,7 @@ private final class Parked: @unchecked Sendable {
     }
 }
 
+// Safety: mutable state is read and written only under `lock`.
 private final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0

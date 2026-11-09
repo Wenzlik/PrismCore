@@ -1,4 +1,5 @@
 import Foundation
+import os
 import AVFoundation
 import CoreMedia
 #if os(tvOS)
@@ -501,11 +502,10 @@ public final class DisplayCriteriaController {
 
 /// A one-shot boolean set from a notification queue and polled from the
 /// settle loop.
-private final class OneShotFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-    var fired: Bool { lock.withLock { value } }
-    func fire() { lock.withLock { value = true } }
+private final class OneShotFlag: Sendable {
+    private let value = OSAllocatedUnfairLock(initialState: false)
+    var fired: Bool { value.withLock { $0 } }
+    func fire() { value.withLock { $0 = true } }
 }
 
 #endif

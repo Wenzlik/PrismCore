@@ -8,6 +8,7 @@ import Network
 ///
 /// One request per connection (`Connection: close`) — the simplest shape a
 /// URLSession and FFmpeg's http both accept, and enough for a test.
+// Safety: the listener, its connections and the script are touched only on `queue`.
 final class ScriptedHTTPServer: @unchecked Sendable {
     struct Request: Sendable {
         let path: String
