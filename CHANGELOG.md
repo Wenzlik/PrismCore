@@ -8,6 +8,10 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.2] — 2026-11-09
+
+Requires Wenzlik/MPVKit 1.0.2 and Swift 6. Highlights: `BANDWIDTH` from the densest segment, display-switch overlap settle, Matroska attachment skip on reopens.
+
 - Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. Requires Wenzlik/MPVKit 1.0.2 (FFmpeg n8.1.3 with `skip_attachments`); on an older host-supplied FFmpeg it is a no-op — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
 
 - `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. A redundant re-apply, a second concurrent wait, a wait cancelled mid-drain or before the write's own switch, one whose drain cap ran out, or a fresh controller adopting the same criteria keeps that protection, and a headroom raised by the earlier switch (before the write's own switch starts) no longer settles an HDR write. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
@@ -3948,7 +3952,9 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.0...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...HEAD
+[4.0.2]: https://github.com/Wenzlik/PrismCore/compare/4.0.1...4.0.2
+[4.0.1]: https://github.com/Wenzlik/PrismCore/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/Wenzlik/PrismCore/compare/3.9.2...4.0.0
 [3.9.2]: https://github.com/Wenzlik/PrismCore/compare/3.9.1...3.9.2
 [3.9.1]: https://github.com/Wenzlik/PrismCore/compare/3.9.0...3.9.1
