@@ -230,6 +230,7 @@ public struct BridgedAudioProcessing: Sendable, Equatable {
     public static var isNightModeAvailable: Bool { DialogueBoostFilter.isNightModeAvailable }
 }
 
+// Safety: every mutable field is read and written only under `lock`.
 final class AudioDeliveryStore: @unchecked Sendable {
     private let lock = NSLock()
     private var tracks: [Int: AudioTrackDelivery] = [:]

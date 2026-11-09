@@ -109,7 +109,10 @@ struct LANReachabilityTests {
 
         let token = try #require(await server.accessToken)
         // Same length, one character different — the shape a guess would have.
-        let wrong = "A" + token.value.dropFirst()
+        // The replacement must differ from the token's own first character:
+        // a base64url token opens with "A" one run in 64, and a fixed "A"
+        // then sent the right token and drew a 200.
+        let wrong = (token.value.first == "A" ? "B" : "A") + token.value.dropFirst()
         let url = URL(string: "http://\(base.host()!):\(await server.port)/\(wrong)/index.m3u8")!
         #expect(try await fetch(url).1.statusCode == 404)
     }

@@ -16,6 +16,7 @@ import Libavutil
 /// `class`, not `final class`, since 3.1.0: `CancellableMemoryInput` below is
 /// the same transport with the interruption hook bolted on, and the tests that
 /// matter are the ones comparing the two shapes on identical bytes.
+// Safety: the cursor and failure schedule are read and written only under `lock`; the bytes are immutable.
 private class MemoryInput: PrismCoreInput, @unchecked Sendable {
     private let bytes: [UInt8]
     private let lock = NSLock()
@@ -174,6 +175,7 @@ private func absentURL(_ name: String) -> URL {
 
 /// The same transport, conforming — the only difference between it and its
 /// superclass is the one the engine is allowed to detect.
+// Safety: the call counters are read and written only under `calls`; the rest is `MemoryInput`'s.
 private final class CancellableMemoryInput: MemoryInput, CancellablePrismCoreInput, @unchecked Sendable {
     private let calls = NSLock()
     private var storedCancelCalls = 0
@@ -537,7 +539,7 @@ struct CustomInputTests {
         defer { avformat_free_context(context) }
         try readGuard.installCustomInput(on: context, factory: { input })
         #expect(readGuard.inputIsInterruptible)
-        // `nonisolated(unsafe)`: the pointer crosses onto the reader thread,
+        // Safety: the pointer crosses onto the reader thread,
         // which is the only thread that touches it — the same single-owner
         // shape every context in this engine already has.
         nonisolated(unsafe) let pb = try #require(context.pointee.pb)
@@ -641,6 +643,7 @@ struct CustomInputTests {
 
 /// A one-value lock, so the factory counter is safe to touch from wherever
 /// the probe thread runs.
+// Safety: the value is reachable only through `withLock`.
 private final class Locked<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value

@@ -2,6 +2,7 @@ import Foundation
 
 /// Shared by opt-in HTTP readers, including independent sessions to the same
 /// origin. Admission waits before occupying a connection slot.
+// Safety: all mutable state (states, throttled, observers) is touched only while holding `condition`.
 final class HTTPOriginCoordinator: @unchecked Sendable {
     static let shared = HTTPOriginCoordinator()
     private struct State {

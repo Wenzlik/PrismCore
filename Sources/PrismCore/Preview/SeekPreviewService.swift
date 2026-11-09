@@ -66,9 +66,22 @@ public actor SeekPreviewService {
     /// session's, or the two derive different keys and the map is not shared.
     private let cacheIdentity: SourceCacheIdentity?
 
-    private var input: UnsafeMutablePointer<AVFormatContext>?
-    private var interruptGuard: ReadInterruptGuard?
-    private var decoder: ThumbnailDecoder?
+    /// The C state this actor owns, in a holder whose own deinit frees it:
+    /// an actor's deinit is nonisolated and Swift 6 forbids it touching
+    /// non-Sendable stored properties, so the release rides on the holder's.
+    private let owned = OwnedDemuxer()
+    private var input: UnsafeMutablePointer<AVFormatContext>? {
+        get { owned.input }
+        set { owned.input = newValue }
+    }
+    private var interruptGuard: ReadInterruptGuard? {
+        get { owned.interruptGuard }
+        set { owned.interruptGuard = newValue }
+    }
+    private var decoder: ThumbnailDecoder? {
+        get { owned.decoder }
+        set { owned.decoder = newValue }
+    }
     private var videoStreamIndex: Int32 = -1
     private var timeBase = AVRational(num: 1, den: 1)
     private var durationSeconds: Double = 0
@@ -116,13 +129,6 @@ public actor SeekPreviewService {
         self.maxDimension = max(32, maxDimension)
         self.keyframeCacheDirectory = keyframeIndexCacheDirectory
         self.cacheIdentity = keyframeIndexCacheIdentity
-    }
-
-    deinit {
-        // The context is owned here and deinit cannot hop to the actor; by
-        // the time deinit runs nothing else can touch these fields.
-        decoder?.close()
-        if input != nil { avformat_close_input(&input) }
     }
 
     /// Tear the demuxer and decoder down now. Idempotent; later requests
@@ -360,9 +366,30 @@ public actor SeekPreviewService {
     }
 }
 
+/// The demuxer and decoder a `SeekPreviewService` owns. Only ever touched
+/// from the actor's isolation; its deinit runs when the actor's does, when
+/// nothing else can reach it.
+private final class OwnedDemuxer {
+    var input: UnsafeMutablePointer<AVFormatContext>?
+    var decoder: ThumbnailDecoder?
+    /// Held here, not on the actor: the context's interrupt callback and avio
+    /// adaptors point at it unretained, so it must outlive
+    /// `avformat_close_input`. Stored-property teardown order is not ours to
+    /// pick, so the guard is released explicitly after the close below —
+    /// otherwise a service dropped without `close()` reads freed memory.
+    var interruptGuard: ReadInterruptGuard?
+
+    deinit {
+        decoder?.close()
+        if input != nil { avformat_close_input(&input) }
+        interruptGuard = nil
+    }
+}
+
 /// The service's decode stage: libavcodec on the CPU, straight through
 /// `sws_scale` into an RGB `CGImage` at thumbnail size. One type so the codec
 /// context, the scaler and their lifetimes live together.
+
 private final class ThumbnailDecoder {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?

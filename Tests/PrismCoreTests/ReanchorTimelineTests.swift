@@ -270,6 +270,7 @@ struct ReanchorTimelineTests {
 
 /// The fixture in memory, with every forward read across `holdAt` waiting for
 /// `release()` (or the engine's cancel) — a slow origin, without the timing.
+// Safety: `released` is touched only while holding `condition`; the bytes are immutable.
 private final class HeldMedia: @unchecked Sendable {
     private let bytes: [UInt8]
     private let holdAt: Int
@@ -287,6 +288,7 @@ private final class HeldMedia: @unchecked Sendable {
 
     var make: PrismCoreInputFactory { { [self] in Input(media: self) } }
 
+    // Safety: the cursor is touched only by the engine's single reader of this instance; anything another thread sees sits behind a lock.
     private final class Input: CancellablePrismCoreInput, @unchecked Sendable {
         private let media: HeldMedia
         private var position = 0

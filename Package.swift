@@ -59,6 +59,11 @@ let package = Package(
                 checksum: "5f65ad1b1864a31838ae998ba8902f569161656f555f23c81f2b470d01c7e895"
             ),
     ] + [
+        // Every target builds in Swift 6 language mode (the tools-version
+        // default, so no `swiftLanguageMode` override): complete strict
+        // concurrency checking as errors. What the checker cannot see — C
+        // state confined to a lock, a queue or one thread — is
+        // `@unchecked Sendable` with a `// Safety:` note saying which.
         .target(
             name: "PrismCore",
             dependencies: [
@@ -68,26 +73,15 @@ let package = Package(
             // Apple's privacy manifest, so an app linking PrismCore declares
             // the required-reason APIs it uses (file timestamps: the keyframe
             // index cache; system uptime: stall and deadline clocks).
-            resources: [.copy("PrivacyInfo.xcprivacy")],
-            swiftSettings: [
-                // v0 pragmatism for the C interop layer; the goal is .v6 once
-                // the remux session's ownership story has settled.
-                .swiftLanguageMode(.v5),
-            ]
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .executableTarget(
             name: "prismcore-fuzz",
-            dependencies: ["PrismCore"],
-            swiftSettings: [
-                .swiftLanguageMode(.v5),
-            ]
+            dependencies: ["PrismCore"]
         ),
         .executableTarget(
             name: "prismcore-cli",
-            dependencies: ["PrismCore"],
-            swiftSettings: [
-                .swiftLanguageMode(.v5),
-            ]
+            dependencies: ["PrismCore"]
         ),
         .testTarget(
             name: "PrismCoreTests",

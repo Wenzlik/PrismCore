@@ -10,6 +10,25 @@ source-compatible.)
 
 - Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. Requires Wenzlik/MPVKit 1.0.2 (FFmpeg n8.1.3 with `skip_attachments`); on an older host-supplied FFmpeg it is a no-op — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
 
+- `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. A redundant re-apply, a second concurrent wait, a wait cancelled mid-drain or before the write's own switch, one whose drain cap ran out, or a fresh controller adopting the same criteria keeps that protection, and a headroom raised by the earlier switch (before the write's own switch starts) no longer settles an HDR write. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
+
+### Changed
+
+- The master's `BANDWIDTH` is declared from the densest planned segment (byte
+  positions from the demuxer index) with 20 % headroom plus a bridged audio
+  rendition's encoder rate, held between 2× and 4× the source's average (the
+  one the positions measure when the source declares no rate) and never above
+  160 Mbit/s. An average under-declared VBR UHD remuxes and AVPlayer stalled
+  or failed with -12318. The keyframe cache keeps the positions — also across
+  a later PTS-only harvest — so a cache hit measures the peak too; its
+  format goes to 3, so a map stored without positions is re-learned once. Without a
+  keyframe plan or a position for every planned start it stays the average.
+
+- The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
+- `SoftwarePlaybackPipeline.routeDescription` is safe to read from any thread while tracks switch or the pipeline stops.
+- `SoftwarePlaybackPipeline.failureError` is safe to read from any thread, even if a later error replaces it.
+- `SoftwarePlaybackPipeline()` (the shipping init) is now `@MainActor`: it reads the display layer's main-actor `sampleBufferRenderer`. Callers off the main actor `await` it.
+
 ## [4.0.1] — 2026-11-03
 
 Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.

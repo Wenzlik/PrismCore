@@ -59,6 +59,7 @@ private final class RawClient {
         connection.forceCancel()
     }
 
+    // Safety: mutable state is read and written only under `lock`.
     private final class Accumulator: @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()

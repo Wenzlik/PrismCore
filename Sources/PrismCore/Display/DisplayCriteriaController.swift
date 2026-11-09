@@ -1,4 +1,5 @@
 import Foundation
+import os
 import AVFoundation
 import CoreMedia
 #if os(tvOS)
@@ -108,21 +109,54 @@ public enum DisplayCriteriaLogic {
         public let clearedAfterMilliseconds: Int?
         public let totalMilliseconds: Int
 
+        /// A mode switch that was already running when the criteria were
+        /// written — typically the panel heading back to its default mode
+        /// after the previous session's `reset()`. Its end says nothing about
+        /// the new write, so the wait let it finish first and only then
+        /// watched for the write's own switch.
+        public enum PriorSwitch: Sendable, Equatable {
+            /// The earlier switch ended (flag cleared or end notification).
+            case drained(afterMilliseconds: Int)
+            /// It was still reporting in-progress when the drain cap ran out;
+            /// the wait went on regardless.
+            case drainCapExpired(afterMilliseconds: Int)
+        }
+
+        /// `nil` when no switch was in flight at write time.
+        public let priorSwitch: PriorSwitch?
+        /// The waiting task was cancelled; the outcome is whatever had been
+        /// seen by then.
+        public let wasCancelled: Bool
+
         public init(
             outcome: Outcome,
             switchStartedAfterMilliseconds: Int? = nil,
             clearedAfterMilliseconds: Int? = nil,
-            totalMilliseconds: Int
+            totalMilliseconds: Int,
+            priorSwitch: PriorSwitch? = nil,
+            wasCancelled: Bool = false
         ) {
             self.outcome = outcome
             self.switchStartedAfterMilliseconds = switchStartedAfterMilliseconds
             self.clearedAfterMilliseconds = clearedAfterMilliseconds
             self.totalMilliseconds = totalMilliseconds
+            self.priorSwitch = priorSwitch
+            self.wasCancelled = wasCancelled
         }
 
         /// One log-ready line, e.g.
         /// `settled via modeSwitchEnd in 2140ms (switch started at 380ms)`.
         public var summary: String {
+            let prior: String
+            switch priorSwitch {
+            case nil: prior = ""
+            case .drained(let ms): prior = " (earlier switch drained at \(ms)ms)"
+            case .drainCapExpired(let ms): prior = " (earlier switch still in progress at \(ms)ms drain cap)"
+            }
+            return (wasCancelled ? "cancelled: " : "") + outcomeSummary + prior
+        }
+
+        private var outcomeSummary: String {
             let start = switchStartedAfterMilliseconds.map { " (switch started at \($0)ms)" } ?? ""
             switch outcome {
             case .matchingDisabled:
@@ -168,6 +202,237 @@ public enum DisplayCriteriaLogic {
         wantsHDRPanel
             ? (startGrace: .seconds(2), settleCap: .seconds(6))
             : (startGrace: .seconds(1), settleCap: .seconds(2))
+    }
+
+    /// The criteria active on the panel and whether the write that put them
+    /// there landed mid-switch — carried from `apply` to the waits that
+    /// follow it, kept as one value so they can never be shared apart.
+    ///
+    /// Sequences that used to lose the overlap, each letting a wait take the
+    /// earlier switch's end as its own: a redundant re-`apply` resetting it
+    /// before the wait ran; a second concurrent wait finding it consumed by
+    /// the first; a wait cancelled mid-drain, or one whose drain cap ran
+    /// out, clearing it while the earlier switch still ran; one cancelled
+    /// after its drain but before the write's own switch, clearing it so
+    /// the next wait trusted the earlier switch's headroom; and a fresh
+    /// controller adopting the same criteria with an overlap of its own that
+    /// defaulted to "none". So only a real write (or one that writes
+    /// nothing) replaces it, every wait reads it without consuming it, only
+    /// an uncancelled wait that saw the earlier switch end clears it — and
+    /// only if no newer write replaced it meanwhile — and the controller
+    /// holds exactly one, class-wide.
+    struct ActiveWrite {
+        /// Nil after a reset: the panel is heading back to its default mode.
+        private(set) var criteria: WrittenCriteria?
+        private(set) var inFlightAtWrite = false
+        private var generation = 0
+
+        /// A write that replaced the criteria.
+        mutating func wrote(_ next: WrittenCriteria, switchInFlight: Bool) {
+            criteria = next
+            inFlightAtWrite = switchInFlight
+            generation += 1
+        }
+
+        /// A write that wrote nothing, so no switch of its own is coming.
+        /// Not for a redundant write: the switch still running then is the
+        /// earlier real write's, toward these same criteria.
+        mutating func wroteNothing() {
+            inFlightAtWrite = false
+            generation += 1
+        }
+
+        mutating func reset() { criteria = nil }
+
+        func beginWait() -> (inFlight: Bool, generation: Int) {
+            (inFlightAtWrite, generation)
+        }
+
+        /// A later wait without a new write has no earlier switch to drain —
+        /// but only once a wait has seen it end *and* gone on to finish its
+        /// own stages uncancelled. A wait whose drain cap ran out never saw the
+        /// end: clearing then let the next wait for the same write (a 4 s
+        /// switch back after reset outlasting a 2 s cap + 1 s grace) skip the
+        /// drain and settle on that old switch's end. A wait cancelled after
+        /// its drain saw the end but not the write's own switch: clearing then
+        /// let the next wait trust the headroom the earlier switch (back to an
+        /// HDR10 home mode) left raised, and return `alreadyPresentingHDR`
+        /// before the requested DV switch had even started. Kept, at worst the
+        /// next wait drains the write's own switch and spends a grace seeing
+        /// nothing new start.
+        mutating func endWait(generation: Int, report: SettleReport) {
+            guard case .drained? = report.priorSwitch, !report.wasCancelled,
+                  generation == self.generation else { return }
+            inFlightAtWrite = false
+        }
+    }
+
+    /// What the settle loop reads each tick, injected so the loop runs — and
+    /// is tested — away from `AVDisplayManager`.
+    struct SwitchSignals {
+        var inProgress: () -> Bool
+        /// Consulted only for HDR writes.
+        var headroomRaised: () -> Bool
+        /// Mode-switch-start / -end notifications seen since the last clear.
+        var startSignalled: () -> Bool
+        var endSignalled: () -> Bool
+        var clearSignals: () -> Void
+    }
+
+    /// The settle loop's time, injected so tests step a scripted timeline
+    /// instead of racing real sleeps: a test thread woken late under load
+    /// crossed a different stage boundary than the one it scripted.
+    struct SettleClock {
+        var now: () -> ContinuousClock.Instant
+        var sleep: @MainActor (Duration) async -> Void
+
+        static var live: SettleClock {
+            // `try?`: a cancelled sleep throws at once; the loops check
+            // cancellation themselves.
+            .init(now: { .now }, sleep: { d in _ = try? await Task.sleep(for: d) })
+        }
+    }
+
+    /// The body of `DisplayCriteriaController.waitForSwitch`; see there for
+    /// the stages.
+    ///
+    /// `switchInFlightAtWrite` adds a stage 0. A write that lands while an
+    /// earlier switch is still running (playback restarted within a couple
+    /// of seconds of the previous session's `reset()`) used to be settled by
+    /// *that* switch: stage 1 took its in-progress flag as the start, stage 2
+    /// took its end — and playback began before the panel reached the mode
+    /// this write asked for. So the earlier switch is first allowed to
+    /// finish, bounded by `settleCap` (the existing per-switch budget), its
+    /// notifications are discarded, and only then does the write's own switch
+    /// get the normal `startGrace` and `settleCap`. Worst case is one extra
+    /// `settleCap`; when tvOS folded the new write into the running switch,
+    /// the cost is a `startGrace` of nothing starting.
+    ///
+    /// Cancellation ends every stage at once (the sleeps throw, and without
+    /// the check the loops would spin unthrottled until their deadlines).
+    @MainActor
+    static func settle(
+        wantsHDRPanel: Bool,
+        switchInFlightAtWrite: Bool,
+        startGrace: Duration,
+        settleCap: Duration,
+        signals: SwitchSignals,
+        clock: SettleClock = .live
+    ) async -> SettleReport {
+        let entry = clock.now()
+        var priorSwitch: SettleReport.PriorSwitch?
+        func elapsedMs() -> Int {
+            Int((clock.now() - entry) / .milliseconds(1))
+        }
+        func report(
+            _ outcome: SettleReport.Outcome,
+            startedAt: Int? = nil,
+            clearedAt: Int? = nil
+        ) -> SettleReport {
+            .init(
+                outcome: outcome,
+                switchStartedAfterMilliseconds: startedAt,
+                clearedAfterMilliseconds: clearedAt,
+                totalMilliseconds: elapsedMs(),
+                priorSwitch: priorSwitch,
+                wasCancelled: Task.isCancelled
+            )
+        }
+
+        // Stage 0 — let the earlier switch finish. Exit on the end
+        // notification too, not just the flag: tvOS may chain straight into
+        // the write's own switch without the flag ever reading false.
+        let overlapped = switchInFlightAtWrite
+        if overlapped {
+            let drainDeadline = clock.now().advanced(by: settleCap)
+            func stillRunning() -> Bool { signals.inProgress() && !signals.endSignalled() }
+            while stillRunning(), clock.now() < drainDeadline, !Task.isCancelled {
+                await clock.sleep(.milliseconds(10))
+            }
+            priorSwitch = stillRunning()
+                ? .drainCapExpired(afterMilliseconds: elapsedMs())
+                : .drained(afterMilliseconds: elapsedMs())
+            // Keep a start notification: the earlier switch's start posted
+            // before the observers existed, so one seen now is this write's.
+            // When tvOS chains (old end and new start inside one sleep tick,
+            // flag never down), clearing it would leave stage 1 nothing to
+            // see and the wait would report `noSwitchStarted` mid-switch.
+            // Stage 1 takes the start and clears the stale end with it.
+            if !signals.startSignalled() { signals.clearSignals() }
+        }
+
+        // After an overlap the headroom can't be attributed: the earlier
+        // switch may have been *to* an HDR default (reset returning to an
+        // HDR10/60 Hz home mode), and the raised headroom lingers past its
+        // end (see `panelPresentsHDR`). Read as "already HDR" it returned
+        // before this write's own switch — DV/24 Hz — had even started. Nor
+        // is a rise before that start this write's: when the drain cap runs
+        // out the earlier switch is still going and may raise it moments
+        // later. So after an overlap the headroom is armed only once stage 1
+        // sees the write's own start, and only if it is still down then.
+        var headroomCounts = wantsHDRPanel && !overlapped
+        if !overlapped, headroomCounts, signals.headroomRaised() {
+            return report(.alreadyPresentingHDR)
+        }
+
+        // Stage 1 — did a switch start at all? After an overlap, an end can
+        // only be the earlier switch's (its notification may land just after
+        // the clear), and its in-progress flag may still linger — so only a
+        // fresh start notification, or the flag rising after it was seen
+        // down, counts as this write's start.
+        var sawIdle = !overlapped
+        var startedAt: Int?
+        let graceDeadline = clock.now().advanced(by: startGrace)
+        while clock.now() < graceDeadline, !Task.isCancelled {
+            if !overlapped, signals.endSignalled() {
+                return report(.modeSwitchEnd, startedAt: startedAt)
+            }
+            if headroomCounts, signals.headroomRaised() {
+                return report(.headroomRaised, startedAt: startedAt)
+            }
+            let inProgress = signals.inProgress()
+            if !inProgress { sawIdle = true }
+            if signals.startSignalled() || (sawIdle && inProgress) {
+                startedAt = elapsedMs()
+                // Notifications post in order, so a stale end lands before
+                // this start; anything from here on is this switch's.
+                if overlapped {
+                    signals.clearSignals()
+                    headroomCounts = wantsHDRPanel && !signals.headroomRaised()
+                }
+                break
+            }
+            await clock.sleep(.milliseconds(10))
+        }
+        guard startedAt != nil else { return report(.noSwitchStarted) }
+
+        // Stage 2 — bounded settle. For an HDR target the in-progress flag
+        // clearing is NOT terminal: a panel that finished quietly and one
+        // that aborted the switch (staying SDR) look identical at that
+        // moment, and returning on the clear is exactly how a slow-but-
+        // willing panel's master got validated against the old SDR mode
+        // (-11868). So the clear is noted and the rest of the cap keeps
+        // watching for a real HDR signal; rate-only writes keep the clear as
+        // their exit — there is no range engage left to confirm.
+        var clearedAt: Int?
+        let settleDeadline = clock.now().advanced(by: settleCap)
+        while clock.now() < settleDeadline, !Task.isCancelled {
+            await clock.sleep(.milliseconds(50))
+            if signals.endSignalled() { return report(.modeSwitchEnd, startedAt: startedAt) }
+            if headroomCounts, signals.headroomRaised() {
+                return report(.headroomRaised, startedAt: startedAt)
+            }
+            if !signals.inProgress() {
+                guard wantsHDRPanel else {
+                    return report(.inProgressCleared, startedAt: startedAt)
+                }
+                if clearedAt == nil { clearedAt = elapsedMs() }
+            }
+        }
+        if let clearedAt {
+            return report(.clearedWithoutHDRSignal, startedAt: startedAt, clearedAt: clearedAt)
+        }
+        return report(.capExpired, startedAt: startedAt)
     }
 }
 
@@ -222,7 +487,6 @@ public final class DisplayCriteriaController {
     private let window: UIWindow
     private var written: DisplayCriteriaLogic.WrittenCriteria?
     private var lastWriteWantedHDR = false
-
     /// The criteria still active on the panel, shared across controller
     /// instances. Hosts build a fresh controller per playback, and the
     /// per-instance baseline forgot everything between them — so replaying
@@ -234,12 +498,18 @@ public final class DisplayCriteriaController {
     /// class-wide: written by `apply`, cleared by `reset`, valid on the
     /// premise the whole controller already stands on — these writes are the
     /// only mover of `preferredDisplayCriteria` in the process.
-    private static var activeCriteria: DisplayCriteriaLogic.WrittenCriteria?
+    ///
+    /// It also carries whether a mode switch was already running when the
+    /// criteria were written — read at write time because by the time
+    /// `waitForSwitch` installs its observers, the earlier switch and the
+    /// write's own look the same. Shared with the criteria, so a controller
+    /// that adopts them mid-switch inherits the drain too.
+    private static var active = DisplayCriteriaLogic.ActiveWrite()
 
     /// Sticky: set the first time a raised EDR headroom is ever observed, and
     /// deliberately never cleared — the headroom is a transition artifact, so
     /// its later absence proves nothing (see `DisplayCriteriaLogic`). Shared
-    /// across instances for the same reason as `activeCriteria`: the panel
+    /// across instances for the same reason as `active`: the panel
     /// that proved HDR once is the same panel the next controller drives, and
     /// a same-format skip produces no transition for a fresh instance to
     /// observe.
@@ -277,7 +547,10 @@ public final class DisplayCriteriaController {
     @discardableResult
     public func apply(_ choice: DisplayCriteriaChoice) -> ApplyResult {
         let manager = window.avDisplayManager
-        guard manager.isDisplayCriteriaMatchingEnabled else { return .matchingDisabled }
+        guard manager.isDisplayCriteriaMatchingEnabled else {
+            Self.active.wroteNothing()
+            return .matchingDisabled
+        }
 
         // Match Frame Rate keys off the rate even when the range doesn't
         // change, so an unknown rate still needs a plausible value for the
@@ -285,11 +558,14 @@ public final class DisplayCriteriaController {
         // beats absent: tvOS ignores the rate when Match Frame Rate is off.
         let rate = choice.refreshRate ?? 24
         let next = DisplayCriteriaLogic.WrittenCriteria(target: choice.target, refreshRate: rate)
-        if DisplayCriteriaLogic.writeIsRedundant(previous: Self.activeCriteria, next: next) {
+        if DisplayCriteriaLogic.writeIsRedundant(previous: Self.active.criteria, next: next) {
             // Adopt the active criteria rather than merely observing them:
             // this session now depends on the mode a previous controller
             // programmed, so this controller's `reset()` must be willing to
-            // return the panel to default on teardown.
+            // return the panel to default on teardown. `active` is left as
+            // is: a re-apply of the same criteria mid-switch — by this
+            // controller or a fresh one — must not drop the earlier write's
+            // overlap (its wait would settle on the previous switch's end).
             written = next
             lastWriteWantedHDR = choice.wantsHDRPanel
             return .alreadyActive
@@ -299,13 +575,15 @@ public final class DisplayCriteriaController {
             // A CoreMedia refusal to build a 4-field description is not a
             // state this can recover from; play without the pre-switch and
             // let the media-direct fallback catch a rejection.
+            Self.active.wroteNothing()
             return .matchingDisabled
         }
+        let switchInFlight = manager.isDisplayModeSwitchInProgress
         manager.preferredDisplayCriteria = AVDisplayCriteria(
             refreshRate: Float(rate), formatDescription: description
         )
         written = next
-        Self.activeCriteria = next
+        Self.active.wrote(next, switchInFlight: switchInFlight)
         lastWriteWantedHDR = choice.wantsHDRPanel
         return choice.wantsHDRPanel ? .willSwitch : .wrote
     }
@@ -329,6 +607,12 @@ public final class DisplayCriteriaController {
     /// error: the panel is mid re-sync (black) during the handshake anyway,
     /// and shows the correct picture once it locks.
     ///
+    /// If a switch was already running when `apply(_:)` wrote (a restart
+    /// right after the previous session's `reset()`), that switch is first
+    /// allowed to end — bounded by `settleCap` — and its end discarded, so
+    /// only the write's own switch can settle the wait. The report's
+    /// `priorSwitch` and `summary` say so.
+    ///
     /// `nil` bounds (the defaults) resolve per what the last `apply(_:)`
     /// wrote — dynamic-range switches get room for a real HDMI renegotiation,
     /// rate-only switches keep short bounds. See
@@ -343,33 +627,16 @@ public final class DisplayCriteriaController {
         settleCap: Duration? = nil
     ) async -> DisplayCriteriaLogic.SettleReport {
         let bounds = DisplayCriteriaLogic.settleBounds(wantsHDRPanel: lastWriteWantedHDR)
-        let startGrace = startGrace ?? bounds.startGrace
-        let settleCap = settleCap ?? bounds.settleCap
         let manager = window.avDisplayManager
         let screen = window.screen
-        let entry = ContinuousClock.now
-        func elapsedMs() -> Int {
-            Int((ContinuousClock.now - entry) / .milliseconds(1))
-        }
-        func report(
-            _ outcome: DisplayCriteriaLogic.SettleReport.Outcome,
-            startedAt: Int? = nil,
-            clearedAt: Int? = nil
-        ) -> DisplayCriteriaLogic.SettleReport {
-            .init(
-                outcome: outcome,
-                switchStartedAfterMilliseconds: startedAt,
-                clearedAfterMilliseconds: clearedAt,
-                totalMilliseconds: elapsedMs()
-            )
-        }
+        // Read, not consumed: a concurrent wait for the same write needs it
+        // too. Cleared only by an uncancelled wait that saw the earlier
+        // switch end (`endWait`).
+        let (inFlight, generation) = Self.active.beginWait()
         // Matching off ⇒ tvOS ignored the write; the whole grace would be
         // dead startup time on every load.
         guard manager.isDisplayCriteriaMatchingEnabled else {
-            return report(.matchingDisabled)
-        }
-        if observeHeadroom(screen), lastWriteWantedHDR {
-            return report(.alreadyPresentingHDR)
+            return .init(outcome: .matchingDisabled, totalMilliseconds: 0)
         }
 
         let started = OneShotFlag()
@@ -385,49 +652,21 @@ public final class DisplayCriteriaController {
             NotificationCenter.default.removeObserver(endToken)
         }
 
-        // Stage 1 — did a switch start at all?
-        var startedAt: Int?
-        let graceDeadline = ContinuousClock.now.advanced(by: startGrace)
-        while ContinuousClock.now < graceDeadline {
-            if ended.fired { return report(.modeSwitchEnd, startedAt: startedAt) }
-            if lastWriteWantedHDR, observeHeadroom(screen) {
-                return report(.headroomRaised, startedAt: startedAt)
-            }
-            if started.fired || manager.isDisplayModeSwitchInProgress {
-                startedAt = elapsedMs()
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        guard startedAt != nil else { return report(.noSwitchStarted) }
-
-        // Stage 2 — bounded settle. For an HDR target the in-progress flag
-        // clearing is NOT terminal: a panel that finished quietly and one
-        // that aborted the switch (staying SDR) look identical at that
-        // moment, and returning on the clear is exactly how a slow-but-
-        // willing panel's master got validated against the old SDR mode
-        // (-11868). So the clear is noted and the rest of the cap keeps
-        // watching for a real HDR signal; rate-only writes keep the clear as
-        // their exit — there is no range engage left to confirm.
-        var clearedAt: Int?
-        let settleDeadline = ContinuousClock.now.advanced(by: settleCap)
-        while ContinuousClock.now < settleDeadline {
-            try? await Task.sleep(for: .milliseconds(50))
-            if ended.fired { return report(.modeSwitchEnd, startedAt: startedAt) }
-            if lastWriteWantedHDR, observeHeadroom(screen) {
-                return report(.headroomRaised, startedAt: startedAt)
-            }
-            if !manager.isDisplayModeSwitchInProgress {
-                guard lastWriteWantedHDR else {
-                    return report(.inProgressCleared, startedAt: startedAt)
-                }
-                if clearedAt == nil { clearedAt = elapsedMs() }
-            }
-        }
-        if let clearedAt {
-            return report(.clearedWithoutHDRSignal, startedAt: startedAt, clearedAt: clearedAt)
-        }
-        return report(.capExpired, startedAt: startedAt)
+        let report = await DisplayCriteriaLogic.settle(
+            wantsHDRPanel: lastWriteWantedHDR,
+            switchInFlightAtWrite: inFlight,
+            startGrace: startGrace ?? bounds.startGrace,
+            settleCap: settleCap ?? bounds.settleCap,
+            signals: .init(
+                inProgress: { manager.isDisplayModeSwitchInProgress },
+                headroomRaised: { self.observeHeadroom(screen) },
+                startSignalled: { started.fired },
+                endSignalled: { ended.fired },
+                clearSignals: { started.clear(); ended.clear() }
+            )
+        )
+        Self.active.endWait(generation: generation, report: report)
+        return report
     }
 
     /// Whether the panel presents this session in HDR — the input a host
@@ -453,7 +692,7 @@ public final class DisplayCriteriaController {
         guard written != nil else { return }
         window.avDisplayManager.preferredDisplayCriteria = nil
         written = nil
-        Self.activeCriteria = nil
+        Self.active.reset()
     }
 
     /// Every headroom read funnels through here so a single observation of a
@@ -501,11 +740,11 @@ public final class DisplayCriteriaController {
 
 /// A one-shot boolean set from a notification queue and polled from the
 /// settle loop.
-private final class OneShotFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-    var fired: Bool { lock.withLock { value } }
-    func fire() { lock.withLock { value = true } }
+private final class OneShotFlag: Sendable {
+    private let value = OSAllocatedUnfairLock(initialState: false)
+    var fired: Bool { value.withLock { $0 } }
+    func fire() { value.withLock { $0 = true } }
+    func clear() { value.withLock { $0 = false } }
 }
 
 #endif

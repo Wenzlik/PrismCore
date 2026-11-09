@@ -302,6 +302,7 @@ struct LazyDialogueBoostTests {
 }
 
 /// A tiny lock-protected box for test bookkeeping across `@Sendable` closures.
+// Safety: the value is reachable only under `lock`.
 private final class LockedBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: Value

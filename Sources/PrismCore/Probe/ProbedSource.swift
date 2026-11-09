@@ -45,6 +45,7 @@ public struct ProbeTiming: Sendable, Equatable {
     public var total: Duration { open + streamInfo + describe + hdr10PlusScan }
 }
 
+// Safety: the public surface is immutable values; the `AVFormatContext` is never shared, only moved out once by `consumeContext()` under `lock`.
 public final class ProbedSource: @unchecked Sendable {
 
     /// What the probe found. Safe to read after the context has been consumed:
