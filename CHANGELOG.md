@@ -8,6 +8,18 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- The master's `BANDWIDTH` is declared from the densest planned segment (byte
+  positions from the demuxer index) with 20 % headroom plus a bridged audio
+  rendition's encoder rate, held between 2× and 4× the source's average (the
+  one the positions measure when the source declares no rate) and never above
+  160 Mbit/s. An average under-declared VBR UHD remuxes and AVPlayer stalled
+  or failed with -12318. The keyframe cache keeps the positions — also across
+  a later PTS-only harvest — so a cache hit measures the peak too; its
+  format goes to 3, so a map stored without positions is re-learned once. Without a
+  keyframe plan or a position for every planned start it stays the average.
+
 - The package builds in Swift 6 language mode (complete strict concurrency checking) for every target.
 - `SoftwarePlaybackPipeline.routeDescription` is safe to read from any thread while tracks switch or the pipeline stops.
 - `SoftwarePlaybackPipeline.failureError` is safe to read from any thread, even if a later error replaces it.
