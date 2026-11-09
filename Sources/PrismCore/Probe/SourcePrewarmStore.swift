@@ -22,6 +22,7 @@ import Foundation
 /// source that drops everything on the first warning. Dropping is always safe
 /// — a reader that finds nothing reads the network, exactly as it does for a
 /// source nobody prewarmed.
+// Safety: `entries` and `order` are guarded by `lock`; `pressureSource` is set in init, before the store is shared.
 final class SourcePrewarmStore: @unchecked Sendable {
 
     /// Eight sources at the default 2 MB per-source budget: the next episode,

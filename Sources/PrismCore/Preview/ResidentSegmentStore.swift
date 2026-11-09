@@ -10,6 +10,7 @@ public struct ResidentRange: Sendable, Equatable {
 /// Serializes snapshot LOOKUPS (and the opens) with retirement, so a preview
 /// never borrows a file an eviction has already unlinked — the read itself
 /// runs outside the lock on descriptors an unlink cannot invalidate.
+// Safety: all mutable state is guarded by `lock`; reads outside it go through descriptors an unlink cannot invalidate.
 final class ResidentSegmentStore: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Int: ResidentRange] = [:]

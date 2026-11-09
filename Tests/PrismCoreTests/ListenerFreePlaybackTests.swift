@@ -44,6 +44,7 @@ struct ListenerFreePlaybackTests {
     // MARK: - HLS: playlists yes, segments no
 
     /// Serves playlists off disk and rewrites what they point at.
+    // Safety: the request log is read and written only under `lock`; everything else is immutable.
     final class PlaylistLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
         enum Segments {
             /// Absolute `file://` — AVFoundation is left to load them itself.
@@ -199,6 +200,7 @@ struct ListenerFreePlaybackTests {
 
     /// Answers byte ranges over one in-memory asset: no scheme AVFoundation
     /// knows, no socket, no entitlement.
+    // Safety: the offset and cancellation records are read and written only under `lock`; the payload is immutable.
     final class ByteRangeLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
         let payload: Data
         /// Bytes per response, so a small fixture still exercises the ranged

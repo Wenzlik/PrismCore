@@ -97,6 +97,7 @@ public enum PlaybackEvent: Sendable, Equatable {
 /// Where the engine's components drop `PlaybackEvent`s. Exists from session
 /// init, so a host may register before or after `start()`; with nobody
 /// registered, a yield is one lock and an append to the retained window.
+// Safety: every mutable field (continuation, recent, dropped) is read and written only under `lock`.
 final class PlaybackEventSink: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AsyncStream<PlaybackEvent>.Continuation?

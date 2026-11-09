@@ -23,6 +23,7 @@ import Libavformat
 /// whoever owns the context must keep its guard alive until the context is
 /// closed — `ProbedSource` stores it next to the context and the remuxer keeps
 /// it for the span of `run()`.
+// Safety: the cancellation state (deadline, cancelled, interruptible input) is guarded by `lock`; the installed inputs are set during the open by the thread that owns the context, before it is handed on.
 final class ReadInterruptGuard: @unchecked Sendable {
 
     private let lock = NSLock()

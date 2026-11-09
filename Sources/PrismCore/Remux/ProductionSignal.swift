@@ -23,6 +23,7 @@ import Foundation
 /// Waiters are `async` (cooperative-pool) code, hence continuations rather
 /// than an `NSCondition`: the provider's serve must not block a pool thread
 /// for the length of a segment's production (#44).
+// Safety: generation and waiters are read and written only under `lock`; continuations are resumed after it is released.
 final class ProductionSignal: @unchecked Sendable {
 
     private let lock = NSLock()

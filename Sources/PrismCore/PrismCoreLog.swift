@@ -20,8 +20,7 @@ package enum PrismCoreLog {
 
     private static let logger = Logger(subsystem: subsystem, category: "engine")
 
-    private static let observerLock = NSLock()
-    nonisolated(unsafe) private static var storedObserver: (@Sendable (String) -> Void)?
+    private static let storedObserver = OSAllocatedUnfairLock<(@Sendable (String) -> Void)?>(initialState: nil)
 
     /// A second destination for notices: tests, and `prismcore-cli --verbose`.
     ///
@@ -30,8 +29,8 @@ package enum PrismCoreLog {
     /// test cannot observe is a path that silently stops being taken. The
     /// unified log cannot be read back in-process, so the test reads here.
     package static var observer: (@Sendable (String) -> Void)? {
-        get { observerLock.withLock { storedObserver } }
-        set { observerLock.withLock { storedObserver = newValue } }
+        get { storedObserver.withLock { $0 } }
+        set { storedObserver.withLock { $0 = newValue } }
     }
 
     static func notice(_ message: String) {

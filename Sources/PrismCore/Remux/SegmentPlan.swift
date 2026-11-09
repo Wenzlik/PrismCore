@@ -300,6 +300,22 @@ struct SegmentPlan: Equatable {
         return indexed
     }
 
+    /// Keyframe PTS → byte position, as the demuxer index knows them (an
+    /// entry without a position is left out). What `BANDWIDTH` measures the
+    /// densest segment from, and what the keyframe cache keeps beside the PTS
+    /// so a cache hit — which skips the index load — can still measure it.
+    static func indexedKeyframePositions(of stream: UnsafeMutablePointer<AVStream>) -> [Int64: Int64] {
+        var positions: [Int64: Int64] = [:]
+        let count = avformat_index_get_entries_count(stream)
+        for i in 0..<count {
+            guard let entry = avformat_index_get_entry(stream, i),
+                  entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0, entry.pointee.pos >= 0
+            else { continue }
+            positions[entry.pointee.timestamp] = entry.pointee.pos
+        }
+        return positions
+    }
+
     /// Whether the demuxer's index is already complete without a nudge seek:
     /// its keyframe entries reach into the last target-length of the file.
     ///
