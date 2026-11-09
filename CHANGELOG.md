@@ -8,7 +8,7 @@ source-compatible.)
 
 ## [Unreleased]
 
-- Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. A no-op until the linked FFmpeg has `skip_attachments` (the bundled n8.1.2 does not) — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
+- Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. Requires Wenzlik/MPVKit 1.0.2 (FFmpeg n8.1.3 with `skip_attachments`); on an older host-supplied FFmpeg it is a no-op — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
 
 ## [4.0.1] — 2026-11-03
 

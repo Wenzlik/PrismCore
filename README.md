@@ -1071,12 +1071,14 @@ Deliberate omissions, so you don't have to read the source to find them:
 | Swift | 6.0 |
 
 FFmpeg arrives as prebuilt xcframeworks through
-[Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) 1.0.1, a fork of
+[Wenzlik/MPVKit](https://github.com/Wenzlik/MPVKit) 1.0.2, a fork of
 [MPVKit](https://github.com/mpvkit/MPVKit) 1.0.0 that rebuilds FFmpeg alone —
-the same n8.1.2 source and configure line, plus the **`eac3` encoder** (the
-audio bridge's EAC3 5.1, and dialogue boost; stock MPVKit falls back to AAC)
-and `yadif_videotoolbox`. libmpv and every other library are upstream's 1.0.0
-binaries. No FFmpeg source is redistributed here and nothing needs building.
+n8.1.3 with 1.0.0's configure line, plus the **`eac3` encoder** (the
+audio bridge's EAC3 5.1, and dialogue boost; stock MPVKit falls back to AAC),
+`yadif_videotoolbox`, and the Matroska demuxer's **`skip_attachments`** (so
+re-opens of an MKV don't re-read its embedded fonts; without it they are read
+in full, which is slower but still correct). libmpv and every other library
+are upstream's 1.0.0 binaries. No FFmpeg source is redistributed here and nothing needs building.
 Those xcframeworks are static libraries, so FFmpeg ends up linked statically into
 the app; a host that supplies dynamic FFmpeg frameworks instead links it
 dynamically.
@@ -1093,15 +1095,15 @@ to override the `mpvkit` identity PrismCore asks for. The fork keeps that identi
 for the same reason — SwiftPM holds one package per identity, so a host that also
 uses MPVKit for libmpv still links a single FFmpeg. Whichever URL the **root**
 package names for `mpvkit` wins, so a host that depends on MPVKit directly should
-name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.1`). Naming upstream's
-fails to resolve against PrismCore's `1.0.1` floor only for as long as upstream
-has no 1.0.1 — the version is not what tells the two apart, the URL is. Two
+name `https://github.com/Wenzlik/MPVKit.git` (from `1.0.2`). Naming upstream's
+fails to resolve against PrismCore's `1.0.2` floor only for as long as upstream
+has no 1.0.2 — the version is not what tells the two apart, the URL is. Two
 non-root packages that disagree are settled by declaration order, so don't
 leave it to them, and assert `FFmpegBuild.capabilities.hasEAC3Encoder` once at
 launch if the AAC fallback would matter. A committed `Package.resolved` pins
 `mpvkit` by location too: regenerate it (`swift package resolve`, or Xcode's
 *Resolve Package Versions*) when taking this version: a resolve restricted to
-the old lockfile (upstream's 1.0.0 pin) fails against the `1.0.1` floor.
+an older lockfile (a 1.0.0 or 1.0.1 pin) fails against the `1.0.2` floor.
 
 ### Which FFmpeg answered
 
@@ -1110,12 +1112,12 @@ library with the header version beside it whenever the two disagree, FFmpeg's ow
 version string, and the capability answers that change what this engine does with
 a source: the `eac3` encoder (without it the audio bridge encodes AAC 5.1, which
 keeps the remux but cannot be passed through to a receiver), the AV1
-decoder and whether this device has hardware for it, dialogue boost, and the GPU
-deinterlacer:
+decoder and whether this device has hardware for it, dialogue boost, the GPU
+deinterlacer, and whether re-opens can skip Matroska attachments:
 
 ```swift
 print(FFmpegBuild.summary)
-// FFmpeg n8.1.2-eac3-vt.1
+// FFmpeg n8.1.3-eac3-vt-sa.1
 //   libavutil 60.26.102
 //   libavcodec 62.28.102
 //   …
@@ -1124,6 +1126,7 @@ print(FFmpegBuild.summary)
 //   av1 decoder: libdav1d (hardware: no)
 //   dialogue boost: yes
 //   gpu deinterlacer: yadif_videotoolbox
+//   mkv attachment skip: yes
 ```
 
 Worth a line in a host's launch log and worth attaching to a bug report: half of

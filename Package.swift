@@ -32,10 +32,12 @@ let package = Package(
         .executable(name: "prismcore-cli", targets: ["prismcore-cli"]),
     ],
     dependencies: [
-        // FFmpeg (LGPL) as prebuilt xcframeworks: MPVKit 1.0.2 with FFmpeg
-        // rebuilt from the same n8.1.2 source and configure line plus the
+        // FFmpeg (LGPL) as prebuilt xcframeworks: Wenzlik/MPVKit 1.0.2 with
+        // FFmpeg rebuilt from n8.1.3 with 1.0.0's configure line plus the
         // `eac3` encoder (the audio bridge's EAC3 5.1; stock MPVKit falls
-        // back to AAC) and `yadif_videotoolbox`. libmpv and every other
+        // back to AAC), `yadif_videotoolbox`, and the Matroska demuxer's
+        // `skip_attachments` (re-opens skip embedded fonts; without it they
+        // are read in full every time). libmpv and every other
         // binary stay upstream's 1.0.0. The fork keeps the package identity
         // `mpvkit` (the URL's last component) on purpose: a graph holds ONE
         // package per identity, so a host that also uses MPVKit for libmpv
@@ -43,7 +45,7 @@ let package = Package(
         // overrides this the way it overrode upstream. The URL, not the
         // version, is what selects the fork: a root package that names
         // upstream's URL wins the identity, and today fails this floor only
-        // 1.0.2: FFmpeg n8.1.3 with eac3, yadif_videotoolbox and skip_attachments. See README *Requirements*.
+        // while upstream has no 1.0.2. See README *Requirements*.
         .package(url: "https://github.com/Wenzlik/MPVKit.git", .upToNextMinor(from: "1.0.2")),
     ],
     targets: [

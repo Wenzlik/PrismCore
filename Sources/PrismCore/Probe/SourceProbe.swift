@@ -852,8 +852,8 @@ public enum SourceProbe {
     ///   absent — subtitles render without the embedded typefaces — and
     ///   attachment streams may be missing from the context; audio, video and
     ///   subtitle tracks and their packets are unchanged. A no-op on an FFmpeg
-    ///   whose Matroska demuxer lacks `skip_attachments` (the bundled n8.1.2
-    ///   does): see `FFmpegBuild.Capabilities.skipsMatroskaAttachments`.
+    ///   whose Matroska demuxer lacks `skip_attachments` (the bundled
+    ///   MPVKit 1.0.2 build has it; an older host FFmpeg may not): see `FFmpegBuild.Capabilities.skipsMatroskaAttachments`.
     ///   Side readers and re-opens of an opened source always skip them.
     public static func open(
         url: URL,

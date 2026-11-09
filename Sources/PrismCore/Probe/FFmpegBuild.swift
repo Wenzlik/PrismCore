@@ -164,8 +164,8 @@ public enum FFmpegBuild {
     /// media may never reach. Loud, not fatal.
     public static var isABIMatched: Bool { mismatchedLibraries.isEmpty }
 
-    /// FFmpeg's own build identity — `n8.1.2-eac3-vt.1` for the MPVKit fork
-    /// this package resolves, `n8.1.2` for stock MPVKit 1.0.0, a bare `8.1.2`
+    /// FFmpeg's own build identity — `n8.1.3-eac3-vt-sa.1` for the MPVKit fork
+    /// this package resolves (1.0.2), `n8.1.2` for stock MPVKit 1.0.0, a bare `8.1.2`
     /// for a stock tarball. This is the string that
     /// names *which* FFmpeg answered, where the version triples only describe
     /// its shape.
@@ -218,7 +218,8 @@ public enum FFmpegBuild {
         public let gpuDeinterlacer: String?
         /// Whether the Matroska demuxer has `skip_attachments`, without which
         /// re-opens and `SourceProbe.open(skipAttachments:)` read embedded
-        /// fonts in full like any first open (the bundled n8.1.2 lacks it).
+        /// fonts in full like any first open. Wenzlik/MPVKit 1.0.2 has it; a
+        /// host that overrides FFmpeg with an older build may not.
         public let skipsMatroskaAttachments: Bool
     }
 

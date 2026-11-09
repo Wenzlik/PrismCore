@@ -68,7 +68,7 @@ and the feature is off unless a host turns it on.
 **No FFmpeg source is redistributed in this repository.** The binaries arrive
 through the Wenzlik/MPVKit fork of MPVKit, which is where their corresponding
 sources and build recipes live: its build scripts, the FFmpeg tag they check out
-(`n8.1.2`) and the configure line, which every library also carries
+(`n8.1.3`) and the configure line, which every library also carries
 (`avcodec_configuration()`, `FFmpegBuild.configuration`). No GPL or nonfree
 component is enabled.
 How FFmpeg is linked depends on the build a host uses: MPVKit's prebuilt

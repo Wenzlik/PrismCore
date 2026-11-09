@@ -121,8 +121,9 @@ public enum SourceOpenTuning {
 
     /// Whether the linked FFmpeg's Matroska demuxer has `skip_attachments`.
     /// Asked of the demuxer's own option table at runtime, not assumed from a
-    /// version: the bundled build (FFmpeg n8.1.2) does not have it, and the
-    /// day an update does, this turns the skip on with no code change.
+    /// version: the bundled build (MPVKit 1.0.2, FFmpeg n8.1.3) has it, but a
+    /// host may override FFmpeg with an older build that does not, and an
+    /// unknown key would be silently ignored rather than fail the open.
     static let matroskaSkipsAttachments: Bool = {
         guard let demuxer = av_find_input_format("matroska"),
               var privClass = demuxer.pointee.priv_class
