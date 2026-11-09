@@ -203,6 +203,33 @@ public enum BridgedAudioFormat: String, Sendable, Equatable {
     }
 }
 
+/// Processing applied to audio PrismCore re-encodes — bridged tracks and
+/// dialogue-boost renditions. A stream-copied track is never touched: its bits
+/// go to the player as the source carried them, which is the point of copying.
+/// Rendered heights (`ObjectAudioRendering.heights`) are not affected either.
+/// Everything is off by default, and the default leaves the output unchanged.
+public struct BridgedAudioProcessing: Sendable, Equatable {
+    /// Night mode: gentle downward compression of loud passages (FFmpeg's
+    /// `acompressor`, −24 dBFS threshold, 4:1, no make-up gain), so
+    /// explosions come down toward the dialogue without anything being raised
+    /// into clipping. Skipped, never an error, in a build without the filter
+    /// (`isNightModeAvailable`).
+    public var nightMode: Bool
+    /// The most channels a re-encoded track leaves with — `2` folds 5.1 and
+    /// 7.1 to stereo. The resampler downmixes, and the master's `CHANNELS`
+    /// declares what the encoder was given. `nil` (or anything below 1)
+    /// keeps the encoder's own ceiling.
+    public var maxChannels: Int?
+
+    public init(nightMode: Bool = false, maxChannels: Int? = nil) {
+        self.nightMode = nightMode
+        self.maxChannels = maxChannels
+    }
+
+    /// Whether this build has the filter night mode needs.
+    public static var isNightModeAvailable: Bool { DialogueBoostFilter.isNightModeAvailable }
+}
+
 final class AudioDeliveryStore: @unchecked Sendable {
     private let lock = NSLock()
     private var tracks: [Int: AudioTrackDelivery] = [:]

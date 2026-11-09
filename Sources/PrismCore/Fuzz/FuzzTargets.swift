@@ -42,6 +42,7 @@ package enum FuzzTargets {
         "a53-captions": { @Sendable in a53Captions($0) },
         "container-layout": { @Sendable in containerLayout($0) },
         "hdr10plus-sei": { @Sendable in hdr10PlusSEI($0) },
+        "alternative-transfer-sei": { @Sendable in alternativeTransferSEI($0) },
         "truehd-major-sync": { @Sendable in trueHDMajorSync($0) },
         "flac-streaminfo": { @Sendable in flacStreamInfo($0) },
     ]
@@ -91,6 +92,43 @@ package enum FuzzTargets {
                 }
                 guard again == version else {
                     fatalError("a neighbouring slice changed the HDR10+ verdict: \(version) → \(String(describing: again))")
+                }
+            }
+        }
+    }
+
+    /// The broadcast-HLG read: payloadType 147 out of the SEI loop.
+    ///
+    /// The wrong answer is a transfer the bytes do not carry — it turns an SDR
+    /// title into HLG on every HDR panel. So a finding needs an SEI unit under
+    /// it, and in length-prefixed carriage a well-formed slice framed on either
+    /// side must not move it (a verdict that moves was reading past its unit).
+    package static func alternativeTransferSEI(_ bytes: [UInt8]) {
+        let carriages: [(HEVCNALUnits.Framing, HEVCNALUnits.Codec)] = [
+            (.annexB, .hevc), (.annexB, .h264), (.lengthPrefixed(4), .hevc), (.lengthPrefixed(4), .h264),
+        ]
+        for (framing, codec) in carriages {
+            func read(_ packet: [UInt8]) -> Int? {
+                packet.withUnsafeBufferPointer {
+                    AlternativeTransferSEI.preferredTransfer(inPacket: $0, framing: framing, codec: codec)
+                }
+            }
+            guard let transfer = read(bytes) else { continue }
+            var sawSEI = false
+            bytes.withUnsafeBufferPointer {
+                HEVCNALUnits.scan($0, framing: framing, codec: codec) { type, _ in
+                    if HEVCNALUnits.isSEI(type, codec: codec) { sawSEI = true }
+                }
+            }
+            guard sawSEI else { fatalError("transfer \(transfer) reported from a packet with no SEI unit (\(framing))") }
+
+            guard case .lengthPrefixed = framing else { continue }
+            let slice: [UInt8] = codec == .hevc ? [0x02, 0x01, 0x9A, 0x55] : [0x41, 0x9A, 0x55]
+            let framedSlice: [UInt8] = [0, 0, 0, UInt8(slice.count)] + slice
+            for framed in [framedSlice + bytes, bytes + framedSlice] {
+                let again = read(framed)
+                guard again == transfer else {
+                    fatalError("a neighbouring slice changed the transfer: \(transfer) → \(String(describing: again))")
                 }
             }
         }

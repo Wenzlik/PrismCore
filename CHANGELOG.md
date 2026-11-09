@@ -10,6 +10,22 @@ source-compatible.)
 
 - Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. A no-op until the linked FFmpeg has `skip_attachments` (the bundled n8.1.2 does not) — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
 
+## [4.0.1] — 2026-11-03
+
+Patch release, source-compatible: a connection that drips bytes is now treated like a silent one, plus the audio-description, night-mode, HLG and privacy-manifest changes collected since 4.0.0.
+
+- The coordinated HTTP reader now also ends a connection that drips: once reads have starved for a stall period (15 s) of the last 20 s and under 2 MiB arrived in that window, the connection is closed like a silent one, its delivered bytes kept, and the next fill reconnects.
+- Audio-description tracks (`AV_DISPOSITION_VISUAL_IMPAIRED`) are reported as
+  `AudioTrackInfo.isAudioDescription` and declared
+  `public.accessibility.describes-video` in the master.
+- `bridgedAudioProcessing:` (`BridgedAudioProcessing`): opt-in night mode
+  (`acompressor`) and a channel cap for re-encoded audio only; off by default.
+- Broadcast HLG signalled only by an `alternative_transfer_characteristics`
+  SEI (preferred transfer 18) over an SDR or unspecified VUI is served as HLG
+  (`VIDEO-RANGE`, display criteria, `colr`) to an HDR display.
+  New fuzz target `alternative-transfer-sei` with seeds.
+- `PrivacyInfo.xcprivacy` ships as a resource of the PrismCore target.
+
 ## [4.0.0] — 2026-10-30
 
 Dolby Vision Profile 5 is served the way AVFoundation needs to map it, on any

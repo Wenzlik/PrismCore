@@ -32,7 +32,7 @@ let package = Package(
         .executable(name: "prismcore-cli", targets: ["prismcore-cli"]),
     ],
     dependencies: [
-        // FFmpeg (LGPL) as prebuilt xcframeworks: MPVKit 1.0.0 with FFmpeg
+        // FFmpeg (LGPL) as prebuilt xcframeworks: MPVKit 1.0.2 with FFmpeg
         // rebuilt from the same n8.1.2 source and configure line plus the
         // `eac3` encoder (the audio bridge's EAC3 5.1; stock MPVKit falls
         // back to AAC) and `yadif_videotoolbox`. libmpv and every other
@@ -43,8 +43,8 @@ let package = Package(
         // overrides this the way it overrode upstream. The URL, not the
         // version, is what selects the fork: a root package that names
         // upstream's URL wins the identity, and today fails this floor only
-        // because upstream has no 1.0.1 yet. See README *Requirements*.
-        .package(url: "https://github.com/Wenzlik/MPVKit.git", .upToNextMinor(from: "1.0.1")),
+        // 1.0.2: FFmpeg n8.1.3 with eac3, yadif_videotoolbox and skip_attachments. See README *Requirements*.
+        .package(url: "https://github.com/Wenzlik/MPVKit.git", .upToNextMinor(from: "1.0.2")),
     ],
     targets: [
         // A local build of the framework wins (development); otherwise the
@@ -63,6 +63,10 @@ let package = Package(
                 .product(name: "MPVKit", package: "MPVKit"),
                 "TrueHDObjects",
             ],
+            // Apple's privacy manifest, so an app linking PrismCore declares
+            // the required-reason APIs it uses (file timestamps: the keyframe
+            // index cache; system uptime: stall and deadline clocks).
+            resources: [.copy("PrivacyInfo.xcprivacy")],
             swiftSettings: [
                 // v0 pragmatism for the C interop layer; the goal is .v6 once
                 // the remux session's ownership story has settled.
