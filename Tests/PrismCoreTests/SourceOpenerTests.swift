@@ -56,7 +56,7 @@ struct SourceOpenerTests {
                 _ = try SourceOpener.open(
                     url: URL(fileURLWithPath: "/prismcore-tests-absent/source.mkv"),
                     httpHeaders: [:], coordinatedHTTP: true, inputFactory: { BrokenInput() },
-                    interruptGuard: readGuard, budget: .seconds(1), policy: policy
+                    role: .reopen, interruptGuard: readGuard, budget: .seconds(1), policy: policy
                 )
                 Issue.record("broken input opened")
             } catch {
@@ -81,7 +81,7 @@ struct SourceOpenerTests {
             readGuard.cancel()
             defer { readGuard.disarm() }
             do {
-                _ = try SourceOpener.open(url: url, httpHeaders: [:], coordinatedHTTP: false,
+                _ = try SourceOpener.open(url: url, httpHeaders: [:], coordinatedHTTP: false, role: .reopen,
                                           interruptGuard: readGuard, budget: .seconds(1), policy: policy)
                 Issue.record("cancelled open succeeded")
             } catch {

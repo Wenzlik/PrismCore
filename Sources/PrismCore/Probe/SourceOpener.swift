@@ -57,6 +57,7 @@ enum SourceOpener {
         coordinatedHTTP: Bool,
         inputFactory: PrismCoreInputFactory? = nil,
         hints: SourceOpenHints? = nil,
+        role: SourceOpenTuning.OpenRole,
         interruptGuard: ReadInterruptGuard,
         budget: Duration,
         policy: Policy,
@@ -65,7 +66,7 @@ enum SourceOpener {
         opened: (UnsafeMutablePointer<AVFormatContext>?) -> Void = { _ in }
     ) throws -> UnsafeMutablePointer<AVFormatContext>? {
         // Only the probe includes option assembly in its measured open phase.
-        var options = policy == .probe ? nil : SourceOpenTuning.makeOptions(httpHeaders: httpHeaders)
+        var options = policy == .probe ? nil : SourceOpenTuning.makeOptions(httpHeaders: httpHeaders, role: role)
         defer { av_dict_free(&options) }
         var input = interruptGuard.makeContext()
         if let inputFactory, let input {
@@ -78,7 +79,7 @@ enum SourceOpener {
         prepared()
         interruptGuard.arm(budget: budget)
         armed()
-        if policy == .probe { options = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders) }
+        if policy == .probe { options = SourceOpenTuning.makeOptions(httpHeaders: httpHeaders, role: role) }
         let spec = url.isFileURL ? url.path : url.absoluteString
         var phase = Phase.open
         do {

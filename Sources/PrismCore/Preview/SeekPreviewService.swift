@@ -290,7 +290,7 @@ public actor SeekPreviewService {
         defer { interruptGuard.disarm() }
         guard let context = try SourceOpener.open(
             url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
-            inputFactory: inputFactory, interruptGuard: interruptGuard,
+            inputFactory: inputFactory, role: .reopen, interruptGuard: interruptGuard,
             budget: SourceOpenTuning.probeBudget, policy: .preview,
             opened: { self.input = $0 }
         ) else { throw Failure.undecodable("open failed") }

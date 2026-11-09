@@ -87,7 +87,7 @@ public enum PrismCoreEngine {
     ///
     /// Public because it changes what PrismCore can do, and a host that ships
     /// its own FFmpeg build is the one that decides the answer. The package's
-    /// own MPVKit dependency (the Wenzlik/MPVKit 1.0.1 fork) has the `eac3`
+    /// own MPVKit dependency (the Wenzlik/MPVKit fork) has the `eac3`
     /// encoder; stock MPVKit has the ac3/eac3 *decoders* only, so there the
     /// bridge targets AAC. `FFmpegBuild.capabilities.hasEAC3Encoder` says which.
     public static var isAudioBridgeAvailable: Bool { AudioBridge.isEncoderAvailable }

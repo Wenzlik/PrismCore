@@ -8,6 +8,8 @@ source-compatible.)
 
 ## [Unreleased]
 
+- Re-opens and side readers ask the Matroska demuxer to skip attachments (embedded fonts); `SourceProbe.open(skipAttachments:)` opts the first open in too. Requires Wenzlik/MPVKit 1.0.2 (FFmpeg n8.1.3 with `skip_attachments`); on an older host-supplied FFmpeg it is a no-op — `FFmpegBuild.Capabilities.skipsMatroskaAttachments` says which.
+
 - `DisplayCriteriaController.waitForSwitch()` no longer settles on the end of a mode switch that was already running when `apply(_:)` wrote (a restart right after `reset()`): it lets that switch finish (bounded by the settle cap), discards its end, then waits for the write's own switch. A redundant re-apply, a second concurrent wait, a wait cancelled mid-drain or before the write's own switch, one whose drain cap ran out, or a fresh controller adopting the same criteria keeps that protection, and a headroom raised by the earlier switch (before the write's own switch starts) no longer settles an HDR write. `SettleReport` gains `priorSwitch` and `wasCancelled`; a cancelled wait now returns at once.
 
 ### Changed

@@ -797,7 +797,8 @@ public enum SourceProbe {
         input: PrismCoreInputFactory? = nil,
         structure: SourceStructureExport = .none,
         hints: SourceOpenHints? = nil,
-        hdr10Plus: HDR10PlusScan = .off
+        hdr10Plus: HDR10PlusScan = .off,
+        skipAttachments: Bool = false
     ) async throws -> ProbedSource {
         try Task.checkCancellation()
         let outcome: Result<ProbedSource, any Error> = await withCheckedContinuation { continuation in
@@ -805,7 +806,8 @@ public enum SourceProbe {
                 continuation.resume(returning: Result {
                     try open(url: url, httpHeaders: httpHeaders, budget: budget,
                              coordinatedHTTP: coordinatedHTTP, input: input,
-                             structure: structure, hints: hints, hdr10Plus: hdr10Plus)
+                             structure: structure, hints: hints, hdr10Plus: hdr10Plus,
+                             skipAttachments: skipAttachments)
                 })
             }
             // Kept alive by its own closure until it exits; nothing to join.
@@ -844,6 +846,15 @@ public enum SourceProbe {
     /// - Parameter hdr10Plus: whether to read video packets looking for HDR10+
     ///   metadata. `.off` (the default) reads nothing and leaves
     ///   `SourceInfo.hdr10Plus` `nil`; see `HDR10PlusScan` for the cost.
+    /// - Parameter skipAttachments: don't read a Matroska source's
+    ///   attachments (embedded fonts, often tens of MB) on this first open.
+    ///   `false` (the default) reads them. With `true` the fonts are simply
+    ///   absent — subtitles render without the embedded typefaces — and
+    ///   attachment streams may be missing from the context; audio, video and
+    ///   subtitle tracks and their packets are unchanged. A no-op on an FFmpeg
+    ///   whose Matroska demuxer lacks `skip_attachments` (the bundled
+    ///   MPVKit 1.0.2 build has it; an older host FFmpeg may not): see `FFmpegBuild.Capabilities.skipsMatroskaAttachments`.
+    ///   Side readers and re-opens of an opened source always skip them.
     public static func open(
         url: URL,
         httpHeaders: [String: String] = [:],
@@ -852,7 +863,8 @@ public enum SourceProbe {
         input inputFactory: PrismCoreInputFactory? = nil,
         structure structureExport: SourceStructureExport = .none,
         hints: SourceOpenHints? = nil,
-        hdr10Plus hdr10PlusScan: HDR10PlusScan = .off
+        hdr10Plus hdr10PlusScan: HDR10PlusScan = .off,
+        skipAttachments: Bool = false
     ) throws -> ProbedSource {
         // The same context and its permanent guard travel to ProbedSource;
         // stream-info analysis fills fields the adopting muxer needs too.
@@ -863,7 +875,8 @@ public enum SourceProbe {
         var openedAt = probeStart
         guard let input = try SourceOpener.open(
             url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
-            inputFactory: inputFactory, hints: hints, interruptGuard: interruptGuard,
+            inputFactory: inputFactory, hints: hints,
+            role: .first(skipAttachments: skipAttachments), interruptGuard: interruptGuard,
             budget: budget, policy: .probe,
             armed: { probeStart = clock.now },
             opened: { _ in openedAt = clock.now }

@@ -21,6 +21,12 @@ enum SegmentPlanProbe {
         var options: OpaquePointer?
         defer { av_dict_free(&options) }
         SourceOpenTuning.applyHTTPHeaders(httpHeaders, to: &options)
+        // A plan reader beside the producer: the fonts are no use to it.
+        if let skip = SourceOpenTuning.attachmentOption(
+            role: .reopen, supported: SourceOpenTuning.matroskaSkipsAttachments
+        ) {
+            av_dict_set(&options, skip.key, skip.value, 0)
+        }
 
         let spec = url.isFileURL ? url.path : url.absoluteString
         guard avformat_open_input(&input, spec, nil, &options) >= 0, let input else { return nil }

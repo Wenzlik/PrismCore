@@ -482,7 +482,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     ///   `nil` (or zero) starts at the head.
     public func load(url: URL, httpHeaders: [String: String] = [:], startAt: CMTime? = nil, coordinatedHTTP: Bool = false) throws {
         try load(startAt: startAt) {
-            try openInput(url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP)
+            try openInput(url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
+                          role: .first(skipAttachments: false))
         }
     }
 
@@ -503,7 +504,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                 try adoptInput(adopted, from: probed)
             } else {
                 try openInput(url: probed.url, httpHeaders: probed.httpHeaders,
-                              coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP)
+                              coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP, role: .reopen)
             }
         }
     }
@@ -950,7 +951,12 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// ride the demux connection, dropped HTTP connections reconnect, and the
     /// analysis runs under the shared read caps (`SourceOpenTuning`) — over a
     /// network this open IS the wait the user sees.
-    private func openInput(url: URL, httpHeaders: [String: String], coordinatedHTTP: Bool = false) throws {
+    /// `role` is `.reopen` whenever a probe already opened this source: the
+    /// fonts were read once, and this path does not render them anyway.
+    private func openInput(
+        url: URL, httpHeaders: [String: String], coordinatedHTTP: Bool = false,
+        role: SourceOpenTuning.OpenRole
+    ) throws {
         // Publish before allocation, as on the original software path; stop()
         // reaches the permanent callback throughout open and analysis.
         let readGuard = ReadInterruptGuard()
@@ -958,7 +964,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         defer { readGuard.disarm() }
         _ = try SourceOpener.open(
             url: url, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
-            interruptGuard: readGuard, budget: SourceOpenTuning.probeBudget, policy: .software,
+            role: role, interruptGuard: readGuard, budget: SourceOpenTuning.probeBudget, policy: .software,
             opened: { self.input = $0 }
         )
         try describeInput()
@@ -988,7 +994,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             // the only way to start at the head there.
             teardownInput()
             try openInput(url: probed.url, httpHeaders: probed.httpHeaders,
-                          coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP)
+                          coordinatedHTTP: probed.interruptGuard.usesCoordinatedHTTP, role: .reopen)
             return
         }
         try describeInput(using: probed.info)
