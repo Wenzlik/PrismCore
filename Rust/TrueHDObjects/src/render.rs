@@ -175,9 +175,9 @@ const ROOM: [(usize, [f32; 3], u8); 11] = [
 /// - the 7.1.4 targets (table A.5) unchanged: an object 7.1.4 places on a speaker 9.1.6 also has
 ///   lands on that speaker alone;
 /// - the wides where A.9 puts them, on the side walls at y 0.2929 (between the fronts at 0 and
-///   the sides at 0.5) — also where TS 103 420's OAMD bed puts Lw/Rw (`point_weights`);
-/// - the top middles at A.9's [0.25|0.75, 0.5, 1], where the 3/x/2 layouts (tables A.6, A.8)
-///   already put theirs, between the front and rear tops at y 0.25 and 0.75.
+///   the sides at 0.5) — also where the split places an OAMD bed's Lw/Rw (`point_weights`);
+/// - the top middles at A.9's [0.25|0.75, 0.5, 1], where the 3/x/2 layouts already put theirs
+///   (`ROOM_3_2_2`, `ROOM_3_4_2`), between the front and rear tops at y 0.25 and 0.75.
 /// A.9's centre column (Tfc, Tc, Tbc), back centre and bottom row are left out; so the panner
 /// keeps every 7.1.4 row and adds one floor row (the wides) and one ceiling row (the middles).
 /// Classes as `SNAP` gives them: the wides WIDE, so zone masks 2 to 5 exclude them. Six mid and
@@ -330,8 +330,8 @@ pub fn bed_in(layout: Layout, speaker: Speaker, backs: bool) -> Gains {
         Lsc => [L, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Rsc => [R, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Cb => [Lb, Rb].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
-        // On 9.1.6 the four corners would play an overhead centre from around a pair that sits
-        // right beside it.
+        // A layout with top middles has a pair right beside the overhead centre; the four
+        // corners would spread it over the whole ceiling.
         Tc if layout.speakers().contains(&Tsl) => [Tsl, Tsr].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Tc => [Tfl, Tfr, Tbl, Tbr].iter().for_each(|s| add(*s, 0.5, &mut gains)),
         _ => add(speaker, 1., &mut gains),

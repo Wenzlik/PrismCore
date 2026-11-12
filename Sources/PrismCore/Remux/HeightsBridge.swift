@@ -706,10 +706,10 @@ enum LPCMSampleEntry {
         case .atmos7_1_2: return front + rear + middle     // L R C LFE Ls Rs Rls Rrs Ltm Rtm
         case .atmos7_1_4: return front + rear + four       // L R C LFE Ls Rs Rls Rrs Vhl Vhr Ltr Rtr
         case .atmos9_1_6:                                  // L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr
-            let floor = front + rear + wide
+            let ear = front + rear + wide
             let tops: [AVChannel] = [AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT, AV_CHAN_TOP_SIDE_LEFT,
                                      AV_CHAN_TOP_SIDE_RIGHT, AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT]
-            return floor + tops
+            return ear + tops
         }
     }
 

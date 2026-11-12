@@ -33,9 +33,9 @@ in its C API); `Package.swift` points at the zip attached to this release.
   7.1.4: the seven floor speakers and the four tops keep their 7.1.4
   targets (table A.5), so an object 7.1.4 places on one speaker lands on that
   speaker alone here too; the wides sit where A.9 puts them, on the side
-  walls between the fronts and the sides (y 0.2929, as TS 103 420's bed
-  Lw/Rw); the top middles sit where the 3/x/2 layouts (A.6, A.8) and A.9 put
-  them, between the front and rear tops (y 0.5). A.9's centre column, back
+  walls between the fronts and the sides (y 0.2929, where the split already
+  placed an OAMD bed's Lw/Rw); the top middles sit where the 3/x/2 layouts
+  and A.9 put them, between the front and rear tops (y 0.5). A.9's centre column, back
   centre and bottom row are left out. So the separable point panner gains a
   floor row and a ceiling row and loses nothing: an object between L and Ls
   now passes through Lw, one between the front and rear tops through the top
