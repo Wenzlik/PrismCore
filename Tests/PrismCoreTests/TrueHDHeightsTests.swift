@@ -276,13 +276,43 @@ struct TrueHDHeightsTests {
 
     @Test("Every heights layout has its APAC encoder on OS 26, and its CODECS level")
     func heightsLayouts() {
-        #expect(HeightsLayout.allCases.map(\.channelCount) == [8, 10, 10, 12])
+        #expect(HeightsLayout.allCases.map(\.channelCount) == [8, 10, 10, 12, 16])
         #expect(HeightsLayout.allCases.map { APACSampleEntry.codecsString(channelCount: $0.channelCount) }
-            == ["apac.31.02", "apac.31.03", "apac.31.03", "apac.31.03"])
+            == ["apac.31.02", "apac.31.03", "apac.31.03", "apac.31.03", "apac.31.04"])
         if ObjectAudioRendering.isAvailable {
-            #expect(HeightsLayout.allCases.allSatisfy { $0.isAvailable }, "macOS 26+ encodes every layout")
+            // 9.1.6 rides on whether this OS's encoder takes 16 channels; the round trips run it
+            // when it does, and this line says which it was.
+            #expect(HeightsLayout.allCases.filter { $0 != .atmos9_1_6 }.allSatisfy { $0.isAvailable }, "macOS 26+ encodes the TS 103 448 layouts")
+            print("heights layouts: 9.1.6 APAC encoder \(HeightsLayout.atmos9_1_6.isAvailable ? "available" : "unavailable")")
         }
         #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true, layout: .atmos5_1_2).hasPrefix("heights 5.1.2"))
+        #expect(PrismCoreSession.describe(.heights, allowsAtmosOutput: true, layout: .atmos9_1_6).hasPrefix("heights 9.1.6"))
+    }
+
+    @Test("9.1.6 is 16 channels in Core Audio's Atmos_9_1_6 order, end to end")
+    func nineOneSixLayout() {
+        let layout = HeightsLayout.atmos9_1_6
+        #expect(HeightsLayout(rawValue: "9.1.6") == layout)
+        #expect(layout.layoutTag == kAudioChannelLayoutTag_Atmos_9_1_6)
+        #expect(layout.layoutTag & 0xFFFF == 16, "the tag's own channel count")
+        #if canImport(TrueHDObjects)
+        #expect(layout.rendererLayout == 4, "TRUEHD_OBJECTS_LAYOUT_9_1_6")
+        // The renderer opens a 9.1.6 session (an older library would return NULL here).
+        let session = truehd_objects_open_layout(layout.rendererLayout)
+        #expect(session != nil)
+        truehd_objects_close(session)
+        #expect(truehd_objects_open_layout(5) == nil, "unknown layouts stay refused")
+        #endif
+        // L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr, as the renderer emits it.
+        #expect(LPCMSampleEntry.channels(layout) == [
+            AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY,
+            AV_CHAN_SIDE_LEFT, AV_CHAN_SIDE_RIGHT, AV_CHAN_BACK_LEFT, AV_CHAN_BACK_RIGHT,
+            AV_CHAN_WIDE_LEFT, AV_CHAN_WIDE_RIGHT, AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT,
+            AV_CHAN_TOP_SIDE_LEFT, AV_CHAN_TOP_SIDE_RIGHT, AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT,
+        ])
+        #expect(HeightsLayout.allCases.allSatisfy { LPCMSampleEntry.channels($0).count == $0.channelCount })
+        // 16 x 24 x 48 000 = 18.432 Mbit/s of LPCM.
+        #expect(layout.channelCount * 24 * 48_000 == 18_432_000)
     }
 
     @Test("CODECS follows Apple's APAC profile/level table")
@@ -333,7 +363,7 @@ struct TrueHDHeightsTests {
         #expect(writer.rendersHeights)
         let rendition = writer.rendition(groupID: "aud", isDefault: true)
         let channels = layout.channelCount
-        #expect(rendition.codecString == (channels == 8 ? "apac.31.02" : "apac.31.03"))
+        #expect(rendition.codecString == [8: "apac.31.02", 10: "apac.31.03", 12: "apac.31.03", 16: "apac.31.04"][channels])
         #expect(rendition.channels == "\(channels)")
         // FFmpeg's TrueHD has no objects: the renderer says so and plays the bed.
         #expect(deliveries.last == .notPreserved)
@@ -390,6 +420,7 @@ struct TrueHDHeightsTests {
         .atmos5_1_4: [0, 1, 2, 3, 4, 5, 17, 18, 20, 21],
         .atmos7_1_2: [0, 1, 2, 3, 4, 5, 8, 9, 23, 24],
         .atmos7_1_4: [0, 1, 2, 3, 4, 5, 8, 9, 17, 18, 20, 21],
+        .atmos9_1_6: [0, 1, 2, 3, 4, 5, 8, 9, 15, 16, 17, 18, 23, 24, 20, 21],
     ]
 
     @Test("Rendered to LPCM in each layout: ipcm + pcmC + chnl, Core Audio's channel order, decoded by AVFoundation on time",
@@ -528,7 +559,12 @@ struct TrueHDHeightsTests {
         let middle = [kAudioChannelLabel_LeftTopMiddle, kAudioChannelLabel_RightTopMiddle]
         let four = [kAudioChannelLabel_VerticalHeightLeft, kAudioChannelLabel_VerticalHeightRight,
                     kAudioChannelLabel_LeftTopRear, kAudioChannelLabel_RightTopRear]
-        return [.atmos5_1_2: bed + middle, .atmos5_1_4: bed + four, .atmos7_1_2: bed + rear + middle, .atmos7_1_4: bed + rear + four]
+        let wide = [kAudioChannelLabel_LeftWide, kAudioChannelLabel_RightWide]
+        let topFront = [kAudioChannelLabel_VerticalHeightLeft, kAudioChannelLabel_VerticalHeightRight]
+        let topRear = [kAudioChannelLabel_LeftTopRear, kAudioChannelLabel_RightTopRear]
+        let nine = bed + rear + wide + topFront + middle + topRear
+        return [.atmos5_1_2: bed + middle, .atmos5_1_4: bed + four, .atmos7_1_2: bed + rear + middle, .atmos7_1_4: bed + rear + four,
+                .atmos9_1_6: nine]
     }()
 
     @Test("After a seek the renderer starts at a major sync and stamps from it")

@@ -97,13 +97,16 @@ public enum ObjectAudioRendering: String, Sendable, Equatable {
 }
 
 /// The loudspeaker layout `ObjectAudioRendering.heights` renders TrueHD Atmos into: the
-/// layouts with heights that ETSI TS 103 448 (the object renderer's panner) defines and Apple
-/// Positional Audio encodes, each served in the channel order of the matching
-/// `kAudioChannelLayoutTag_Atmos_*`. Objects are panned onto the layout's own loudspeakers
-/// (TS 103 448 tables A.5–A.8) and bed channels routed by its table 6; the 7.1.4 split the
-/// renderer falls back to is routed into the layout by the same table. `.atmos7_1_4` is the
-/// default and what earlier versions always rendered. 9.1.6 is not offered: TS 103 448 defines
-/// no 9.1.6 layout for the panner.
+/// layouts with heights that ETSI TS 103 448 (the object renderer's panner) defines, and 9.1.6,
+/// each served in the channel order of the matching `kAudioChannelLayoutTag_Atmos_*`. Objects
+/// are panned onto the layout's own loudspeakers (TS 103 448 tables A.5–A.8) and bed channels
+/// routed by its table 6; the 7.1.4 split the renderer falls back to is routed into the layout
+/// by the same table. `.atmos7_1_4` is the default and what earlier versions always rendered.
+///
+/// TS 103 448 defines no 9.1.6, so `.atmos9_1_6`'s panner targets are PrismCore's choice: 7.1.4's
+/// unchanged, plus wides and top middles where the spec's 22.2 layout (table A.9) puts them —
+/// an object 7.1.4 places on a speaker lands on the same speaker here (CHANGELOG 4.0.4). Whether
+/// this OS's APAC encoder takes 16 channels is `isAvailable`'s answer.
 public enum HeightsLayout: String, Sendable, Equatable, CaseIterable {
     /// 8 channels: L R C LFE Ls Rs, top middle left/right.
     case atmos5_1_2 = "5.1.2"
@@ -113,12 +116,16 @@ public enum HeightsLayout: String, Sendable, Equatable, CaseIterable {
     case atmos7_1_2 = "7.1.2"
     /// 12 channels: L R C LFE, side and rear surrounds, top front and top rear left/right.
     case atmos7_1_4 = "7.1.4"
+    /// 16 channels: L R C LFE, side and rear surrounds, wides, top front, top middle and top
+    /// rear left/right. Last, so `allCases` stays ordered by channel count.
+    case atmos9_1_6 = "9.1.6"
 
     public var channelCount: Int {
         switch self {
         case .atmos5_1_2: return 8
         case .atmos5_1_4, .atmos7_1_2: return 10
         case .atmos7_1_4: return 12
+        case .atmos9_1_6: return 16
         }
     }
 

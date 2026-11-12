@@ -121,7 +121,7 @@ final class HeightsBridge: RenditionEncoder {
     #if canImport(TrueHDObjects)
     private var session: OpaquePointer?
     #endif
-    /// Interleaved 7.1.4 waiting for a whole encoder packet.
+    /// Interleaved frames of the layout waiting for a whole encoder packet.
     private var pending: [Float] = []
     /// The source time (1/48 000) of rendered sample 0 of this epoch; nil until a major sync.
     private var anchor: Int64?
@@ -576,6 +576,7 @@ extension HeightsLayout {
         case .atmos5_1_4: return kAudioChannelLayoutTag_Atmos_5_1_4
         case .atmos7_1_2: return kAudioChannelLayoutTag_Atmos_7_1_2
         case .atmos7_1_4: return kAudioChannelLayoutTag_Atmos_7_1_4
+        case .atmos9_1_6: return kAudioChannelLayoutTag_Atmos_9_1_6
         }
     }
 
@@ -586,6 +587,7 @@ extension HeightsLayout {
         case .atmos5_1_4: return UInt32(TRUEHD_OBJECTS_LAYOUT_5_1_4)
         case .atmos7_1_2: return UInt32(TRUEHD_OBJECTS_LAYOUT_7_1_2)
         case .atmos7_1_4: return UInt32(TRUEHD_OBJECTS_LAYOUT_7_1_4)
+        case .atmos9_1_6: return UInt32(TRUEHD_OBJECTS_LAYOUT_9_1_6)
         }
     }
     #endif
@@ -689,18 +691,25 @@ enum LPCMSampleEntry {
     /// ones movenc writes as the ISO/IEC 23091-3 positions CoreMedia reads back as Core Audio's
     /// labels (measured on macOS 27): FL/FR/FC/LFE → L R C LFE (positions 0–3), SL/SR → Ls Rs
     /// (4, 5), BL/BR → Rls Rrs (8, 9), TFL/TFR → Vhl Vhr (17, 18), TBL/TBR → Ltr Rtr (20, 21),
-    /// TSL/TSR → Ltm Rtm (23, 24).
+    /// TSL/TSR → Ltm Rtm (23, 24). WL/WR → Lw Rw (15, 16) by FFmpeg's ISO table, the one pair
+    /// not yet read back by CoreMedia here (9.1.6's round-trip test is that check).
     static func channels(_ layout: HeightsLayout) -> [AVChannel] {
         let front: [AVChannel] = [AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY,
                                   AV_CHAN_SIDE_LEFT, AV_CHAN_SIDE_RIGHT]
         let rear: [AVChannel] = [AV_CHAN_BACK_LEFT, AV_CHAN_BACK_RIGHT]
         let middle: [AVChannel] = [AV_CHAN_TOP_SIDE_LEFT, AV_CHAN_TOP_SIDE_RIGHT]
         let four: [AVChannel] = [AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT, AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT]
+        let wide: [AVChannel] = [AV_CHAN_WIDE_LEFT, AV_CHAN_WIDE_RIGHT]
         switch layout {
         case .atmos5_1_2: return front + middle            // L R C LFE Ls Rs Ltm Rtm
         case .atmos5_1_4: return front + four              // L R C LFE Ls Rs Vhl Vhr Ltr Rtr
         case .atmos7_1_2: return front + rear + middle     // L R C LFE Ls Rs Rls Rrs Ltm Rtm
         case .atmos7_1_4: return front + rear + four       // L R C LFE Ls Rs Rls Rrs Vhl Vhr Ltr Rtr
+        case .atmos9_1_6:                                  // L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr
+            let floor = front + rear + wide
+            let tops: [AVChannel] = [AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT, AV_CHAN_TOP_SIDE_LEFT,
+                                     AV_CHAN_TOP_SIDE_RIGHT, AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT]
+            return floor + tops
         }
     }
 
