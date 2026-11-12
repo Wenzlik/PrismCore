@@ -43,6 +43,18 @@ public enum SourceOpenTuning {
     /// sources that were not going to answer.
     public static let probeBudget: Duration = .seconds(10)
 
+    /// How long one network read may wait for its first byte before it counts
+    /// as stalled (FFmpeg's `rw_timeout`). A bound on ONE read, not on the
+    /// open: a host range proxy fetches each window whole before it writes a
+    /// byte, and the slowest remote open in the field took ~13 s in total —
+    /// so a single wait past 20 s is a stall, not a slow source.
+    static let readStallTimeoutMicroseconds = 20_000_000
+
+    /// FFmpeg's reconnect backoff ceiling. Its delays run 0, 1, 3, 7, … s;
+    /// a 4 s ceiling allows the first three reconnects and then answers the
+    /// read with an error (the default, 120 s, allows minutes of them).
+    static let reconnectDelayMaxSeconds = 4
+
     /// The options every open should carry: the caller's HTTP headers, the
     /// reconnect policy the demux side needs, and the caps above.
     ///
@@ -60,6 +72,15 @@ public enum SourceOpenTuning {
         // Reconnect on dropped HTTP connections — the demuxer read side.
         av_dict_set(&options, "reconnect", "1", 0)
         av_dict_set(&options, "reconnect_streamed", "1", 0)
+        // A read with no deadline is a seek with no end: without these, a
+        // stalled HTTP read (FFmpeg's default `rw_timeout` is infinite)
+        // blocked the producer for good, so a seek on a remote source
+        // buffered forever and nothing ever reached the host's fallback. Now
+        // the stall ends the read, FFmpeg's reconnect tries again (at most
+        // three times, its default backoff runs to minutes), and what still
+        // fails goes to the producer's own recovery and then to the host.
+        av_dict_set(&options, "rw_timeout", String(readStallTimeoutMicroseconds), 0)
+        av_dict_set(&options, "reconnect_delay_max", String(reconnectDelayMaxSeconds), 0)
         // Deliberately NOT `multiple_requests=1` (HTTP keep-alive). Measured
         // 2026-08-26 against a Range-capable loopback server, one session
         // start over a 30 s MKV: without it 4 requests on 4 connections;
