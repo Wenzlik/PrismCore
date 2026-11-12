@@ -160,13 +160,13 @@ struct VideoEnhancementTests {
     func governorStepsDown() {
         var governor = VideoEnhancementGovernor()
         // The first window is warm-up and never counts.
-        #expect(!governor.record(presented: 40, dropped: 20))
+        do { let changed = governor.record(presented: 40, dropped: 20); #expect(!changed) }
         #expect(governor.ceiling == .lanczosSharpened)
-        #expect(governor.record(presented: 40, dropped: 8))
+        do { let changed = governor.record(presented: 40, dropped: 8); #expect(changed) }
         #expect(governor.ceiling == .lanczos)
         // The cheaper level gets its own warm-up.
-        #expect(!governor.record(presented: 40, dropped: 8))
-        #expect(governor.record(presented: 40, dropped: 8))
+        do { let changed = governor.record(presented: 40, dropped: 8); #expect(!changed) }
+        do { let changed = governor.record(presented: 40, dropped: 8); #expect(changed) }
         #expect(governor.ceiling == nil)
         // Sticky: clean windows do not bring it back.
         for _ in 0..<40 { governor.record(presented: 48, dropped: 0) }
@@ -179,9 +179,9 @@ struct VideoEnhancementTests {
     func governorToleratesNoise() {
         var governor = VideoEnhancementGovernor()
         governor.record(presented: 48, dropped: 0)
-        #expect(!governor.record(presented: 47, dropped: 1))
+        do { let changed = governor.record(presented: 47, dropped: 1); #expect(!changed) }
         // 2 of 120 at 60 fps is 1.7 %: under the tolerance.
-        #expect(!governor.record(presented: 118, dropped: 2))
+        do { let changed = governor.record(presented: 118, dropped: 2); #expect(!changed) }
         #expect(governor.ceiling == .lanczosSharpened)
     }
 
@@ -193,9 +193,9 @@ struct VideoEnhancementTests {
         #expect(governor.ceiling == .lanczos)
         governor.record(presented: 48, dropped: 0) // warm-up of the new level
         for _ in 0..<(VideoEnhancementGovernor.cleanWindowsToRecover - 1) {
-            #expect(!governor.record(presented: 48, dropped: 0))
+            do { let changed = governor.record(presented: 48, dropped: 0); #expect(!changed) }
         }
-        #expect(governor.record(presented: 48, dropped: 0))
+        do { let changed = governor.record(presented: 48, dropped: 0); #expect(changed) }
         #expect(governor.ceiling == .lanczosSharpened)
         // A second struggle, a second recovery period: no second step up.
         governor.record(presented: 48, dropped: 0) // warm-up after the step up
@@ -213,11 +213,11 @@ struct VideoEnhancementTests {
     func dropCounterCountsSkippedFrames() {
         var counter = VideoEnhancementDropCounter()
         let frame = 1.0 / 24
-        #expect(counter.noteFrame(itemTime: 10, frameDuration: frame, isPlaying: true) == 0)
+        do { let lost = counter.noteFrame(itemTime: 10, frameDuration: frame, isPlaying: true); #expect(lost == 0) }
         counter.noteTick(elapsed: 1.0 / 60, period: 1.0 / 60)
-        #expect(counter.noteFrame(itemTime: 10 + frame, frameDuration: frame, isPlaying: true) == 0)
+        do { let lost = counter.noteFrame(itemTime: 10 + frame, frameDuration: frame, isPlaying: true); #expect(lost == 0) }
         counter.noteTick(elapsed: 5.0 / 60, period: 1.0 / 60)
-        #expect(counter.noteFrame(itemTime: 10 + 3 * frame, frameDuration: frame, isPlaying: true) == 1)
+        do { let lost = counter.noteFrame(itemTime: 10 + 3 * frame, frameDuration: frame, isPlaying: true); #expect(lost == 1) }
     }
 
     @Test("Content faster than the display, seeks and pauses are not drops")
@@ -227,16 +227,16 @@ struct VideoEnhancementTests {
         // 60 fps on a 50 Hz panel: every vsync on time, a frame skipped now and then.
         _ = counter.noteFrame(itemTime: 0, frameDuration: frame, isPlaying: true)
         counter.noteTick(elapsed: 0.02, period: 0.02)
-        #expect(counter.noteFrame(itemTime: 2 * frame, frameDuration: frame, isPlaying: true) == 0)
+        do { let lost = counter.noteFrame(itemTime: 2 * frame, frameDuration: frame, isPlaying: true); #expect(lost == 0) }
         // A seek forward.
         counter.noteTick(elapsed: 0.2, period: 0.02)
-        #expect(counter.noteFrame(itemTime: 120, frameDuration: frame, isPlaying: true) == 0)
+        do { let lost = counter.noteFrame(itemTime: 120, frameDuration: frame, isPlaying: true); #expect(lost == 0) }
         // Backwards.
         counter.noteTick(elapsed: 0.2, period: 0.02)
-        #expect(counter.noteFrame(itemTime: 30, frameDuration: frame, isPlaying: true) == 0)
+        do { let lost = counter.noteFrame(itemTime: 30, frameDuration: frame, isPlaying: true); #expect(lost == 0) }
         // Paused: a stepped frame is not a drop.
         counter.noteTick(elapsed: 0.2, period: 0.02)
-        #expect(counter.noteFrame(itemTime: 30 + 5 * frame, frameDuration: frame, isPlaying: false) == 0)
+        do { let lost = counter.noteFrame(itemTime: 30 + 5 * frame, frameDuration: frame, isPlaying: false); #expect(lost == 0) }
     }
 
     @Test("Without a reported frame rate the shortest gap stands in")
@@ -247,7 +247,7 @@ struct VideoEnhancementTests {
         counter.noteTick(elapsed: 0.02, period: 0.02)
         _ = counter.noteFrame(itemTime: frame, frameDuration: nil, isPlaying: true)
         counter.noteTick(elapsed: 0.1, period: 0.02)
-        #expect(counter.noteFrame(itemTime: 4 * frame, frameDuration: nil, isPlaying: true) == 2)
+        do { let lost = counter.noteFrame(itemTime: 4 * frame, frameDuration: nil, isPlaying: true); #expect(lost == 2) }
     }
 
     // MARK: Geometry
