@@ -22,8 +22,10 @@ in its C API); `Package.swift` points at the zip attached to this release.
   Ltm Rtm Ltr Rtr), `CODECS` `apac.31.04` (4.10 Mbit/s APAC) or 18.4 Mbit/s
   as experimental LPCM (`chnl` wides at ISO/IEC 23091-3 positions 15/16).
   It is the last of `allCases`, which stays ordered by channel count. As for
-  every layout, `isAvailable` says whether this OS's APAC encoder takes it;
-  `.lpcm` needs no encoder. The renderer's C API has
+  every layout, `isAvailable` says whether this OS's APAC encoder takes it
+  (macOS 27.0.1 does: the APAC round trip decodes every bed channel on its
+  own speaker, on time); `.lpcm` needs no encoder, and CoreMedia reads its
+  `chnl` back as 9.1.6 (same machine). The renderer's C API has
   `TRUEHD_OBJECTS_LAYOUT_9_1_6` (4) for `truehd_objects_open_layout`; an
   older library returns NULL for it. `prismcore-cli --heights-layout 9.1.6`.
 - **The 9.1.6 layout is PrismCore's, not ETSI TS 103 448's.** The panner
@@ -51,7 +53,7 @@ in its C API); `Package.swift` points at the zip attached to this release.
 
 - The renderer's internal frame (`render::CHANNELS`) is 16 wide, the widest
   layout; every session still hands out its own layout's channels (7.1.4: 12,
-  as before), and the split keeps working in 7.1.4. Not measured: the mixer
+  as before), and the split keeps working in 7.1.4. Not benchmarked: the mixer
   and limiter now touch 16 slots a frame instead of 12 for every layout
   (`PRISMCORE_HEIGHTS_BENCH` is the check if the load guard ever trips more
   often).

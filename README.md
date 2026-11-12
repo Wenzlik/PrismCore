@@ -386,8 +386,9 @@ DTS:X) is untouched.
   7.1.4 is routed into the layout by the same table. Each is served in the
   channel order of Apple's matching `kAudioChannelLayoutTag_Atmos_*`, and
   macOS 27 encodes and decodes the four TS 103 448 layouts (the round-trip
-  test runs each, and 9.1.6 wherever `HeightsLayout.isAvailable` says this
-  OS's APAC encoder takes 16 channels).
+  test runs each), and 9.1.6 too (macOS 27.0.1; elsewhere
+  `HeightsLayout.isAvailable` says whether this OS's APAC encoder takes 16
+  channels).
 - **The encoder.** `AVAudioConverter` APAC (OS 26), 256 kbit/s per channel (3.07 Mbit/s for 7.1.4), no DRC
   (every other DRC setting holds 1.5–20 s of audio before its first packet,
   which a segmenter that cuts on video boundaries cannot absorb; Apple's

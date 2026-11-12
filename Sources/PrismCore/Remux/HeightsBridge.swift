@@ -691,8 +691,7 @@ enum LPCMSampleEntry {
     /// ones movenc writes as the ISO/IEC 23091-3 positions CoreMedia reads back as Core Audio's
     /// labels (measured on macOS 27): FL/FR/FC/LFE → L R C LFE (positions 0–3), SL/SR → Ls Rs
     /// (4, 5), BL/BR → Rls Rrs (8, 9), TFL/TFR → Vhl Vhr (17, 18), TBL/TBR → Ltr Rtr (20, 21),
-    /// TSL/TSR → Ltm Rtm (23, 24). WL/WR → Lw Rw (15, 16) by FFmpeg's ISO table, the one pair
-    /// not yet read back by CoreMedia here (9.1.6's round-trip test is that check).
+    /// TSL/TSR → Ltm Rtm (23, 24), WL/WR → Lw Rw (15, 16).
     static func channels(_ layout: HeightsLayout) -> [AVChannel] {
         let front: [AVChannel] = [AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY,
                                   AV_CHAN_SIDE_LEFT, AV_CHAN_SIDE_RIGHT]
