@@ -238,8 +238,8 @@ public final class VideoEnhancementRenderer {
             return
         }
         pipelineTask = Task { [weak self] in
-            // Compiling the source is tens of milliseconds: not on the
-            // main actor, and only once per process.
+            // A runtime compile of Metal source: never on the main actor,
+            // and only once per process.
             let built = await Task.detached(priority: .userInitiated) {
                 try? VideoEnhancementPipeline.shared(device: device)
             }.value

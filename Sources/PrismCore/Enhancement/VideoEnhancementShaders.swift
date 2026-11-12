@@ -82,12 +82,12 @@ enum VideoEnhancementShaders {
         float4 w = weights[index];
         int b = int(base);
         int across = int(floor(horizontal ? local.y : local.x));
-        int2 step = horizontal ? int2(1, 0) : int2(0, 1);
+        int2 axis = horizontal ? int2(1, 0) : int2(0, 1);
         int2 origin = horizontal ? int2(b, across) : int2(across, b);
-        float4 s0 = enhancement_fetch(source, u, origin - step);
+        float4 s0 = enhancement_fetch(source, u, origin - axis);
         float4 s1 = enhancement_fetch(source, u, origin);
-        float4 s2 = enhancement_fetch(source, u, origin + step);
-        float4 s3 = enhancement_fetch(source, u, origin + step * 2);
+        float4 s2 = enhancement_fetch(source, u, origin + axis);
+        float4 s3 = enhancement_fetch(source, u, origin + axis * 2);
         float4 result = s0 * w.x + s1 * w.y + s2 * w.z + s3 * w.w;
         float4 low = min(s1, s2);
         float4 high = max(s1, s2);

@@ -89,9 +89,10 @@ final class VideoEnhancementPipeline: @unchecked Sendable {
 
     // MARK: Process-wide cache
 
-    /// Compiling the source costs tens of milliseconds and the answer never
-    /// changes for a device, so it happens once per process — and a failure
-    /// is remembered too, rather than paid for on every title.
+    /// Compiling Metal source at runtime is real work (not measured here; a
+    /// device run should) and the answer never changes for a device, so it
+    /// happens once per process — and a failure is remembered too, rather
+    /// than paid for on every title.
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cache: [UInt64: Result<VideoEnhancementPipeline, any Error>] = [:]
 
