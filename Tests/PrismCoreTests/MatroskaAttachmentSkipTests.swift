@@ -43,8 +43,9 @@ struct MatroskaAttachmentSkipTests {
             #expect(SourceOpenTuning.attachmentOption(role: role, supported: false) == nil)
             var options = SourceOpenTuning.makeOptions(httpHeaders: [:], role: role, attachmentSkipSupported: false)
             defer { av_dict_free(&options) }
-            // headers absent: reconnect, reconnect_streamed, probesize, analyzeduration.
-            #expect(av_dict_count(options) == 4)
+            // headers absent: reconnect, reconnect_streamed, rw_timeout,
+            // reconnect_delay_max, probesize, analyzeduration.
+            #expect(av_dict_count(options) == 6)
         }
     }
 

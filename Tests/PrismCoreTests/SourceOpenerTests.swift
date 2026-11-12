@@ -28,7 +28,11 @@ struct SourceOpenerTests {
         #expect(avMetadataValue(options, "reconnect_streamed") == "1")
         #expect(avMetadataValue(options, "probesize") == "4194304")
         #expect(avMetadataValue(options, "analyzeduration") == "2000000")
-        #expect(av_dict_count(options) == 5)
+        // A stalled read must end (it blocked a remote seek forever) without
+        // cutting off the ~13 s whole-open a slow remote source needs.
+        #expect(avMetadataValue(options, "rw_timeout") == "20000000")
+        #expect(avMetadataValue(options, "reconnect_delay_max") == "4")
+        #expect(av_dict_count(options) == 7)
     }
 
     @Test func sourceOpenerKeepsPhaseSpecificErrorWrapping() throws {
