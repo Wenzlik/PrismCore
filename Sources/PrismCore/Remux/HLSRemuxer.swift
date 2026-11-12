@@ -822,7 +822,9 @@ final class HLSRemuxer: @unchecked Sendable {
     ///
     /// Returns `nil` when a `cancel()` ended the open; the context is closed
     /// by then. On success the guard is published as `activeGuard`.
-    private func openSourceContext(role: SourceOpenTuning.OpenRole) throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
+    private func openSourceContext(
+        role: SourceOpenTuning.OpenRole, budget: Duration = SourceOpenTuning.probeBudget
+    ) throws -> (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)? {
         let interruptGuard = ReadInterruptGuard()
         var prepared = false
         let input: UnsafeMutablePointer<AVFormatContext>?
@@ -830,7 +832,7 @@ final class HLSRemuxer: @unchecked Sendable {
             input = try SourceOpener.open(
                 url: sourceURL, httpHeaders: httpHeaders, coordinatedHTTP: coordinatedHTTP,
                 inputFactory: inputFactory, role: role, interruptGuard: interruptGuard,
-                budget: SourceOpenTuning.probeBudget, policy: .remux,
+                budget: budget, policy: .remux,
                 prepared: {
                     prepared = true
                     // Publish after input installation but before open: stop()
@@ -938,17 +940,24 @@ final class HLSRemuxer: @unchecked Sendable {
         // seek is a Range request, so rewinding here first was a round trip
         // spent to arrive where the next call was going anyway.
         var needsRewindToHead = false
+        // What opening this source cost — connect, header and analysis, the
+        // work every re-open repeats. It sizes the re-open budget and the
+        // master's BANDWIDTH policy (`isSlowSource`).
+        let firstOpen: Duration
         if let adopted = probed?.consumeContext(), let probed {
             openedInput = adopted
             interruptGuard = probed.interruptGuard
             needsRewindToHead = true
             adoptedInfo = probed.info
+            firstOpen = probed.timing.open + probed.timing.streamInfo
         } else {
             // A probe that was handed over but whose context is gone (taken
             // elsewhere) already read the attachments once.
+            let openStart = ContinuousClock.now
             guard let opened = try openSourceContext(
                 role: probed == nil ? .first(skipAttachments: false) : .reopen
             ) else { return }
+            firstOpen = openStart.duration(to: .now)
             openedInput = opened.context
             interruptGuard = opened.guard
             adoptedInfo = nil
@@ -1645,25 +1654,31 @@ final class HLSRemuxer: @unchecked Sendable {
                     // selectable; the preference moves the flag, not the menu.
                     rendition.rendition(groupID: Self.audioGroupID, isDefault: ordinal == 0)
                 }
-                // An average under-declares a VBR source: AVPlayer meets the dense segments
-                // above BANDWIDTH and can stall or fail (-12318). Declared from the densest
-                // planned segment when the demuxer index gives byte positions; otherwise the
-                // average plus LPCM heights, which outweigh the TrueHD they replace (13.8 Mbit/s
-                // for 7.1.4) where the source's own rate cannot know it. Over-stating only grows
-                // AVPlayer's buffer (see `sourceBandwidth`).
+                // The policy, slow sources included, is `masterBandwidth`.
                 // A cache hit skipped the index load (Matroska Cues stay unread), so the
                 // stored positions stand in for the ones the live index lacks.
                 let keyframePositions = SegmentPlan.indexedKeyframePositions(
                     of: input.pointee.streams[Int(videoIndex)]!
                 ).merging(cachedEntry?.positionsByPTS ?? [:]) { live, _ in live }
-                variant.bandwidth = Self.peakSegmentBandwidth(
+                let slowSource = Self.isSlowSource(url: sourceURL, firstOpen: firstOpen)
+                variant.bandwidth = Self.masterBandwidth(
                     boundaries: Self.segmentBoundaries(plan: plannedPlan, positions: keyframePositions),
                     // Provenance asked of the source, not read off the number: a real
                     // 25 Mbit/s average equals the stub and must still set the clamp.
                     average: measuredSourceBandwidth(input: input),
-                    audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0
-                ) ?? variant.bandwidth + (renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
-                    .map(\.bitRateCeilingOverSource).max() ?? 0)
+                    audioCeiling: renditions.map(\.bitRateCeilingOverSource).max() ?? 0,
+                    heightsCeiling: renditions.filter { $0.rendersHeights && $0.heightsOutput == .lpcm }
+                        .map(\.bitRateCeilingOverSource).max() ?? 0,
+                    slowSource: slowSource
+                )
+                if slowSource {
+                    // The only trace a field log has of which policy a seek
+                    // stall on a remote source was served under.
+                    PrismCoreLog.notice(
+                        "slow source (open \(String(format: "%.1f", firstOpen.seconds)) s): "
+                            + "BANDWIDTH \(variant.bandwidth) from the average, not the peak"
+                    )
+                }
                 // The WebVTT renditions `prepare` set up above. Declaring them
                 // here is what makes them exist for AVPlayer: the segments are
                 // produced either way, but only the master's SUBTITLES group
@@ -2310,7 +2325,9 @@ final class HLSRemuxer: @unchecked Sendable {
                 retiredGuard.releaseHostInput()
                 let reopened: (context: UnsafeMutablePointer<AVFormatContext>, guard: ReadInterruptGuard)
                 do {
-                    guard let opened = try openSourceContext(role: .reopen) else { return }
+                    guard let opened = try openSourceContext(
+                        role: .reopen, budget: Self.reopenBudget(firstOpen: firstOpen)
+                    ) else { return }
                     reopened = opened
                 } catch {
                     failure = error
@@ -3581,6 +3598,61 @@ final class HLSRemuxer: @unchecked Sendable {
     /// must not clamp against it — 4 × 25 would cut a measured 120 Mbit/s
     /// peak to 100, back below what AVPlayer meets.
     static let unknownSourceBandwidth = 25_000_000
+
+    /// The master's `BANDWIDTH`.
+    ///
+    /// A fast source gets 4.0.2's declaration: an average under-declares a VBR
+    /// source, AVPlayer meets the dense segments above BANDWIDTH and can stall
+    /// or fail (-12318), so it is the densest planned segment
+    /// (`peakSegmentBandwidth`) when the index gives byte positions, and
+    /// otherwise the average plus LPCM heights (`heightsCeiling`), which
+    /// outweigh the TrueHD they replace (13.8 Mbit/s for 7.1.4) where the
+    /// source's own rate cannot know it.
+    ///
+    /// A slow source (`isSlowSource`) gets the average with 20 % headroom
+    /// (plus the same heights) instead. AVPlayer budgets each fetch against
+    /// BANDWIDTH; on a remote source whose every seek is a slow re-request
+    /// (a debrid link behind the host's range proxy), 2–4× the average asks
+    /// for a buffer the source cannot fill — the prime suspect for every seek
+    /// buffering without end there (Aether builds 604+, PrismCore 4.0.2,
+    /// not yet confirmed against a 4.0.1 build). Such a source cannot
+    /// deliver its dense segments faster than its average anyway, so the peak
+    /// buys it nothing. Unknown average: the stub, as before 4.0.2.
+    static func masterBandwidth(
+        boundaries: [(position: Int64, seconds: Double)],
+        average: Int?,
+        audioCeiling: Int,
+        heightsCeiling: Int,
+        slowSource: Bool
+    ) -> Int {
+        if slowSource {
+            return (average.map { $0 * 6 / 5 } ?? unknownSourceBandwidth) + heightsCeiling
+        }
+        return peakSegmentBandwidth(boundaries: boundaries, average: average, audioCeiling: audioCeiling)
+            ?? (average ?? unknownSourceBandwidth) + heightsCeiling
+    }
+
+    /// An open (connect, header, analysis) longer than this marks a network
+    /// source as slow. A LAN media server answers in well under a second
+    /// (`SourceOpenTuning.probeBudget`), the remote sources that stalled on
+    /// seek took ~13 s; two seconds keeps a LAN server on a bad moment fast.
+    static let slowOpenThreshold: Duration = .seconds(2)
+
+    /// Whether `masterBandwidth` treats this source as slow. A local file never
+    /// is: its open can be slow for reasons a seek does not repeat (a cold
+    /// disk), and it must keep the peak that holds VBR UHD off -12318.
+    static func isSlowSource(url: URL, firstOpen: Duration) -> Bool {
+        !url.isFileURL && firstOpen > slowOpenThreshold
+    }
+
+    /// The budget for a re-open after a read failure: twice what the first
+    /// open took, never under the probe's 10 s and never over 30 s. A fixed
+    /// 10 s failed every re-open of a source whose first open took 13 s, so
+    /// recovery could never succeed there; the 30 s cap keeps a dead source
+    /// failing into the host's fallback instead of holding the producer.
+    static func reopenBudget(firstOpen: Duration) -> Duration {
+        min(.seconds(30), max(SourceOpenTuning.probeBudget, firstOpen * 2))
+    }
 
     /// `BANDWIDTH` from the densest segment: its bit rate with 20 % headroom,
     /// plus `audioCeiling` for a re-encoded audio rendition whose bits the

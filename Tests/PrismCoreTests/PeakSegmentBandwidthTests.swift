@@ -107,6 +107,64 @@ struct PeakSegmentBandwidthTests {
             == 50_000_000)
     }
 
+    // MARK: Slow sources (4.0.3)
+
+    @Test("a slow source declares the average with 20 % headroom, not the peak")
+    func slowSourceDeclaresNearAverage() {
+        // The same VBR boundaries a fast source declares 14.4 for (a peak
+        // clamped to 2–4 × 6): a slow remote source gets 1.2 × 6.
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: vbr, average: 6_000_000, audioCeiling: 768_000, heightsCeiling: 0, slowSource: true
+        ) == 7_200_000)
+        // LPCM heights still count: the average cannot know them.
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: vbr, average: 6_000_000, audioCeiling: 0, heightsCeiling: 13_824_000, slowSource: true
+        ) == 21_024_000)
+        // No average known: the stub, as before 4.0.2.
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: vbr, average: nil, audioCeiling: 0, heightsCeiling: 0, slowSource: true
+        ) == HLSRemuxer.unknownSourceBandwidth)
+    }
+
+    @Test("a fast source keeps the 4.0.2 peak clamp")
+    func fastSourceKeepsPeakClamp() {
+        // Densest segment with headroom, between 2 × and 4 × the average —
+        // what keeps a VBR UHD remux from -12318.
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: vbr, average: 6_000_000, audioCeiling: 0, heightsCeiling: 0, slowSource: false
+        ) == 14_400_000)
+        let spike: [(position: Int64, seconds: Double)] = [
+            (position: 0, seconds: 0), (position: 10_000_000, seconds: 2), (position: 10_625_000, seconds: 4),
+            (position: 11_250_000, seconds: 6), (position: 11_875_000, seconds: 8), (position: 12_500_000, seconds: 10),
+        ]
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: spike, average: 10_000_000, audioCeiling: 0, heightsCeiling: 0, slowSource: false
+        ) == 40_000_000)
+        // No usable index: the average plus heights, as 4.0.2 did.
+        #expect(HLSRemuxer.masterBandwidth(
+            boundaries: [], average: 6_000_000, audioCeiling: 768_000, heightsCeiling: 1_000_000, slowSource: false
+        ) == 7_000_000)
+    }
+
+    @Test("only a network source whose open took over 2 s is slow")
+    func slowSourceClassification() {
+        let remote = URL(string: "http://127.0.0.1:8096/stream.mkv")!
+        let local = URL(fileURLWithPath: "/media/film.mkv")
+        #expect(HLSRemuxer.isSlowSource(url: remote, firstOpen: .seconds(13)))
+        #expect(!HLSRemuxer.isSlowSource(url: remote, firstOpen: .milliseconds(400)))
+        #expect(!HLSRemuxer.isSlowSource(url: remote, firstOpen: .seconds(2)))
+        // A local file keeps the peak clamp however long its open took.
+        #expect(!HLSRemuxer.isSlowSource(url: local, firstOpen: .seconds(13)))
+    }
+
+    @Test("a re-open gets twice the first open, between 10 and 30 s")
+    func reopenBudgetFollowsFirstOpen() {
+        #expect(HLSRemuxer.reopenBudget(firstOpen: .milliseconds(300)) == SourceOpenTuning.probeBudget)
+        // The ~13 s remote open: a 10 s re-open could never succeed.
+        #expect(HLSRemuxer.reopenBudget(firstOpen: .seconds(13)) == .seconds(26))
+        #expect(HLSRemuxer.reopenBudget(firstOpen: .seconds(40)) == .seconds(30))
+    }
+
     @Test("boundaries are the planned starts with their byte positions")
     func boundariesFromPlanAndPositions() {
         let plan = SegmentPlan(
