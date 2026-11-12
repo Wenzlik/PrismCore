@@ -8,6 +8,50 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.5] — 2026-11-12
+
+Source-compatible: an opt-in upscaler for the host's own `AVPlayer`
+(`VideoEnhancementRenderer`). Nothing changes for a host that does not
+create one. Numbered as a patch because the version slot was reserved; by
+this project's semver rule it is a feature.
+
+### Added
+
+- `VideoEnhancementRenderer`: Lanczos-2 upscaling with contrast-adaptive
+  sharpening (iOS, tvOS, macOS). It pulls frames from an
+  `AVPlayerItemVideoOutput` and draws them with Metal into a layer above the
+  host's `AVPlayerLayer`. That layer keeps rendering underneath, so whenever
+  the renderer is not drawing, its layer hides and the native picture is
+  already there. Picture in Picture and AirPlay keep the layer they always
+  used, and the tvOS display handshake (frame-rate and range matching)
+  stays with whoever programmed it.
+- `VideoEnhancementPolicy` decides from facts alone: `.off`; HDR (PQ or HLG,
+  declared by the host or found on a frame before anything is shown);
+  Picture in Picture; AirPlay video; subtitles AVFoundation draws into the
+  player layer; no upscale (`.automatic` wants 1.25× or more, `.on` anything
+  above 1×, and neither downscales); heat or Low Power Mode as the host
+  reports it (for `.on` too). Each is a `VideoEnhancementFallback`, so a
+  host can say why the picture is native.
+- `VideoEnhancementGovernor` steps down from Lanczos-2 + sharpening to
+  Lanczos-2 alone after a two-second window with more than 2 % (and at
+  least two) dropped frames. Another bad window hands the item back to the
+  native layer for good. Thirty clean seconds bring the sharpening back,
+  once per item. Drops are counted from the item times of the frames shown,
+  only across a missed vsync (60 fps on a 50 Hz panel is cadence, not
+  loss), plus frames skipped because the GPU was two frames behind.
+- `VideoEnhancementConditions.sourceSizeHint` lets the renderer decide
+  before AVPlayer knows the video size, so its output is attached before
+  the item plays. Adding or removing an output on a playing item rebuilds
+  the video pipeline and flashes a wrong frame, so the output stays on
+  through passing fallbacks and comes off only when the item will not be
+  drawn again.
+- The Lanczos-2 weights are a 64-phase table (`LanczosKernel`) that the
+  tests check and the shaders read. The shaders compile from source at
+  runtime, once per process and off the main actor. Both Lanczos passes
+  clamp towards the two nearest samples (no ringing for the sharpening to
+  amplify), so the intermediates are eight-bit: about 50 MB of scratch at
+  4K rather than twice that in half floats.
+
 ## [4.0.4] — 2026-11-12
 
 Patch release, source-compatible for hosts that do not switch exhaustively
@@ -59,6 +103,7 @@ in its C API); `Package.swift` points at the zip attached to this release.
   often).
 - `TRUEHD_OBJECTS_CHANNELS` stays 12: it is what `truehd_objects_open`
   (7.1.4) delivers, and is now documented as such.
+
 
 ## [4.0.3] — 2026-11-12
 
@@ -4030,7 +4075,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...HEAD
+[4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...4.0.5
 [4.0.4]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...4.0.4
 [4.0.3]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...4.0.3
 [4.0.2]: https://github.com/Wenzlik/PrismCore/compare/4.0.1...4.0.2

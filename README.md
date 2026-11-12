@@ -520,6 +520,56 @@ Built-in panels (iPhone, iPad, Mac) engage HDR on demand and skip all of this.
 as the backstop for the one state no API can prove: Match Content switched off on
 an HDR-capable panel.
 
+### Upscaling on the host's AVPlayer (opt-in, 4.0.5)
+
+`VideoEnhancementRenderer` draws the host's `AVPlayer` with Lanczos-2 and
+contrast-adaptive sharpening. It works on any `AVPlayer`, a PrismCore
+playlist or not, and leaves the host's `AVPlayerLayer` in place: its own
+`CAMetalLayer` goes above the video as a sublayer, and is hidden whenever
+the native picture should show.
+
+```swift
+let renderer = VideoEnhancementRenderer(
+    player: player,
+    playerLayer: playerLayer,          // macOS: also `displayLinkView:`
+    conditions: .init(
+        mode: .automatic,              // the user's Auto / On / Off
+        dynamicRange: info.video?.dynamicRange,
+        sourceSizeHint: displayedSize  // pixels, aspect applied
+    )
+)
+renderer.onStatusChange = { status in /* Playback Info */ }
+// Picture in Picture starting, AVFoundation drawing a subtitle track:
+renderer.conditions.isPictureInPictureActive = true
+// When the player goes away:
+renderer.invalidate()
+```
+
+- **SDR only.** A PQ or HLG source never reaches it. One the host could not
+  classify is checked on its first frame, before the renderer's layer is
+  shown.
+- **System surfaces stay native.** Picture in Picture and AVFoundation's
+  own subtitles are the host's to report (`conditions`). AirPlay video is
+  read off the player. In all three the player layer is the picture.
+- **Frame-rate matching is untouched.** Nothing about the item or the layer
+  it plays in changes, so the display criteria the host (or
+  `DisplayCriteriaController`) wrote still apply. The display link presents
+  once per vsync of whatever mode the panel is in.
+- **It backs off.** Dropped frames lower the quality, then hand the item
+  back to the native layer (`VideoEnhancementGovernor`).
+- **Pass `sourceSizeHint`.** Without it the renderer cannot decide until
+  AVPlayer knows the video size, and then has to attach its
+  `AVPlayerItemVideoOutput` to an item that is already playing. That
+  rebuilds the video pipeline under the picture, and a wrong frame can
+  flash.
+- **Pixels come from the screen.** The drawable is sized at the screen's
+  `nativeScale`, found through the view whose backing layer is the player
+  layer. On tvOS a view's trait and a layer's `contentsScale` read 1.0 on a
+  4K panel. A player layer that is not a view's backing layer should get
+  `contentsScale` set by its host, or a 4K panel is treated as 1080p.
+- `status.verdict` says what is drawing and why: `.active(quality)` or
+  `.native(reason)`.
+
 ### Knowing why a session failed
 
 `PrismCoreError.classify(_:)` turns anything this engine (or the host's
