@@ -6,6 +6,8 @@ import Foundation
 import QuartzCore
 #if os(macOS)
 import AppKit
+#else
+import UIKit
 #endif
 
 /// Lanczos-2 upscaling with adaptive sharpening for a host's `AVPlayer`.
@@ -83,8 +85,10 @@ public final class VideoEnhancementRenderer {
         didSet { if conditions != oldValue { conditionsChanged(from: oldValue) } }
     }
 
-    /// Point-to-pixel scale for the drawable. `nil` takes the player layer's
-    /// (on macOS, the display-link view's window's backing scale).
+    /// Point-to-pixel scale for the drawable. `nil` takes the screen's
+    /// `nativeScale` through the view that hosts the player layer (on macOS,
+    /// the display-link view's window's backing scale), and the layer's own
+    /// `contentsScale` only when neither is there.
     public var contentsScale: CGFloat? {
         didSet { if contentsScale != oldValue { refresh() } }
     }
@@ -521,6 +525,15 @@ public final class VideoEnhancementRenderer {
         if let contentsScale, contentsScale > 0 { return contentsScale }
         #if os(macOS)
         if let backing = displayLinkView?.window?.backingScaleFactor, backing > 0 { return backing }
+        #else
+        // Not the layer's `contentsScale`, nor the view's trait: on tvOS
+        // both read 1.0 while a 4K panel renders at 2.0, and a drawable that
+        // size would make every 1080p film look like no upscale to do — and
+        // be stretched by the compositor instead. The screen knows.
+        if let view = playerLayer.delegate as? UIView,
+           let screen = view.window?.windowScene?.screen, screen.nativeScale > 0 {
+            return screen.nativeScale
+        }
         #endif
         return max(playerLayer.contentsScale, 1)
     }

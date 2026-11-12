@@ -558,6 +558,11 @@ renderer.invalidate()
   `AVPlayerItemVideoOutput` to an item that is already playing. That
   rebuilds the video pipeline under the picture, and a wrong frame can
   flash.
+- **Pixels come from the screen.** The drawable is sized at the screen's
+  `nativeScale`, found through the view whose backing layer is the player
+  layer. On tvOS a view's trait and a layer's `contentsScale` read 1.0 on a
+  4K panel. A player layer that is not a view's backing layer should get
+  `contentsScale` set by its host, or a 4K panel is treated as 1080p.
 - `status.verdict` says what is drawing and why: `.active(quality)` or
   `.native(reason)`.
 
