@@ -55,8 +55,8 @@ let package = Package(
             ? .binaryTarget(name: "TrueHDObjects", path: trueHDObjectsPath)
             : .binaryTarget(
                 name: "TrueHDObjects",
-                url: "https://github.com/Wenzlik/PrismCore/releases/download/3.9.0/TrueHDObjects.xcframework.zip",
-                checksum: "5f65ad1b1864a31838ae998ba8902f569161656f555f23c81f2b470d01c7e895"
+                url: "https://github.com/Wenzlik/PrismCore/releases/download/4.0.4/TrueHDObjects.xcframework.zip",
+                checksum: "ebee3805b5f79ab46a59c516d3ae8e81c7c852a8d94340509c92e2efe084820f"
             ),
     ] + [
         // Every target builds in Swift 6 language mode (the tools-version
