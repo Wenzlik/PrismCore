@@ -8,6 +8,32 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.3] — 2026-11-12
+
+Patch release, source-compatible: seeking on a slow remote source (a debrid
+or `.strm` link behind the host's range proxy) no longer waits on a
+`BANDWIDTH` it cannot deliver or on a read that never ends.
+
+### Changed
+
+- A network source whose open (connect, header and analysis) took over 2 s
+  declares the master's `BANDWIDTH` as its average with 20 % headroom (plus
+  LPCM heights), not 4.0.2's densest segment held to 2–4× the average. On
+  such a source every seek is a slow re-request and it cannot deliver dense
+  segments faster than its average; the inflated figure is the prime suspect
+  for every seek buffering without end since 4.0.2. Local files and fast
+  network sources keep the 4.0.2 peak clamp, so VBR UHD does not go back to
+  stalling or -12318. A slow source says so in one notice line.
+- Every native FFmpeg open carries `rw_timeout` 20 s and
+  `reconnect_delay_max` 4 s. A stalled read used to block the producer for
+  good (FFmpeg's default has no read timeout); now it ends, FFmpeg reconnects
+  at most three times, and what still fails goes to the producer's recovery
+  and then to the host's fallback. It bounds one read, not the open, so the
+  ~13 s first open of a slow remote source still succeeds.
+- A re-open after a read failure gets twice the first open's time, between
+  10 and 30 s, instead of a fixed 10 s, which failed every re-open of a
+  source whose first open took longer than that.
+
 ## [4.0.2] — 2026-11-09
 
 Requires Wenzlik/MPVKit 1.0.2 and Swift 6. Highlights: `BANDWIDTH` from the densest segment, display-switch overlap settle, Matroska attachment skip on reopens.
@@ -3952,7 +3978,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...HEAD
+[4.0.3]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...4.0.3
 [4.0.2]: https://github.com/Wenzlik/PrismCore/compare/4.0.1...4.0.2
 [4.0.1]: https://github.com/Wenzlik/PrismCore/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/Wenzlik/PrismCore/compare/3.9.2...4.0.0
