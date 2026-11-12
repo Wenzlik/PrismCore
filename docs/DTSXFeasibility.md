@@ -116,8 +116,8 @@ the way TrueHD's did:
    reusing the TS 103 448 panner in `render.rs` is also possible but would
    need the coordinate mapping (TS 103 491 places sources by azimuth and elevation, e.g. `m_3DSrcAzimuth` / `m_3DSrcElevation`, where TS 103 448 uses room coordinates) and its own
    measurement against TS 103 584. Output 7.1.4 through the existing APAC
-   path (`HeightsBridge`, 12 channels today); 9.1.6 only once a 9.1.6
-   renderer and APAC rendition exist, which they do not yet.
+   path (`HeightsBridge`); 9.1.6 too, since TrueHD's renderer and APAC
+   rendition have one (4.0.4, `HeightsLayout.atmos9_1_6`).
 5. **Fallback.** As for TrueHD: the channel presentation in the same
    rendition with silent heights, `.notPreserved`, never a codec change after
    the master is written.

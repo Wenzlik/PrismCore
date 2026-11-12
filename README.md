@@ -92,7 +92,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.1")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.4")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -376,15 +376,18 @@ DTS:X) is untouched.
 - **Layouts.** `heightsLayout` picks the loudspeaker layout: 7.1.4 (the
   default, 12 channels, `apac.31.03`), 7.1.2 and 5.1.4 (10 channels,
   `apac.31.03`) or 5.1.2 (8 channels, `apac.31.02`) — the layouts with
-  heights ETSI TS 103 448 defines (3/4/4, 3/4/2, 3/2/4, 3/2/2). Objects are
+  heights ETSI TS 103 448 defines (3/4/4, 3/4/2, 3/2/4, 3/2/2) — or 9.1.6
+  (16 channels, `apac.31.04`, since 4.0.4), which it does not: PrismCore
+  places 9.1.6 on the spec's own 22.2 targets (table A.9), 7.1.4's
+  unchanged plus wides and top middles (CHANGELOG 4.0.4 has the reasoning). Objects are
   panned onto the layout's own loudspeakers (its tables A.5–A.8; the x.1.2
   layouts' heights are top middles), bed channels routed by its table 6 (a
   5.1.x surround takes the backs at −3 dB each), and the split fallback's
   7.1.4 is routed into the layout by the same table. Each is served in the
   channel order of Apple's matching `kAudioChannelLayoutTag_Atmos_*`, and
-  macOS 27 encodes and decodes all four (the round-trip test runs each). Not
-  9.1.6: TS 103 448 defines no 9.1.6 layout for the panner, and the 7.1.4
-  render has nothing for wide or top-middle speakers to carry.
+  macOS 27 encodes and decodes the four TS 103 448 layouts (the round-trip
+  test runs each, and 9.1.6 wherever `HeightsLayout.isAvailable` says this
+  OS's APAC encoder takes 16 channels).
 - **The encoder.** `AVAudioConverter` APAC (OS 26), 256 kbit/s per channel (3.07 Mbit/s for 7.1.4), no DRC
   (every other DRC setting holds 1.5–20 s of audio before its first packet,
   which a segmenter that cuts on video boundaries cannot absorb; Apple's
@@ -1172,7 +1175,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.1")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.4")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
