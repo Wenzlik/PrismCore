@@ -104,7 +104,7 @@ pub struct Session {
     guided: bool,
     unguided_frames: usize,
     /// The output layout, and the split's 7.1.4 routed into it by table 6 (row per 7.1.4
-    /// channel; `None` for 7.1.4 itself).
+    /// channel; `None` for 7.1.4 itself, whose channels are the frame's first 12).
     layout: Layout,
     split_routing: Option<[Gains; CHANNELS]>,
     compact: Vec<f32>,
@@ -815,7 +815,7 @@ impl Session {
         let result = if channels == CHANNELS {
             output(&self.limited)
         } else {
-            // Every layout renders its own channels first in a 7.1.4-wide frame.
+            // Every layout renders its own channels first in a frame as wide as the widest.
             self.compact.clear();
             self.compact.extend(self.limited.chunks_exact(CHANNELS).flat_map(|f| f[..channels].iter().copied()));
             output(&self.compact)
@@ -1089,6 +1089,10 @@ mod tests {
         BlockUpdateInfo, MDUpdateInfo, ObjectBasicInfo, ObjectElement, ObjectInfoBlock, ObjectRenderInfo, Trim,
     };
 
+    /// Channels per frame the default (7.1.4) session hands out; `CHANNELS` is the internal
+    /// frame, as wide as 9.1.6.
+    const OUT: usize = 12;
+
     fn point(pos3d: [f64; 3]) -> ObjectAudioMetadataPayload {
         ObjectAudioMetadataPayload {
             object_count: 1,
@@ -1168,7 +1172,7 @@ mod tests {
         let mut session = Session::default();
         let mut frames = 0usize;
         let mut sink = |pcm: &[f32]| {
-            frames += pcm.len() / CHANNELS;
+            frames += pcm.len() / OUT;
             Ok(())
         };
         for _ in 0..601 {
@@ -1353,9 +1357,9 @@ mod tests {
     /// Every input sample comes out once, in place: the same length, each click on its own
     /// sample, and (outside `gap`) no 10 ms of silence.
     fn assert_in_place(run: &Run, units: usize, gap: Option<std::ops::Range<usize>>) {
-        let frames = run.pcm.len() / CHANNELS;
+        let frames = run.pcm.len() / OUT;
         assert_eq!(frames, units * UNIT, "every input sample comes out exactly once");
-        let energy = |i: usize| run.pcm[i * CHANNELS..(i + 1) * CHANNELS].iter().map(|x| x * x).sum::<f32>();
+        let energy = |i: usize| run.pcm[i * OUT..(i + 1) * OUT].iter().map(|x| x * x).sum::<f32>();
         for click in (500..frames).step_by(1000) {
             if gap.as_ref().is_some_and(|g| g.contains(&click)) {
                 continue;
@@ -1375,7 +1379,7 @@ mod tests {
     fn assert_same(a: &[f32], b: &[f32]) {
         assert_eq!(a.len(), b.len());
         if let Some(i) = a.iter().zip(b).position(|(x, y)| x != y) {
-            panic!("differs from frame {} (channel {}): {} vs {}", i / CHANNELS, i % CHANNELS, a[i], b[i]);
+            panic!("differs from frame {} (channel {}): {} vs {}", i / OUT, i % OUT, a[i], b[i]);
         }
     }
 
@@ -1387,7 +1391,7 @@ mod tests {
         assert!(lost.result.is_ok());
         assert!(lost.exact_at_end);
         assert_in_place(&lost, 100, Some(20 * UNIT..32 * UNIT));
-        assert!(lost.pcm[20 * UNIT * CHANNELS..32 * UNIT * CHANNELS].iter().all(|x| x.abs() < 0.02));
+        assert!(lost.pcm[20 * UNIT * OUT..32 * UNIT * OUT].iter().all(|x| x.abs() < 0.02));
     }
 
     #[test]
@@ -1416,7 +1420,7 @@ mod tests {
             // sample for sample, short of the split's last 2048 samples there: they see silence
             // after them.
             let rejoin = metadata_from.min(units).next_multiple_of(SYNC_EVERY).min(units);
-            let until = (rejoin * UNIT - crate::split::FFT) * CHANNELS;
+            let until = (rejoin * UNIT - crate::split::FFT) * OUT;
             assert_same(&shipped.pcm[..until], &split.pcm[..until]);
             // The bed is reported after the same unit: the 601st (24 040 samples > 0.5 s).
             assert_eq!(first(&shipped.modes, Mode::Bed), Some(600));
@@ -1452,13 +1456,33 @@ mod tests {
     fn no_metadata_at_first_hands_over_the_same_way_in_every_layout() {
         // The held 7.1 through the split, routed into the layout: what that layout's split plays
         // from the first sample, with the bed reported after the same unit.
-        for layout in [Layout::L512, Layout::L514, Layout::L712] {
+        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L916] {
             let shipped = run(Session::exact_with_split_fallback().in_layout(layout), 800, from(usize::MAX), None);
             let split = run(Session::default().in_layout(layout), 800, from(usize::MAX), None);
             assert_eq!(shipped.pcm.len(), 800 * UNIT * layout.channels(), "{layout:?}");
             assert_same(&shipped.pcm, &split.pcm);
             assert_eq!(first(&shipped.modes, Mode::Bed), Some(600), "{layout:?}");
         }
+    }
+
+    #[test]
+    fn nine_one_six_renders_sixteen_channels_in_place() {
+        // The timeline object (the front-left ceiling) rendered into 9.1.6: 16 channels a frame,
+        // every sample in place, and all of it on Tfl, which is channel 10 there (8 is Lw).
+        let units = 200;
+        let nine = run(Session::exact_with_split_fallback().in_layout(Layout::L916), units, from(0), None);
+        assert_eq!(nine.pcm.len(), units * UNIT * 16);
+        assert_eq!(*nine.modes.last().unwrap(), Mode::Objects);
+        let energy = |c: usize| nine.pcm.iter().skip(c).step_by(16).map(|x| f64::from(*x).powi(2)).sum::<f64>();
+        let total: f64 = (0..16).map(energy).sum();
+        assert!(total > 0. && energy(10) > 0.99 * total, "Tfl {} of {total}", energy(10));
+        // The split's 7.1.4 reaches each speaker's own 9.1.6 channel, one to one.
+        let rows = Session::default().in_layout(Layout::L916).split_routing.unwrap();
+        for (c, speaker) in Layout::L714.speakers().iter().enumerate() {
+            let to = Layout::L916.speakers().iter().position(|s| s == speaker).unwrap();
+            assert!(rows[c].iter().enumerate().all(|(i, g)| *g == (if i == to { 1. } else { 0. })), "{speaker:?}: {:?}", rows[c]);
+        }
+        assert!(rows[12..].iter().all(|row| row.iter().all(|g| *g == 0.)));
     }
 
     #[test]
@@ -1564,7 +1588,7 @@ mod tests {
         };
         let left = run(Session::exact_with_split_fallback(), units, refused, None);
         assert_in_place(&left, units, Some(1000 * UNIT..1024 * UNIT));
-        let gap = &left.pcm[1000 * UNIT * CHANNELS..1024 * UNIT * CHANNELS];
+        let gap = &left.pcm[1000 * UNIT * OUT..1024 * UNIT * OUT];
         assert!(gap.iter().all(|x| x.abs() < 0.02), "silence (the limiter's 2 ms tail aside)");
     }
 

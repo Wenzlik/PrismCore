@@ -869,8 +869,9 @@ public actor PrismCoreSession {
     ///   bed is the better track.
     /// - Parameter heightsLayout: the loudspeaker layout `.heights` renders
     ///   into — `.atmos7_1_4` (the default, 12 channels, `apac.31.03`),
-    ///   `.atmos7_1_2` or `.atmos5_1_4` (10, `apac.31.03`), `.atmos5_1_2` (8,
-    ///   `apac.31.02`). Objects are panned onto the layout's own loudspeakers
+    ///   `.atmos9_1_6` (16, `apac.31.04`; since 4.0.4, a layout TS 103 448
+    ///   does not define), `.atmos7_1_2` or `.atmos5_1_4` (10, `apac.31.03`),
+    ///   `.atmos5_1_2` (8, `apac.31.02`). Objects are panned onto the layout's own loudspeakers
     ///   rather than folded down from 7.1.4. A layout this OS's APAC encoder
     ///   does not take (`HeightsLayout.isAvailable`) keeps the track on
     ///   `bridgedAudio`, as an unavailable `.heights` does.

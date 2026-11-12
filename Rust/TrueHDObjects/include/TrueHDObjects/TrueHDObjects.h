@@ -15,7 +15,8 @@
 extern "C" {
 #endif
 
-/// Output channels, in kAudioChannelLayoutTag_Atmos_7_1_4 order: L R C LFE Ls Rs Lb Rb Tfl Tfr Tbl Tbr.
+/// Output channels of `truehd_objects_open`, in kAudioChannelLayoutTag_Atmos_7_1_4 order: L R C LFE
+/// Ls Rs Lb Rb Tfl Tfr Tbl Tbr. `truehd_objects_open_layout` can be wider (9.1.6: 16).
 #define TRUEHD_OBJECTS_CHANNELS 12
 /// Output (and the only accepted input) sample rate.
 #define TRUEHD_OBJECTS_SAMPLE_RATE 48000
@@ -47,9 +48,10 @@ typedef int32_t (*TrueHDObjectsPCM)(void *context, const float *interleaved, uin
 /// major sync after metadata it places arrives.
 TrueHDObjects *truehd_objects_open(void);
 
-/// Output layouts for `truehd_objects_open_layout`: the TS 103 448 layouts with heights, each in
-/// the channel order of the matching kAudioChannelLayoutTag_Atmos_* (top middles where it has
-/// them). TRUEHD_OBJECTS_CHANNELS is the widest (7.1.4).
+/// Output layouts for `truehd_objects_open_layout`: the TS 103 448 layouts with heights, and a
+/// 9.1.6 that TS 103 448 does not define (its loudspeakers placed on the spec's 22.2 targets), each
+/// in the channel order of the matching kAudioChannelLayoutTag_Atmos_* (top middles where it has
+/// them).
 enum {
     /// 8 channels: L R C LFE Ls Rs Ltm Rtm.
     TRUEHD_OBJECTS_LAYOUT_5_1_2 = 0,
@@ -59,6 +61,9 @@ enum {
     TRUEHD_OBJECTS_LAYOUT_7_1_2 = 2,
     /// 12 channels: what `truehd_objects_open` renders.
     TRUEHD_OBJECTS_LAYOUT_7_1_4 = 3,
+    /// 16 channels: L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr. Since PrismCore 4.0.4;
+    /// an older library returns NULL for it.
+    TRUEHD_OBJECTS_LAYOUT_9_1_6 = 4,
 };
 
 /// `truehd_objects_open` for another layout: the PCM callback then receives frames of that

@@ -52,6 +52,59 @@ this project's semver rule it is a feature.
   amplify), so the intermediates are eight-bit: about 50 MB of scratch at
   4K rather than twice that in half floats.
 
+## [4.0.4] — 2026-11-12
+
+Patch release, source-compatible for hosts that do not switch exhaustively
+over `HeightsLayout` (a new case): TrueHD Atmos heights render into 9.1.6
+(16 channels). Ships a new `TrueHDObjects.xcframework` (a new layout value
+in its C API); `Package.swift` points at the zip attached to this release.
+
+### Added
+
+- `HeightsLayout.atmos9_1_6` ("9.1.6"): 16 channels in the order of
+  `kAudioChannelLayoutTag_Atmos_9_1_6` (L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr
+  Ltm Rtm Ltr Rtr), `CODECS` `apac.31.04` (4.10 Mbit/s APAC) or 18.4 Mbit/s
+  as experimental LPCM (`chnl` wides at ISO/IEC 23091-3 positions 15/16).
+  It is the last of `allCases`, which stays ordered by channel count. As for
+  every layout, `isAvailable` says whether this OS's APAC encoder takes it
+  (macOS 27.0.1 does: the APAC round trip decodes every bed channel on its
+  own speaker, on time); `.lpcm` needs no encoder, and CoreMedia reads its
+  `chnl` back as 9.1.6 (same machine). The renderer's C API has
+  `TRUEHD_OBJECTS_LAYOUT_9_1_6` (4) for `truehd_objects_open_layout`; an
+  older library returns NULL for it. `prismcore-cli --heights-layout 9.1.6`.
+- **The 9.1.6 layout is PrismCore's, not ETSI TS 103 448's.** The panner
+  follows TS 103 448, whose table A.1 has no 9.1.6, so there is no table to
+  take the loudspeaker positions from. Every one is a target the spec already
+  gives in its 22.2 layout (table A.9), chosen so that 9.1.6 only adds to
+  7.1.4: the seven floor speakers and the four tops keep their 7.1.4
+  targets (table A.5), so an object 7.1.4 places on one speaker lands on that
+  speaker alone here too; the wides sit where A.9 puts them, on the side
+  walls between the fronts and the sides (y 0.2929, where the split already
+  placed an OAMD bed's Lw/Rw); the top middles sit where the 3/x/2 layouts
+  and A.9 put them, between the front and rear tops (y 0.5). A.9's centre column, back
+  centre and bottom row are left out. So the separable point panner gains a
+  floor row and a ceiling row and loses nothing: an object between L and Ls
+  now passes through Lw, one between the front and rear tops through the top
+  middle, and the overhead centre plays from the top-middle pair rather than
+  the four corners. Wides take the WIDE class (zone constraints 2–5 exclude
+  them, as on 22.2); with six mid and six top speakers, trims select table 7's
+  configuration 8, as 7.1.4 does. Bed channels route by table 6 as in every
+  layout — the 7.1.4 split fallback lands one to one on its own speakers —
+  and a bed Tc goes to the top middles where a layout has them (unchanged
+  in effect for 5.1.2 and 7.1.2, where the four tops already folded there).
+
+### Changed
+
+- The renderer's internal frame (`render::CHANNELS`) is 16 wide, the widest
+  layout; every session still hands out its own layout's channels (7.1.4: 12,
+  as before), and the split keeps working in 7.1.4. Not benchmarked: the mixer
+  and limiter now touch 16 slots a frame instead of 12 for every layout
+  (`PRISMCORE_HEIGHTS_BENCH` is the check if the load guard ever trips more
+  often).
+- `TRUEHD_OBJECTS_CHANNELS` stays 12: it is what `truehd_objects_open`
+  (7.1.4) delivers, and is now documented as such.
+
+
 ## [4.0.3] — 2026-11-12
 
 Patch release, source-compatible: seeking on a slow remote source (a debrid
@@ -4023,7 +4076,8 @@ HTTP server, with:
   AVPlayer cannot decode at all.
 
 [Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...HEAD
-[4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...4.0.5
+[4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...4.0.5
+[4.0.4]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...4.0.4
 [4.0.3]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...4.0.3
 [4.0.2]: https://github.com/Wenzlik/PrismCore/compare/4.0.1...4.0.2
 [4.0.1]: https://github.com/Wenzlik/PrismCore/compare/4.0.0...4.0.1

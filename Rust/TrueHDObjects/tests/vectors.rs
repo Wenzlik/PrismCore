@@ -317,7 +317,7 @@ fn every_layout_renders_the_same_timeline_and_energy() {
         let Some((_, reference, _)) = decode_with(name, 4096, open) else { return };
         let frames = reference.len() / 12;
         let total = |pcm: &[f32]| pcm.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>();
-        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+        for layout in Layout::ALL {
             let dir = std::env::var("TRUEHD_OBJECTS_VECTORS").unwrap();
             let data = std::fs::read(std::path::Path::new(&dir).join(name)).unwrap();
             let mut session = open().in_layout(layout);

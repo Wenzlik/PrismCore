@@ -249,6 +249,14 @@ API surface.
   `truehd_objects_open_split` open either alone, for measurement and
   listening. The Cargo feature `exact-render` is a no-op kept for old
   commands.
+- **The renderer's frame is wider than most outputs.** `render::CHANNELS` is
+  the widest layout (9.1.6, 16) and every layout renders into that frame, its
+  own channels first; the session hands out only `Layout::channels()` (12 for
+  7.1.4). The split and `point_gains` stay 7.1.4 (the frame's first 12) and
+  are routed into the layout after. Count output frames by the layout's
+  channels, never by `CHANNELS`. 9.1.6 is not a TS 103 448 layout: its targets
+  are a subset of table A.9 (22.2) keeping every 7.1.4 target, so nothing
+  7.1.4 places on a speaker moves (CHANGELOG 4.0.4).
 - **Do not fall back to the split under load.** It costs 2.4–3.4× the render.
   `HeightsBridge` asks for the bed (`truehd_objects_request_bed`) when its
   chain runs under 2× real time over 10 s of audio, one way per epoch; it

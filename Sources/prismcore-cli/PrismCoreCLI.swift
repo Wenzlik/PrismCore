@@ -39,7 +39,7 @@ struct PrismCoreCLI {
                                        (default) or FLAC up to 7.1
           --heights                    serve TrueHD Atmos as 7.1.4 APAC with its heights
                                        (needs the TrueHDObjects build and macOS 26)
-          --heights-layout 5.1.2|5.1.4|7.1.2|7.1.4  the layout --heights renders (default 7.1.4)
+          --heights-layout 5.1.2|5.1.4|7.1.2|7.1.4|9.1.6  the layout --heights renders (default 7.1.4)
           --heights-output apac|lpcm   APAC (default) or, experimental, 24-bit LPCM (ipcm)
           -v, --verbose                libav* warnings and engine notices on stderr
 

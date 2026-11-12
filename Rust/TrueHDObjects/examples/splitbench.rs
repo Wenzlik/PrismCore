@@ -1,6 +1,9 @@
 // Splitter CPU on its own: 16 objects, CPU time of this thread (a loaded machine still measures
 // the work). `cargo run --release --example splitbench`
-use truehd_objects::split::{BedSplitter, Weight};
+use truehd_objects::{
+    render::CHANNELS,
+    split::{BedSplitter, Weight},
+};
 
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: u32) -> u64;
@@ -10,7 +13,8 @@ const CLOCK_THREAD_CPUTIME_ID: u32 = 16;
 fn main() {
     let mut s = BedSplitter::default();
     let seconds = 20;
-    let bed = vec![0.1f32; 40 * 12];
+    // The splitter reads frames as wide as the widest layout (its 7.1.4 first).
+    let bed = vec![0.1f32; 40 * CHANNELS];
     let objects: Vec<Vec<f32>> = (0..16).map(|_| vec![0.05f32; 40]).collect();
     s.set_weights((0..16).map(|k| Weight::at([k as f32 / 16., 0.3, (k % 2) as f32], 1.)).collect());
     let mut out = Vec::new();

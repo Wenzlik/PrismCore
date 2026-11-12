@@ -100,7 +100,7 @@ struct ArgumentReader {
             case "--heights-layout":
                 let raw = try value(for: argument)
                 guard let layout = HeightsLayout(rawValue: raw) else {
-                    throw usage("--heights-layout takes 5.1.2, 5.1.4, 7.1.2 or 7.1.4, not \"\(raw)\"")
+                    throw usage("--heights-layout takes 5.1.2, 5.1.4, 7.1.2, 7.1.4 or 9.1.6, not \"\(raw)\"")
                 }
                 options.heightsLayout = layout
             case "--heights-output":
