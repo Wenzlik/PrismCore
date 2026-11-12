@@ -738,7 +738,7 @@ mod tests {
         let (e, s): (Vec<f64>, Vec<f64>) = (0..CHANNELS).map(|c| (energy(&exact[c]), energy(&split[c]))).unzip();
         let (te, ts) = (e.iter().sum::<f64>(), s.iter().sum::<f64>());
         println!("scene: channel exact % / split % / diff dB");
-        for c in 0..CHANNELS {
+        for c in 0..names.len() {
             if c != LFE {
                 println!("  {:>4} {:>7.2} {:>7.2} {:>+6.2}", names[c], e[c] / te * 100., s[c] / ts * 100., 10. * (s[c] / e[c]).log10());
             }

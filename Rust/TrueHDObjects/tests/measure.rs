@@ -19,7 +19,8 @@ use truehd_objects::{
 };
 
 const RATE: usize = 48_000;
-const NAMES: [&str; CHANNELS] = ["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr"];
+/// The 7.1.4 feeds compared: the first 12 of the renderer's frame (`CHANNELS` wide, as 9.1.6).
+const NAMES: [&str; 12] = ["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Tfl", "Tfr", "Tbl", "Tbr"];
 const FRONT_TOP: [usize; 2] = [8, 9];
 const BACK_TOP: [usize; 2] = [10, 11];
 /// 0.25 s windows, as the vectors comparison uses.
@@ -122,11 +123,13 @@ fn render_scene(scene: &Scene, seconds: usize) -> (Planar, Planar) {
         splitter.push(&bed_out[at..], &input, end - start, &mut split_out);
     }
     splitter.finish(&mut split_out);
-    (planar(&exact_out), planar(&split_out))
+    (planar(&exact_out, CHANNELS), planar(&split_out, CHANNELS))
 }
 
-fn planar(interleaved: &[f32]) -> Planar {
-    (0..CHANNELS).map(|c| interleaved.iter().skip(c).step_by(CHANNELS).copied().collect()).collect()
+/// The 7.1.4 feeds of frames `stride` wide: the renderer's and splitter's (`CHANNELS`), or a
+/// 7.1.4 session's (12).
+fn planar(interleaved: &[f32], stride: usize) -> Planar {
+    (0..NAMES.len()).map(|c| interleaved.iter().skip(c).step_by(stride).copied().collect()).collect()
 }
 
 fn energy(x: &[f32]) -> f64 {
@@ -193,7 +196,7 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
     println!("\n#### {name} ({:.1} s)\n", frames as f64 / RATE as f64);
     println!("| speaker | exact % | split % | split − exact dB | correlation |");
     println!("|---|---:|---:|---:|---:|");
-    for c in 0..CHANNELS {
+    for c in 0..NAMES.len() {
         // A feed under −60 dB of the whole in both renders is silence; its ratios are noise.
         if ee[c] < te * 1e-6 && se[c] < ts * 1e-6 {
             println!("| {} | 0.00 | 0.00 | — | — |", NAMES[c]);
@@ -227,7 +230,7 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
             continue;
         }
         level.push(db(sum(&ws, &tops) / sum(&we, &tops)));
-        moved.push(if wts > 0. { 50. * (0..CHANNELS).map(|c| (we[c] / wte - ws[c] / wts).abs()).sum::<f64>() } else { 100. });
+        moved.push(if wts > 0. { 50. * (0..NAMES.len()).map(|c| (we[c] / wte - ws[c] / wts).abs()).sum::<f64>() } else { 100. });
         // Split heights silent: no front share at all, which is as wrong as it gets.
         let front = |v: &[f64]| sum(v, &FRONT_TOP) / sum(v, &tops);
         share_error.push(if sum(&ws, &tops) > 0. { (front(&we) - front(&ws)).abs() } else { 1. });
@@ -236,7 +239,7 @@ fn compare(name: &str, exact: &Planar, split: &Planar) -> Summary {
         height_db: db(sum(&se, &tops) / sum(&ee, &tops)),
         height_db_median: pick(&level, 0.5),
         height_correlation: joint(&tops),
-        total_correlation: joint(&(0..CHANNELS).collect::<Vec<_>>()),
+        total_correlation: joint(&(0..NAMES.len()).collect::<Vec<_>>()),
         front_rear_exact: db(sum(&ee, &FRONT_TOP) / sum(&ee, &BACK_TOP)),
         front_rear_split: db(sum(&se, &FRONT_TOP) / sum(&se, &BACK_TOP)),
         front_share_worst: share_error.iter().copied().fold(f64::NAN, f64::max),
@@ -342,7 +345,7 @@ fn real_streams_against_the_exact_render() {
                     Ok(())
                 })
                 .unwrap();
-            (planar(&pcm), cpu() - start, session.mode())
+            (planar(&pcm, NAMES.len()), cpu() - start, session.mode())
         };
         let (exact, exact_cpu, exact_mode) = run(Session::exact());
         let (split, split_cpu, split_mode) = run(Session::default());

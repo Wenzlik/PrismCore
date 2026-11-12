@@ -1,7 +1,8 @@
 // Copyright 2026 PrismCore contributors.
 // Portions adapted from SpatialAudioBridge (https://github.com/kristofferR/SpatialAudioBridge,
-// Rust/SpatialAudioCore/src/render.rs at 0c63341), Apache License 2.0. Changes: 7.1.4 only, the
-// DTS:X polar panner and 9.1.6 removed, absent bed speakers routed by table instead of by angle.
+// Rust/SpatialAudioCore/src/render.rs at 0c63341), Apache License 2.0. Changes: the DTS:X polar
+// panner and its 9.1.6 removed, the TS 103 448 layouts with heights, absent bed speakers routed by
+// table instead of by angle; PrismCore's own 9.1.6 (`Layout::L916`) placed on the 22.2 grid.
 //
 // Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE in this directory).
 
@@ -13,10 +14,10 @@
 
 use std::{collections::VecDeque, f32::consts::FRAC_1_SQRT_2, f32::consts::FRAC_PI_2};
 
-/// Output channels of the widest layout, in `kAudioChannelLayoutTag_Atmos_7_1_4` order:
-/// L R C LFE Ls Rs Lb Rb Tfl Tfr Tbl Tbr. Every layout renders into a frame this wide, its own
-/// channels first (`Layout::speakers`); the session hands out only those.
-pub const CHANNELS: usize = 12;
+/// Output channels of the widest layout (9.1.6). Every layout renders into a frame this wide, its
+/// own channels first (`Layout::speakers`); the session hands out only those. The split and
+/// `point_gains` stay 7.1.4 (`OUTPUT`, the first 12) and are routed into the layout after.
+pub const CHANNELS: usize = 16;
 pub type Gains = [f32; CHANNELS];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +46,8 @@ pub enum Speaker {
     Cb,
 }
 
-const OUTPUT: [Speaker; CHANNELS] = {
+/// 7.1.4 in `kAudioChannelLayoutTag_Atmos_7_1_4` order: L R C LFE Ls Rs Lb Rb Tfl Tfr Tbl Tbr.
+const OUTPUT: [Speaker; 12] = {
     use Speaker::*;
     [L, R, C, Lfe, Ls, Rs, Lb, Rb, Tfl, Tfr, Tbl, Tbr]
 };
@@ -62,8 +64,8 @@ const ELEVATED: u8 = 32;
 const SURROUND: u8 = 64;
 
 /// The output loudspeaker layouts TS 103 448 table A.1 defines with heights (3/2/2, 3/2/4,
-/// 3/4/2, 3/4/4), each in the channel order of the matching `kAudioChannelLayoutTag_Atmos_*`.
-/// The C API's `TRUEHD_OBJECTS_LAYOUT_*` values.
+/// 3/4/2, 3/4/4), and a 9.1.6 it does not define (`L916`), each in the channel order of the
+/// matching `kAudioChannelLayoutTag_Atmos_*`. The C API's `TRUEHD_OBJECTS_LAYOUT_*` values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Layout {
@@ -76,11 +78,16 @@ pub enum Layout {
     /// 3/4/4: L R C LFE Lss Rss Lb Rb Tfl Tfr Tbl Tbr.
     #[default]
     L714 = 3,
+    /// 9.1.6: L R C LFE Lss Rss Lb Rb Lw Rw Tfl Tfr Ltm Rtm Tbl Tbr. Not in TS 103 448: its
+    /// targets are this crate's choice, every one a 22.2 target of table A.9 (`ROOM_9_1_6`).
+    L916 = 4,
 }
 
 impl Layout {
+    pub const ALL: [Self; 5] = [Self::L512, Self::L514, Self::L712, Self::L714, Self::L916];
+
     pub fn from_raw(value: u32) -> Option<Self> {
-        [Self::L512, Self::L514, Self::L712, Self::L714].into_iter().find(|l| *l as u32 == value)
+        Self::ALL.into_iter().find(|l| *l as u32 == value)
     }
 
     pub fn channels(self) -> usize {
@@ -95,16 +102,19 @@ impl Layout {
             Self::L514 => &[L, R, C, Lfe, Ls, Rs, Tfl, Tfr, Tbl, Tbr],
             Self::L712 => &[L, R, C, Lfe, Ls, Rs, Lb, Rb, Tsl, Tsr],
             Self::L714 => &OUTPUT,
+            Self::L916 => &[L, R, C, Lfe, Ls, Rs, Lb, Rb, Lw, Rw, Tfl, Tfr, Tsl, Tsr, Tbl, Tbr],
         }
     }
 
-    /// Panner target and class of each output channel but the LFE (tables A.5–A.8).
+    /// Panner target and class of each output channel but the LFE (tables A.5–A.8; 9.1.6 from
+    /// A.9).
     fn room(self) -> &'static [(usize, [f32; 3], u8)] {
         match self {
             Self::L512 => &ROOM_3_2_2,
             Self::L514 => &ROOM_3_2_4,
             Self::L712 => &ROOM_3_4_2,
             Self::L714 => &ROOM,
+            Self::L916 => &ROOM_9_1_6,
         }
     }
 }
@@ -157,6 +167,38 @@ const ROOM: [(usize, [f32; 3], u8); 11] = [
     (9, [0.75, 0.25, 1.], ELEVATED),
     (10, [0.25, 0.75, 1.], ELEVATED),
     (11, [0.75, 0.75, 1.], ELEVATED),
+];
+
+/// 9.1.6, which TS 103 448 does not define (table A.1 has no 9.1.6, so there is no A.x table to
+/// follow). Every target is one of the 22.2 targets of table A.9 (`SNAP` below), so what is this
+/// crate's choice is the subset, not a position:
+/// - the 7.1.4 targets (table A.5) unchanged: an object 7.1.4 places on a speaker 9.1.6 also has
+///   lands on that speaker alone;
+/// - the wides where A.9 puts them, on the side walls at y 0.2929 (between the fronts at 0 and
+///   the sides at 0.5) — also where TS 103 420's OAMD bed puts Lw/Rw (`point_weights`);
+/// - the top middles at A.9's [0.25|0.75, 0.5, 1], where the 3/x/2 layouts (tables A.6, A.8)
+///   already put theirs, between the front and rear tops at y 0.25 and 0.75.
+/// A.9's centre column (Tfc, Tc, Tbc), back centre and bottom row are left out; so the panner
+/// keeps every 7.1.4 row and adds one floor row (the wides) and one ceiling row (the middles).
+/// Classes as `SNAP` gives them: the wides WIDE, so zone masks 2 to 5 exclude them. Six mid and
+/// six top speakers are past table 7's largest counts (4), so trims select configuration 8 and
+/// the full default trim range, as on 7.1.4.
+const ROOM_9_1_6: [(usize, [f32; 3], u8); 15] = [
+    (0, [0., 0., 0.], FRONT),
+    (1, [1., 0., 0.], FRONT),
+    (2, [0.5, 0., 0.], CENTRE),
+    (4, [0., 0.5, 0.], SIDE),
+    (5, [1., 0.5, 0.], SIDE),
+    (6, [0., 1., 0.], BACK),
+    (7, [1., 1., 0.], BACK),
+    (8, [0., 0.2929, 0.], WIDE),
+    (9, [1., 0.2929, 0.], WIDE),
+    (10, [0.25, 0.25, 1.], ELEVATED),
+    (11, [0.75, 0.25, 1.], ELEVATED),
+    (12, [0.25, 0.5, 1.], ELEVATED),
+    (13, [0.75, 0.5, 1.], ELEVATED),
+    (14, [0.25, 0.75, 1.], ELEVATED),
+    (15, [0.75, 0.75, 1.], ELEVATED),
 ];
 
 /// Snap locations: the 22.2 panner targets of TS 103 448 table A.9, in the order clause 5.1.4.2
@@ -270,7 +312,8 @@ pub fn bed(speaker: Speaker) -> Gains {
 /// on its side. A 3/2/x surround is itself at −3 dB when the backs are present too (table 6's
 /// g), so a 7.1 bed folds into it at constant power (`backs`: whether the program has Lb/Rb).
 /// The centres table 6 does not list (Tc, Tfc, Lsc, Rsc, Cb) take the same −3 dB pair routes
-/// through the speakers above, in every layout.
+/// through the speakers above, in every layout; Tc goes to the top middles where the layout has
+/// them (9.1.6, and the x.1.2 layouts, where the four tops reach them anyway).
 pub fn bed_in(layout: Layout, speaker: Speaker, backs: bool) -> Gains {
     use Speaker::*;
     let mut gains = [0.; CHANNELS];
@@ -287,6 +330,9 @@ pub fn bed_in(layout: Layout, speaker: Speaker, backs: bool) -> Gains {
         Lsc => [L, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Rsc => [R, C].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Cb => [Lb, Rb].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
+        // On 9.1.6 the four corners would play an overhead centre from around a pair that sits
+        // right beside it.
+        Tc if layout.speakers().contains(&Tsl) => [Tsl, Tsr].iter().for_each(|s| add(*s, FRAC_1_SQRT_2, &mut gains)),
         Tc => [Tfl, Tfr, Tbl, Tbr].iter().for_each(|s| add(*s, 0.5, &mut gains)),
         _ => add(speaker, 1., &mut gains),
     }
@@ -700,7 +746,7 @@ mod tests {
         assert!(close(&routed(l, Tbr, true), &[(9, M)]));
         assert!(close(&routed(l, Tsr, true), &[(9, 1.)]));
         // A 7.1 bed folds into 5.1 at constant power, and nothing lands past the layout.
-        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+        for layout in Layout::ALL {
             for s in [L, R, C, Lfe, Ls, Rs, Lb, Rb, Tfl, Tfr, Tbl, Tbr, Lw, Rw, Tsl, Tsr, Tc, Tfc, Lsc, Rsc, Cb] {
                 let g = routed(layout, s, true);
                 assert!(g[layout.channels()..].iter().all(|x| *x == 0.), "{layout:?} {s:?}");
@@ -710,7 +756,7 @@ mod tests {
 
     #[test]
     fn each_layout_pans_onto_its_own_loudspeakers() {
-        for layout in [Layout::L512, Layout::L514, Layout::L712, Layout::L714] {
+        for layout in Layout::ALL {
             // Every panner target lands on its own channel alone.
             for (channel, position, _) in layout.room() {
                 let g = object_in(layout, &Object::point(*position));
@@ -727,6 +773,95 @@ mod tests {
         // With top middles only, a front-top object plays from the top middle on its side.
         let g = object_in(Layout::L512, &Object::point([0.25, 0.1, 1.]));
         assert!(close(&g, &[(6, 1.)]), "{g:?}");
+    }
+
+    /// The 9.1.6 channel of a speaker.
+    fn in_916(speaker: Speaker) -> usize {
+        Layout::L916.speakers().iter().position(|s| *s == speaker).unwrap()
+    }
+
+    #[test]
+    fn nine_one_six_is_sixteen_channels_in_core_audio_order() {
+        use Speaker::*;
+        assert_eq!(Layout::from_raw(4), Some(Layout::L916));
+        assert_eq!(Layout::from_raw(5), None);
+        assert_eq!(Layout::L916.channels(), CHANNELS);
+        // kAudioChannelLayoutTag_Atmos_9_1_6: L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr.
+        assert_eq!(Layout::L916.speakers(), [L, R, C, Lfe, Ls, Rs, Lb, Rb, Lw, Rw, Tfl, Tfr, Tsl, Tsr, Tbl, Tbr]);
+        // Every output channel but the LFE has one panner target.
+        let mut targets: Vec<usize> = Layout::L916.room().iter().map(|(c, _, _)| *c).collect();
+        targets.sort();
+        assert_eq!(targets, (0..CHANNELS).filter(|c| *c != 3).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn nine_one_six_keeps_every_7_1_4_target_on_its_speaker() {
+        // What 7.1.4 places on one speaker, 9.1.6 places on the same speaker alone: the layout
+        // only adds rows (the wides, the top middles), it moves none.
+        for (channel, position, _) in ROOM {
+            let g = object_in(Layout::L916, &Object::point(position));
+            assert!(close(&g, &[(in_916(OUTPUT[channel]), 1.)]), "{:?} at {position:?}: {g:?}", OUTPUT[channel]);
+        }
+    }
+
+    #[test]
+    fn nine_one_six_pans_through_the_wides_and_the_top_middles() {
+        use Speaker::*;
+        let at = |position| object_in(Layout::L916, &Object::point(position));
+        let w = 0.2929;
+        assert!(close(&at([0., w, 0.]), &[(in_916(Lw), 1.)]));
+        assert!(close(&at([1., w, 0.]), &[(in_916(Rw), 1.)]));
+        // Halfway from L to Lw, and from Lw to Ls: each pair at −3 dB.
+        assert!(close(&at([0., w / 2., 0.]), &[(in_916(L), M), (in_916(Lw), M)]));
+        assert!(close(&at([0., (w + 0.5) / 2., 0.]), &[(in_916(Lw), M), (in_916(Ls), M)]));
+        assert!(close(&at([0.25, 0.5, 1.]), &[(in_916(Tsl), 1.)]));
+        assert!(close(&at([0.75, 0.5, 1.]), &[(in_916(Tsr), 1.)]));
+        assert!(close(&at([0.25, 0.375, 1.]), &[(in_916(Tfl), M), (in_916(Tsl), M)]));
+        // The overhead centre is the top-middle pair (7.1.4 spreads it over its four tops).
+        assert!(close(&at([0.5, 0.5, 1.]), &[(in_916(Tsl), M), (in_916(Tsr), M)]));
+        // Unit power everywhere, never the LFE, nothing negative.
+        for x in 0..=10 {
+            for y in 0..=10 {
+                for z in -2..=10 {
+                    let g = at([x as f32 / 10., y as f32 / 10., z as f32 / 10.]);
+                    assert!((power(&g) - 1.).abs() < 1e-5, "{x} {y} {z}: {g:?}");
+                    assert!(g.iter().all(|g| g.is_finite() && *g >= 0.));
+                    assert_eq!(g[3], 0.);
+                }
+            }
+        }
+        // Size and divergence keep unit power over the 16 channels too.
+        for (size, divergence) in [([0.3; 3], 0.), ([0.8; 3], 0.), ([0.; 3], 0.6)] {
+            let g = object_in(Layout::L916, &Object { size, divergence, ..Object::point([0.2, 0.4, 0.6]) });
+            assert!((power(&g) - 1.).abs() < 1e-4, "{size:?} {divergence}: {g:?}");
+            assert_eq!(g[3], 0.);
+        }
+    }
+
+    #[test]
+    fn nine_one_six_zones_trims_and_bed_routing() {
+        use Speaker::*;
+        // Screen only (zone 4) excludes the wides with the sides: a wide object plays from L.
+        let wide = Object { zone: 4, ..Object::point([0., 0.2929, 0.]) };
+        assert!(close(&object_in(Layout::L916, &wide), &[(in_916(L), 1.)]));
+        // "No side" (zone 2) excludes them too: nothing lands on a wide or a side.
+        let g = object_in(Layout::L916, &Object { zone: 2, ..Object::point([0., 0.4, 0.]) });
+        assert!([Lw, Rw, Ls, Rs].iter().all(|s| g[in_916(*s)] == 0.), "{g:?}");
+        // Six mid and six top speakers: table 7's configuration 8, as on 7.1.4.
+        let rear = Object::point([0.5, 1., 0.5]);
+        assert_eq!(trim_layout_in(Layout::L916, &rear), TrimLayout { mid: 6, top: 6 });
+        assert_eq!(trim_layout_in(Layout::L916, &rear).index(), 8);
+        // Bed channels: every one it has plays straight through, the centres on their pairs.
+        for s in [L, R, C, Lfe, Ls, Rs, Lb, Rb, Lw, Rw, Tfl, Tfr, Tsl, Tsr, Tbl, Tbr] {
+            assert!(close(&bed_in(Layout::L916, s, true), &[(in_916(s), 1.)]), "{s:?}");
+        }
+        assert!(close(&bed_in(Layout::L916, Tc, true), &[(in_916(Tsl), M), (in_916(Tsr), M)]));
+        assert!(close(&bed_in(Layout::L916, Tfc, true), &[(in_916(Tfl), M), (in_916(Tfr), M)]));
+        assert!(close(&bed_in(Layout::L916, Cb, true), &[(in_916(Lb), M), (in_916(Rb), M)]));
+        // Tc through the top middles changes nothing for the x.1.2 layouts, nor for 7.1.4.
+        assert!(close(&bed_in(Layout::L712, Tc, true), &[(8, M), (9, M)]));
+        assert!(close(&bed_in(Layout::L512, Tc, true), &[(6, M), (7, M)]));
+        assert!(close(&bed(Tc), &[(8, 0.5), (9, 0.5), (10, 0.5), (11, 0.5)]));
     }
 
     #[test]
