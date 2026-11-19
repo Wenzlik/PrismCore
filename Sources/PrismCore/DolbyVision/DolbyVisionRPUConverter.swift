@@ -70,6 +70,14 @@ final class DolbyVisionRPUConverter {
     private(set) var failedRPUs = 0
     private(set) var droppedEnhancementLayerNALs = 0
 
+    /// RPUs whose ORIGINAL (pre-conversion) header named the enhancement layer
+    /// FEL or MEL. Diagnostic only — nothing branches on them: the EL is
+    /// dropped and the RPU rewritten to 8.1 either way. They exist because the
+    /// `dvvC` record cannot say which kind of P7 a source is (see
+    /// `DolbyVisionConversionStats.enhancementLayerType`).
+    private(set) var felRPUs = 0
+    private(set) var melRPUs = 0
+
     /// Packets this converter DECIDED to rewrite and then could not: the walk
     /// found an RPU or an enhancement layer, but `HEVCNALUnits.rewrite` refused
     /// — the packet did not frame, or the output buffer could not be allocated.
@@ -92,6 +100,8 @@ final class DolbyVisionRPUConverter {
     private var pendingConverted = 0
     private var pendingFailed = 0
     private var pendingDropped = 0
+    private var pendingFEL = 0
+    private var pendingMEL = 0
 
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
@@ -143,6 +153,8 @@ final class DolbyVisionRPUConverter {
         pendingConverted = 0
         pendingFailed = 0
         pendingDropped = 0
+        pendingFEL = 0
+        pendingMEL = 0
     }
 
     /// `rewrote == false` means one of two things, and only one of them is
@@ -165,6 +177,8 @@ final class DolbyVisionRPUConverter {
         convertedRPUs += pendingConverted
         failedRPUs += pendingFailed
         droppedEnhancementLayerNALs += pendingDropped
+        felRPUs += pendingFEL
+        melRPUs += pendingMEL
         resetPending()
     }
 
@@ -195,7 +209,16 @@ final class DolbyVisionRPUConverter {
             return .drop
         }
         guard unit.type == 62 else { return .keep }
-        guard let converted = Self.convertRPU(Array(unit.bytes)) else {
+        let (converted, elType) = Self.convertRPU(Array(unit.bytes))
+        // Tallied whether or not the conversion then succeeds: the header
+        // describes the SOURCE, and a refused RPU says as much about which
+        // kind of P7 this is as a converted one.
+        switch elType {
+        case .fel: pendingFEL += 1
+        case .mel: pendingMEL += 1
+        case nil: break
+        }
+        guard let converted else {
             pendingFailed += 1
             // Drop it. The old code kept the unconverted RPU, on the reasoning
             // that the 8.1 claim is only made when conversion succeeded — which
@@ -227,25 +250,66 @@ final class DolbyVisionRPUConverter {
         type == nalTypeEnhancementLayer || layerID != 0
     }
 
-    /// One RPU NAL (including its two-byte HEVC header) through libdovi.
-    private static func convertRPU(_ nal: [UInt8]) -> [UInt8]? {
+    /// libdovi's `el_type` string → our enum. Exact, case-sensitive match on
+    /// the two values libdovi writes; anything else (including `nil`, which is
+    /// what libdovi reports for a non-P7 RPU) is "unknown" rather than a guess.
+    ///
+    /// Pure and free of libdovi so the mapping is testable in a build without it.
+    static func classify(elType: String?) -> DolbyVisionEnhancementLayerType? {
+        switch elType {
+        case "FEL": return .fel
+        case "MEL": return .mel
+        default: return nil
+        }
+    }
+
+    /// One RPU NAL (including its two-byte HEVC header) through libdovi: the
+    /// 8.1 rewrite, or `nil` if libdovi refused it, plus the enhancement-layer
+    /// type the ORIGINAL RPU declared.
+    private static func convertRPU(
+        _ nal: [UInt8]
+    ) -> (converted: [UInt8]?, elType: DolbyVisionEnhancementLayerType?) {
         #if canImport(Libdovi)
-        return nal.withUnsafeBufferPointer { buffer -> [UInt8]? in
+        return nal.withUnsafeBufferPointer { buffer -> (converted: [UInt8]?, elType: DolbyVisionEnhancementLayerType?) in
             guard let base = buffer.baseAddress,
                   let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
-            else { return nil }
+            else { return (nil, nil) }
             defer { dovi_rpu_free(rpu) }
 
-            guard dovi_convert_rpu_with_mode(rpu, convertToProfile81) == 0 else { return nil }
-            guard let written = dovi_write_unspec62_nalu(rpu) else { return nil }
+            // Read BEFORE converting: mode 2 rewrites the RPU into single-layer
+            // 8.1 form, after which the header no longer reports an EL type at
+            // all — reading it afterwards would label every P7 "unknown". The
+            // header is its own allocation, freed separately from the RPU.
+            var elType: DolbyVisionEnhancementLayerType?
+            if let header = dovi_rpu_get_header(rpu) {
+                elType = classify(elType: header.pointee.el_type.map { String(cString: $0) })
+                dovi_rpu_free_header(header)
+            }
+
+            guard dovi_convert_rpu_with_mode(rpu, convertToProfile81) == 0 else { return (nil, elType) }
+            guard let written = dovi_write_unspec62_nalu(rpu) else { return (nil, elType) }
             defer { dovi_data_free(written) }
-            guard let data = written.pointee.data, written.pointee.len > 0 else { return nil }
-            return Array(UnsafeBufferPointer(start: data, count: Int(written.pointee.len)))
+            guard let data = written.pointee.data, written.pointee.len > 0 else { return (nil, elType) }
+            return (Array(UnsafeBufferPointer(start: data, count: Int(written.pointee.len))), elType)
         }
         #else
-        return nil
+        return (nil, nil)
         #endif
     }
+}
+
+/// Which kind of enhancement layer a Profile 7 source carried, as its RPUs
+/// declare it.
+///
+/// FEL (full enhancement layer) carries a real residual that a dual-layer
+/// decoder adds to the base; MEL (minimal) carries next to nothing. Playback
+/// does not distinguish them — both are converted to 8.1 and the EL dropped —
+/// so this is diagnostics only: it tells a viewer looking at stats what was
+/// given up.
+public enum DolbyVisionEnhancementLayerType: String, Sendable, Equatable {
+    case fel = "FEL"
+    case mel = "MEL"
+}
 }
 
 /// What a Profile 7 → 8.1 conversion did over the course of a session.
@@ -274,19 +338,52 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// include that work: they are committed only once a rewrite has landed.
     /// Anything here is the black-screen mismatch on a rarer path.
     public let staleUnconvertedPackets: Int
+    /// RPUs whose original header declared a FEL / MEL enhancement layer.
+    /// Counted from the RPU itself because nothing earlier can tell: the
+    /// `dvvC` record says only "profile 7, EL present", and the probe never
+    /// parses an RPU. So, like every other figure here, these are available
+    /// from the first produced segment onwards, not at probe time.
+    public let felRPUs: Int
+    public let melRPUs: Int
 
-    /// `staleUnconvertedPackets` defaults so that 2.0.x stays source
-    /// compatible for anyone constructing this.
+    /// `staleUnconvertedPackets`, `felRPUs` and `melRPUs` default so that
+    /// existing callers stay source compatible.
     public init(
         convertedRPUs: Int,
         failedRPUs: Int,
         droppedEnhancementLayerNALs: Int,
-        staleUnconvertedPackets: Int = 0
+        staleUnconvertedPackets: Int = 0,
+        felRPUs: Int = 0,
+        melRPUs: Int = 0
     ) {
         self.convertedRPUs = convertedRPUs
         self.failedRPUs = failedRPUs
         self.droppedEnhancementLayerNALs = droppedEnhancementLayerNALs
         self.staleUnconvertedPackets = staleUnconvertedPackets
+        self.felRPUs = felRPUs
+        self.melRPUs = melRPUs
+    }
+
+    /// The enhancement layer the source carried, or `nil` when no RPU said.
+    ///
+    /// FEL wins over MEL: a single FEL RPU means the layer carried a real
+    /// residual somewhere, which is the more informative answer for what the
+    /// 8.1 conversion threw away.
+    public var enhancementLayerType: DolbyVisionEnhancementLayerType? {
+        if felRPUs > 0 { return .fel }
+        if melRPUs > 0 { return .mel }
+        return nil
+    }
+
+    /// One-line label for a stats overlay: `"P7 FEL → 8.1"`, `"P7 MEL → 8.1"`,
+    /// or `"Profile 7 → 8.1"` while the type is unknown. Diagnostics only —
+    /// it says nothing about whether the conversion was clean (`isClean`).
+    public var statsLabel: String {
+        switch enhancementLayerType {
+        case .fel: return "P7 FEL → 8.1"
+        case .mel: return "P7 MEL → 8.1"
+        case nil: return "Profile 7 → 8.1"
+        }
     }
 
     /// Every RPU converted, none refused, and the enhancement layer actually

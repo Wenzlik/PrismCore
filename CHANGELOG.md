@@ -8,6 +8,17 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- `DolbyVisionConversionStats.statsLabel` — `"P7 FEL → 8.1"`, `"P7 MEL → 8.1"`,
+  or `"Profile 7 → 8.1"` when unknown — backed by new `felRPUs` / `melRPUs`
+  counters and `enhancementLayerType` (`DolbyVisionEnhancementLayerType`).
+  The converter reads libdovi's `el_type` from each RPU *before* rewriting it
+  (the 8.1 form no longer carries it); `dvvC` cannot tell FEL from MEL, so the
+  label appears with the first produced segment, like the other stats.
+  Diagnostics only: playback is unchanged — P7 still converts to 8.1 with the
+  enhancement layer dropped, and `isClean` ignores the label.
+
 ## [4.0.5] — 2026-11-12
 
 Source-compatible: an opt-in upscaler for the host's own `AVPlayer`
