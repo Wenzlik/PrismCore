@@ -80,4 +80,89 @@ struct DolbyVisionEnhancementLayerLabelTests {
         )
         #expect(!dirty.isClean)
     }
+
+    // MARK: - Capture and commit, through the converter
+
+    // A synthetic P7 access unit: RPU (unspec62), EL (unspec63), one VCL
+    // slice (TRAIL_R). The RPU body is junk on purpose — the injected
+    // processor stands in for libdovi, which is what lets these run without
+    // a real P7 fixture.
+    private let rpu: [UInt8] = [62 << 1, 0x01, 0xAA, 0xBB]
+    private let el: [UInt8] = [63 << 1, 0x01, 0xCC]
+    private let slice: [UInt8] = [1 << 1, 0x01, 0xDD]
+    private let rewrittenRPU: [UInt8] = [62 << 1, 0x01, 0x81]
+
+    private func lengthPrefixed(_ units: [[UInt8]]) -> [UInt8] {
+        units.flatMap { unit in
+            [0, 0, UInt8(unit.count >> 8), UInt8(unit.count & 0xFF)] + unit
+        }
+    }
+
+    private var packet: [UInt8] { lengthPrefixed([rpu, el, slice]) }
+
+    private func converter(
+        converted: [UInt8]?, elType: String?
+    ) throws -> DolbyVisionRPUConverter {
+        try #require(DolbyVisionRPUConverter(lengthSize: 4) { _ in (converted, elType) })
+    }
+
+    @Test("a FEL header is tallied once the packet's rewrite lands")
+    func felCommittedWithRewrite() throws {
+        let c = try converter(converted: rewrittenRPU, elType: "FEL")
+        let out = c.convert(packet: packet)
+        #expect(out == lengthPrefixed([rewrittenRPU, slice]))
+        #expect(c.felRPUs == 1)
+        #expect(c.melRPUs == 0)
+        #expect(c.convertedRPUs == 1)
+    }
+
+    @Test("a MEL header is tallied as MEL")
+    func melCommittedWithRewrite() throws {
+        let c = try converter(converted: rewrittenRPU, elType: "MEL")
+        _ = c.convert(packet: packet)
+        #expect(c.felRPUs == 0)
+        #expect(c.melRPUs == 1)
+    }
+
+    @Test("no el_type means neither counter moves")
+    func unknownElTypeCountsNothing() throws {
+        let c = try converter(converted: rewrittenRPU, elType: nil)
+        _ = c.convert(packet: packet)
+        #expect(c.convertedRPUs == 1)
+        #expect(c.felRPUs == 0)
+        #expect(c.melRPUs == 0)
+    }
+
+    @Test("a refused allocation commits no FEL; the next landed packet commits only its own")
+    func refusedAllocationDoesNotCommitFEL() throws {
+        let c = try converter(converted: rewrittenRPU, elType: "FEL")
+        let rewrote = packet.withUnsafeBufferPointer { buffer in
+            c.convert(packet: buffer, into: { _ in nil })
+        }
+        #expect(!rewrote)
+        #expect(c.staleUnconvertedPackets == 1)
+        #expect(c.felRPUs == 0)
+        #expect(c.convertedRPUs == 0)
+
+        // The refused packet's pending FEL must not leak into this one.
+        #expect(c.convert(packet: packet) != nil)
+        #expect(c.felRPUs == 1)
+        #expect(c.convertedRPUs == 1)
+        #expect(c.staleUnconvertedPackets == 1)
+    }
+
+    @Test("an RPU libdovi refuses still counts FEL — it is dropped, and the packet rewrite lands")
+    func refusedRPUStillLabelsSource() throws {
+        // Documented in `dispose`: the header describes the SOURCE, so a
+        // refused RPU says which kind of P7 this is as well as a converted
+        // one. "Committed only on a landed rewrite" is about the PACKET
+        // rewrite, which here still happens (the RPU and EL are dropped).
+        let c = try converter(converted: nil, elType: "FEL")
+        let out = c.convert(packet: packet)
+        #expect(out == lengthPrefixed([slice]))
+        #expect(c.failedRPUs == 1)
+        #expect(c.convertedRPUs == 0)
+        #expect(c.felRPUs == 1)
+        #expect(c.melRPUs == 0)
+    }
 }

@@ -106,9 +106,29 @@ final class DolbyVisionRPUConverter {
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
     ///   width the packet can't be walked at all.
-    init?(lengthSize: Int?) {
-        guard Self.isAvailable, let lengthSize else { return nil }
+    convenience init?(lengthSize: Int?) {
+        guard DolbyVisionRPUConverter.isAvailable else { return nil }
+        self.init(lengthSize: lengthSize, rpuProcessor: DolbyVisionRPUConverter.convertRPU)
+    }
+
+    /// One RPU NAL in, its 8.1 rewrite (or `nil` if refused) and the ORIGINAL
+    /// header's raw `el_type` out. Production is always `convertRPU`.
+    typealias RPUProcessor = ([UInt8]) -> (converted: [UInt8]?, elType: String?)
+
+    /// The libdovi call, swappable. Internal test seam only: there is no P7
+    /// RPU fixture and libdovi cannot author one, so without this nothing
+    /// proves the FEL/MEL tallies are captured per RPU and committed only
+    /// with a landed rewrite — moving the header read after the conversion,
+    /// or forgetting `pendingFEL` in `commitPending`, would pass every
+    /// pure test.
+    private let rpuProcessor: RPUProcessor
+
+    /// Deliberately NOT gated on `isAvailable`: the injected processor stands
+    /// in for libdovi, so the bookkeeping is testable in a build without it.
+    init?(lengthSize: Int?, rpuProcessor: @escaping RPUProcessor) {
+        guard let lengthSize else { return nil }
         self.lengthSize = lengthSize
+        self.rpuProcessor = rpuProcessor
     }
 
     /// Converted packet payload, or `nil` when this packet needed no change (the
@@ -209,11 +229,11 @@ final class DolbyVisionRPUConverter {
             return .drop
         }
         guard unit.type == 62 else { return .keep }
-        let (converted, elType) = Self.convertRPU(Array(unit.bytes))
+        let (converted, rawELType) = rpuProcessor(Array(unit.bytes))
         // Tallied whether or not the conversion then succeeds: the header
         // describes the SOURCE, and a refused RPU says as much about which
         // kind of P7 this is as a converted one.
-        switch elType {
+        switch Self.classify(elType: rawELType) {
         case .fel: pendingFEL += 1
         case .mel: pendingMEL += 1
         case nil: break
@@ -264,13 +284,13 @@ final class DolbyVisionRPUConverter {
     }
 
     /// One RPU NAL (including its two-byte HEVC header) through libdovi: the
-    /// 8.1 rewrite, or `nil` if libdovi refused it, plus the enhancement-layer
-    /// type the ORIGINAL RPU declared.
+    /// 8.1 rewrite, or `nil` if libdovi refused it, plus the raw `el_type` the
+    /// ORIGINAL RPU declared (`classify` maps it, in `dispose`).
     private static func convertRPU(
         _ nal: [UInt8]
-    ) -> (converted: [UInt8]?, elType: DolbyVisionEnhancementLayerType?) {
+    ) -> (converted: [UInt8]?, elType: String?) {
         #if canImport(Libdovi)
-        return nal.withUnsafeBufferPointer { buffer -> (converted: [UInt8]?, elType: DolbyVisionEnhancementLayerType?) in
+        return nal.withUnsafeBufferPointer { buffer -> (converted: [UInt8]?, elType: String?) in
             guard let base = buffer.baseAddress,
                   let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
             else { return (nil, nil) }
@@ -280,9 +300,9 @@ final class DolbyVisionRPUConverter {
             // 8.1 form, after which the header no longer reports an EL type at
             // all — reading it afterwards would label every P7 "unknown". The
             // header is its own allocation, freed separately from the RPU.
-            var elType: DolbyVisionEnhancementLayerType?
+            var elType: String?
             if let header = dovi_rpu_get_header(rpu) {
-                elType = classify(elType: header.pointee.el_type.map { String(cString: $0) })
+                elType = header.pointee.el_type.map { String(cString: $0) }
                 dovi_rpu_free_header(header)
             }
 
