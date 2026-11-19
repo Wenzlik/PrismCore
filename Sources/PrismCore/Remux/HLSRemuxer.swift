@@ -709,7 +709,9 @@ final class HLSRemuxer: @unchecked Sendable {
             convertedRPUs: converter.convertedRPUs,
             failedRPUs: converter.failedRPUs,
             droppedEnhancementLayerNALs: converter.droppedEnhancementLayerNALs,
-            staleUnconvertedPackets: converter.staleUnconvertedPackets
+            staleUnconvertedPackets: converter.staleUnconvertedPackets,
+            felRPUs: converter.felRPUs,
+            melRPUs: converter.melRPUs
         )
         conversionStatsLock.withLock { storedConversionStats = stats }
     }

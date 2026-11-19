@@ -503,7 +503,10 @@ public actor PrismCoreSession {
     /// be read as soon as playback starts.
     ///
     /// Worth logging rather than ignoring: `isClean` false means the master's
-    /// `dvh1.08.xx/db1p` claim doesn't describe every frame.
+    /// `dvh1.08.xx/db1p` claim doesn't describe every frame. `statsLabel`
+    /// ("P7 FEL → 8.1" / "P7 MEL → 8.1") is the overlay text; the FEL/MEL
+    /// distinction comes from the RPUs, so it too exists only once a segment
+    /// has been produced.
     /// Total compressed bytes the remux has read from the SOURCE — the number
     /// behind an honest "network" figure for a session played off this
     /// engine's loopback server, where AVFoundation's own access log can only
