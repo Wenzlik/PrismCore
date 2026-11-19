@@ -8,6 +8,11 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.6] — 2026-11-19
+
+Source-compatible: a diagnostics label for Profile 7 sources. Playback is
+unchanged.
+
 ### Added
 
 - `DolbyVisionConversionStats.statsLabel` — `"P7 FEL → 8.1"`, `"P7 MEL → 8.1"`,
