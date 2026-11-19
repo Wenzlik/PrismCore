@@ -310,7 +310,6 @@ public enum DolbyVisionEnhancementLayerType: String, Sendable, Equatable {
     case fel = "FEL"
     case mel = "MEL"
 }
-}
 
 /// What a Profile 7 → 8.1 conversion did over the course of a session.
 ///
