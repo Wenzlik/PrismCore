@@ -119,6 +119,12 @@ struct ASSCompositor {
         return (t + (t >> 8)) >> 8
     }
 
+    /// Measured on an M-series Mac, one animated two-line 1080p frame:
+    /// 0.40 ms median / 0.46 ms p95 optimized, ~107 ms in a `-Onone` build.
+    // ponytail: plain Swift per-pixel loop — fine in Release, ~100 ms per
+    // recomposited frame in a host's Debug build (`@_optimize(speed)` did not
+    // help). If dev builds matter, move this loop to vImage
+    // (premultiply + vImagePremultipliedAlphaBlend) or a small C target.
     static func blend(_ layer: Layer, into base: UnsafeMutablePointer<UInt8>, bytesPerRow: Int, origin: Rect) {
         let red = layer.color >> 24, green = (layer.color >> 16) & 0xFF, blue = (layer.color >> 8) & 0xFF
         let opacity = 255 - (layer.color & 0xFF)
