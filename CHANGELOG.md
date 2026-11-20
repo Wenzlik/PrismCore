@@ -28,6 +28,11 @@ source-compatible.)
   With the flag off the conversion is byte-for-byte unchanged.
 - `DolbyVisionConversionStats.alignedRPUs` / `alignSkippedRPUs` — what the
   alignment did; diagnostics only, outside `isClean` and `statsLabel`.
+- Fuzz target `dovi-rpu-peak-align` (with a synthetic, CRC-valid seed) for
+  the new RPU bit patcher: output is either refused or differs from the input
+  only in the permitted fields and the CRC, only ever lowers, re-reads as the
+  intended values, and escapes round-trip. Mutations run CRC-repaired too, so
+  they reach the walk behind the CRC proof.
 
 ## [4.0.6] — 2026-11-19
 
