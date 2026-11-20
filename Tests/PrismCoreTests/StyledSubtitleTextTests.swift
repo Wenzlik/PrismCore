@@ -100,6 +100,79 @@ struct StyledSubtitleTextTests {
         #expect(styled("   ") == nil)
     }
 
+    /// Lines built to hit the old quadratic paths — every unclosed `{` and
+    /// stray `<` searched the rest of the line, and leading padding was
+    /// trimmed one `removeFirst()` at a time. 40 000 characters each: the
+    /// quadratic shapes took tens of seconds here, linear takes well under
+    /// one even unoptimized.
+    @Test func hostileLinesParseInLinearTime() {
+        let length = 40_000
+        let hostile = [
+            String(repeating: "{", count: length) + "x",
+            String(repeating: "<", count: length) + "x>",
+            String(repeating: "<a ", count: length / 3) + ">",
+            String(repeating: " ", count: length) + "x",
+            String(repeating: "{\\i1}", count: length / 5) + "y",
+        ]
+        let clock = ContinuousClock()
+        for line in hostile {
+            let started = clock.now
+            let parsed = StyledTextParser.parse(line)
+            #expect(clock.now - started < .seconds(3), "\(line.prefix(8))… took \(clock.now - started)")
+            #expect(!parsed.plainText.isEmpty)
+        }
+        #expect(StyledTextParser.parse(String(repeating: " ", count: length) + "x").plainText == "x")
+    }
+
+    /// P2.6: two events of one track at one time with the same word but
+    /// different styling both reach the host; the same event re-demuxed
+    /// (identical styling) is still deduplicated.
+    @Test func sameTextDifferentStyleIsNotDeduplicated() {
+        let set = SubtitleRenditionSet(outputDirectory: FileManager.default.temporaryDirectory)
+        let received = StyledCueBox<[TimedTextCue]>([])
+        set.setCueHandler { cue in received.withLock { $0.append(cue) } }
+        set.setTimelineOrigin(seconds: 0)
+        func exit(_ alignment: Int, x: Double) -> SubtitleCue {
+            let placement = TextCuePlacement(alignment: alignment, anchor: .init(x: x, y: 0.4))
+            return SubtitleCue(start: 10, end: 12, text: "EXIT", placement: placement,
+                               styled: StyledSubtitleText(runs: [StyledTextRun(text: "EXIT")], placement: placement))
+        }
+        set.emitHostCue(streamIndex: 2, exit(5, x: 0.2))
+        set.emitHostCue(streamIndex: 2, exit(5, x: 0.8))
+        set.emitHostCue(streamIndex: 2, exit(5, x: 0.2))   // re-demuxed after a seek
+        set.emitHostCue(streamIndex: 2, SubtitleCue(start: 20, end: 21, text: "plain"))
+        set.emitHostCue(streamIndex: 2, SubtitleCue(start: 20, end: 21, text: "plain"))
+        let cues = received.withLock { $0 }
+        #expect(cues.map(\.text) == ["EXIT", "EXIT", "plain"])
+        #expect(cues.compactMap(\.placement?.anchor?.x) == [0.2, 0.8])
+    }
+
+    /// P2.7: an external `.ass` drawing never reaches the WebVTT rendition
+    /// (PiP / AirPlay) as text; dialogue after it does.
+    @Test func externalASSDrawingsStayOutOfWebVTT() {
+        let script = """
+        [Events]
+        Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\p1}m 0 0 l 10 0 l 10 10{\\p0}
+        Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\\p1}m 0 0 l 10 0{\\p0}{\\i1}Hello
+        Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\\an8}Sign {\\p2}m 1 1{\\p0}after
+        """
+        let cues = TextSubtitleConverter.cues(fromASS: script)
+        #expect(cues.map(\.text) == ["<i>Hello</i>", "Sign after"])
+        #expect(cues.map(\.start) == [3, 5])
+        #expect(TextSubtitleConverter.strippingDrawings("a {\\p1}m 0 0 {unclosed") == "a {\\p1}")
+        #expect(TextSubtitleConverter.strippingDrawings("{\\pos(1,2)}keep") == "{\\pos(1,2)}keep")
+    }
+
+    /// P2.8: the 4.0.6 initializer still exists as its own symbol, so a
+    /// function reference to it compiles.
+    @Test func originalTimedTextCueInitializerStillResolves() {
+        let make: (Int32, Double, Double, String, TextCuePlacement?) -> TimedTextCue =
+            TimedTextCue.init(streamIndex:start:end:text:placement:)
+        let cue = make(1, 0, 1, "x", nil)
+        #expect(cue.styled == nil && cue.text == "x")
+        #expect(TimedTextCue(streamIndex: 1, start: 0, end: 1, text: "x") == cue)
+    }
+
     @Test func tx3gStyleBoxAppliesPerRange() throws {
         // "Hello world", bold+red on 0..<5, then an unknown box that must be skipped.
         var sample: [UInt8] = [0, 11] + Array("Hello world".utf8)
@@ -174,4 +247,13 @@ struct StyledSubtitleTextTests {
         let cues = try #require(SubtitleRenditionSet.loadExternalCues(url))
         #expect(cues.map(\.text) == ["<i>ahoj</i>"])
     }
+}
+
+/// Cross-thread box for the cue handler.
+// Safety: `value` is only touched under `lock`.
+private final class StyledCueBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+    init(_ value: Value) { self.value = value }
+    func withLock<T>(_ body: (inout Value) -> T) -> T { lock.withLock { body(&value) } }
 }

@@ -42,9 +42,20 @@ public struct TimedTextCue: Sendable, Equatable {
     /// `styled.withoutSourceColors()` is the "ignore source colours" view.
     public let styled: StyledSubtitleText?
 
+    /// The 4.0.6 initializer, kept as its own overload: a default sixth
+    /// argument would still compile direct calls, but a reference to
+    /// `TimedTextCue.init(streamIndex:start:end:text:placement:)` names this
+    /// exact signature and would stop resolving.
     public init(
         streamIndex: Int32, start: Double, end: Double, text: String,
-        placement: TextCuePlacement? = nil, styled: StyledSubtitleText? = nil
+        placement: TextCuePlacement? = nil
+    ) {
+        self.init(streamIndex: streamIndex, start: start, end: end, text: text, placement: placement, styled: nil)
+    }
+
+    public init(
+        streamIndex: Int32, start: Double, end: Double, text: String,
+        placement: TextCuePlacement?, styled: StyledSubtitleText?
     ) {
         self.streamIndex = streamIndex
         self.start = start

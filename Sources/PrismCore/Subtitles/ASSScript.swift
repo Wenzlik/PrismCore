@@ -176,6 +176,32 @@ extension TextSubtitleConverter {
         return StyledTextParser.styled(chars: chars, styles: styles, placement: nil)
     }
 
+    /// An event's text with drawing-mode stretches (`{\p1}…{\p0}`) removed;
+    /// override blocks themselves stay, so emphasis still translates. A
+    /// block that does not close is text, as everywhere else. One pass.
+    static func strippingDrawings(_ text: String) -> String {
+        guard text.contains("\\p") else { return text }
+        var output = ""
+        var drawing = false
+        var rest = text[...]
+        while let open = rest.firstIndex(of: "{") {
+            if !drawing { output += rest[..<open] }
+            guard let close = rest[open...].firstIndex(of: "}") else {
+                if !drawing { output += rest[open...] }
+                return output
+            }
+            let block = rest[open...close]
+            for tag in block.dropFirst().dropLast().split(separator: "\\") {
+                let trimmed = tag.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("p"), let level = Int(trimmed.dropFirst()) { drawing = level > 0 }
+            }
+            output += block
+            rest = rest[rest.index(after: close)...]
+        }
+        if !drawing { output += rest }
+        return output
+    }
+
     /// Cues from a whole `.ass` / `.ssa` file: every `Dialogue:` line of
     /// `[Events]` (a `Comment:` is not shown), read through the script's
     /// own `Format:` line and styles.
@@ -208,7 +234,10 @@ extension TextSubtitleConverter {
             guard let start = named["start"].flatMap({ parseTimestamp($0.trimmingCharacters(in: .whitespaces)) }),
                   let end = named["end"].flatMap({ parseTimestamp($0.trimmingCharacters(in: .whitespaces)) }),
                   end > start, let body = named["text"] else { continue }
-            let converted = sanitizeStyled(body, playResolution: header.playResolution)
+            // Drawings out before the WebVTT payload: this rendition is what
+            // PiP and AirPlay show, and the old sanitizer drops `\p1` but
+            // keeps the vector commands it switched on ("m 0 0 l 10 0").
+            let converted = sanitizeStyled(strippingDrawings(body), playResolution: header.playResolution)
             guard !converted.text.isEmpty else { continue }
             cues.append(SubtitleCue(
                 start: start, end: end, text: converted.text,
