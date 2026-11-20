@@ -264,7 +264,11 @@ public struct TextCuePlacement: Sendable, Equatable {
 // Codable so a host can persist or ship `StyledSubtitleText` (a cache of
 // parsed sidecars, a cue handed across a process boundary). In this file
 // because synthesized conformances must live beside the type.
-extension TextCuePlacement.Anchor: Codable {}
+extension TextCuePlacement.Anchor: Codable, Hashable {}
+
+/// Hashable so a styled cue can be fingerprinted (the remux history's dedup
+/// key tells two same-text events apart by style and position).
+extension TextCuePlacement: Hashable {}
 
 extension TextCuePlacement: Codable {
     private enum CodingKeys: String, CodingKey { case alignment, anchor }

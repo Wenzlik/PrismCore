@@ -537,6 +537,10 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         lock.withLock { assRendering = mode }
     }
 
+    /// Whether re-anchors should read subtitle packets ahead of the anchor:
+    /// only when libass renderers exist (read after `prepare`).
+    var prerollsSubtitlePackets: Bool { lock.withLock { assTracks != nil } }
+
     /// The libass renderer of one ASS/SSA stream — `nil` before `prepare`,
     /// for any other stream, or when the host never asked for `.libass`.
     func assRenderer(streamIndex: Int) -> ASSSubtitleRenderer? {
@@ -826,8 +830,20 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// The dedup identity of a produced cue: its source, not its rebased,
     /// times — so it is known before the origin is, and the pre-origin queue
     /// can be charged the same bytes the history will be.
+    ///
+    /// Styling is part of the identity: two ASS events of one track at one
+    /// time with the same word ("EXIT" over two doors) differ only in style
+    /// and position, and keyed on text alone the second never reached the
+    /// host. A re-demux of the same event styles it identically, so the
+    /// fingerprint still dedups it. Unstyled cues keep the plain key.
     private static func historyKey(streamIndex: Int32, _ cue: SubtitleCue) -> String {
-        "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+        let plain = "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+        guard cue.styled != nil || cue.placement != nil else { return plain }
+        var hasher = Hasher()
+        hasher.combine(cue.styled)
+        hasher.combine(cue.placement)
+        // Per-process seed is fine: the history never outlives the process.
+        return plain + "|" + String(UInt(bitPattern: hasher.finalize()), radix: 36)
     }
 
     /// What a cue costs the history: its text plus its key, both as UTF-8 —

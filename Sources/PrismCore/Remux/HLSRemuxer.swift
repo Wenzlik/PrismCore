@@ -876,6 +876,33 @@ final class HLSRemuxer: @unchecked Sendable {
         var isAttachment = false
     }
 
+    /// Source bytes a re-anchor may read before its anchor to catch subtitle
+    /// events already running there: one 8 MB bite of the host's range proxy
+    /// (AGENTS.md *Measuring*), which a seek to the anchor usually fetches
+    /// anyway — so the preroll costs latency in the bytes it reads, not an
+    /// extra request.
+    static let subtitlePrerollBytes = 8 << 20
+    /// Never further back than this, however low the bitrate.
+    static let subtitlePrerollMaxSeconds = 30.0
+
+    /// The plan entry a libass session's re-anchor seeks to: the earliest
+    /// entry within the preroll window before `anchor` (`anchor` itself when
+    /// the bitrate leaves no room — a 4K remux at 80 Mb/s gets under a
+    /// second, so in practice no preroll; anime-class 1080p gets 10–30 s).
+    /// Entries, not timestamps: an `av_seek_frame` to an arbitrary time can
+    /// land a whole GOP earlier, while an entry is a keyframe the plan knows.
+    /// Events that began before the window are still missed — Matroska's
+    /// CueDuration, which would say which, is not exposed by libavformat.
+    static func subtitlePrerollEntry(anchor: Int, startSeconds: (Int) -> Double, bitRate: Int64) -> Int {
+        let window = bitRate > 0
+            ? min(subtitlePrerollMaxSeconds, Double(subtitlePrerollBytes) * 8 / Double(bitRate))
+            : 10
+        let anchorStart = startSeconds(anchor)
+        var entry = anchor
+        while entry > 0, anchorStart - startSeconds(entry - 1) <= window { entry -= 1 }
+        return entry
+    }
+
     static func streamSignatures(of context: UnsafeMutablePointer<AVFormatContext>) -> [StreamSignature] {
         trimmingTrailingAttachments((0..<Int(context.pointee.nb_streams)).map { index in
             let stream = context.pointee.streams[index]!.pointee
@@ -1076,6 +1103,10 @@ final class HLSRemuxer: @unchecked Sendable {
             closedCaptionLanguage: closedCaptionLanguage
         )
         let tapsClosedCaptions = subtitles.hasClosedCaptions
+        // Only with libass on: a re-anchor then seeks a little earlier and
+        // lets subtitle packets through the drop window (see
+        // `subtitlePrerollEntry`). The default path seeks exactly as before.
+        let subtitlePreroll = subtitles.prerollsSubtitlePackets
 
         // Heights put `apac` into the master, so whether a TrueHD track is Atmos has to be
         // known now — from its bitstream, not the probe's profile claim, which is silent
@@ -2164,10 +2195,22 @@ final class HLSRemuxer: @unchecked Sendable {
         func reanchor(to anchor: Int) throws {
             guard let plannedPlan else { return }
             let target = plannedPlan.entries[anchor].startPTS
+            // An ASS sign that started before the anchor lives in a cluster
+            // the seek skips, and libass only knows packets it was handed —
+            // so with libass on, start reading a few plan entries earlier and
+            // keep their subtitle packets (the drop window below lets them
+            // through; audio and video before the anchor are still dropped).
+            let seekPTS = subtitlePreroll
+                ? plannedPlan.entries[Self.subtitlePrerollEntry(
+                    anchor: anchor,
+                    startSeconds: { Double(plannedPlan.entries[$0].startPTS) * tickSeconds },
+                    bitRate: input.pointee.bit_rate
+                )].startPTS
+                : target
             // A seek is a read: over HTTP it is a Range request to the same
             // origin the copy loop reads from, so its failure is a source
             // failure and goes to recovery like one (`reanchorRecovering`).
-            let sought = av_seek_frame(input, videoIndex, target, AVSEEK_FLAG_BACKWARD)
+            let sought = av_seek_frame(input, videoIndex, seekPTS, AVSEEK_FLAG_BACKWARD)
             if sought < 0 {
                 throw SourceReadFailure(underlying: sourceFailure(code: sought, operation: "av_seek_frame"))
             }
@@ -2461,6 +2504,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     if isAnchorKeyframe {
                         droppingUntilPTS = nil
                     } else {
+                        // The preroll's whole point: a subtitle event read
+                        // before the anchor may still be on screen at it.
+                        if subtitlePreroll, subtitleStreams.contains(Int32(packet.pointee.stream_index)) {
+                            subtitles.ingest(packet)
+                        }
                         continue
                     }
                 }

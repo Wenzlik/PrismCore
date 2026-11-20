@@ -25,7 +25,7 @@ public struct SubtitleColor: Sendable, Hashable, Codable {
 /// family, and WebVTT's semantic markers (voice, classes). Karaoke timing,
 /// blur, rotation and vector drawings are libass's business — a host that
 /// wants those renders the track with `ASSSubtitleRenderer` instead.
-public struct StyledTextRun: Sendable, Equatable, Codable {
+public struct StyledTextRun: Sendable, Hashable, Codable {
     public var text: String
     public var isBold: Bool
     public var isItalic: Bool
@@ -67,7 +67,7 @@ public struct StyledTextRun: Sendable, Equatable, Codable {
 ///
 /// `runs` hold *plain* text: no tags, no entities, no ASS override blocks;
 /// line breaks are `"\n"` inside a run. Concatenated they are `plainText`.
-public struct StyledSubtitleText: Sendable, Equatable, Codable {
+public struct StyledSubtitleText: Sendable, Hashable, Codable {
     public var runs: [StyledTextRun]
     /// Where the source asked for the cue: an ASS `\an`/`\pos` override, the
     /// ASS *style's* alignment (which `TimedTextCue.placement` has never
