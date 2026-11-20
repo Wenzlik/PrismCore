@@ -77,8 +77,14 @@ final class WebVTTRenditionWriter {
         max(0, originSeconds + delaySeconds)
     }
 
+    /// An identical cue already held is not added again: a re-anchor keeps
+    /// a long cue that spans its anchor (`reanchor` drops only cues wholly
+    /// before it), and the libass preroll then re-reads that very packet —
+    /// which printed the same block twice in one segment (review r3 P2.5).
+    /// Identity is the whole cue (times, text, settings, styling), so two
+    /// different events that merely share a time still both print.
     func add(_ cue: SubtitleCue) {
-        guard !cue.overlapsNothing, !cue.text.isEmpty else { return }
+        guard !cue.overlapsNothing, !cue.text.isEmpty, !pending.contains(cue) else { return }
         pending.append(cue)
     }
 
