@@ -442,7 +442,7 @@ runs shorter. It does not replace them.
 
 Every hand-written bitstream parser (JOC walk, `dec3`, HEVC NAL framing,
 `hvcC` normalization, ISO-BMFF splice, text subtitles, A/53 captions, the
-HDR10+ T.35 walk) is wired into
+HDR10+ T.35 walk, the Dolby Vision RPU peak patch) is wired into
 `FuzzTargets` (`Sources/PrismCore/Fuzz/`) — uniform `bytes in → invariants
 checked` entry points, `package` access so the test target and the fuzzer
 executable share them. A target checks *wrong-answer* invariants, not just

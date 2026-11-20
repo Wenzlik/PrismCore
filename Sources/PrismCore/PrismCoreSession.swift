@@ -369,6 +369,10 @@ public actor PrismCoreSession {
         /// apart from `display`. `.automatic` (the default) is the behaviour
         /// before the option existed. See `DolbyVisionPreference`.
         public var dolbyVisionPreference: DolbyVisionPreference = .automatic
+        /// Lower a Profile 7 **FEL** source's converted 8.1 RPU peak metadata
+        /// to its base layer's. `false` (the default) leaves every RPU as
+        /// libdovi converts it. See the initializer's doc.
+        public var alignFELDeliveryMetadata: Bool = false
     }
 
     /// Where this session's server is reachable, and whether it still is.
@@ -711,7 +715,8 @@ public actor PrismCoreSession {
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
         heightsOutput: HeightsOutput = .apac,
-        dolbyVisionPreference: DolbyVisionPreference = .automatic
+        dolbyVisionPreference: DolbyVisionPreference = .automatic,
+        alignFELDeliveryMetadata: Bool = false
     ) throws {
         try self.init(
             url: url,
@@ -743,7 +748,8 @@ public actor PrismCoreSession {
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
             heightsOutput: heightsOutput,
-            dolbyVisionPreference: dolbyVisionPreference
+            dolbyVisionPreference: dolbyVisionPreference,
+            alignFELDeliveryMetadata: alignFELDeliveryMetadata
         )
     }
 
@@ -893,6 +899,20 @@ public actor PrismCoreSession {
     ///   Vision off" setting here, and keep `display` the honest read: a
     ///   genuine Profile 5 has no base layer, ignores the preference, and is
     ///   still served the `dvh1.05.LL` master it needs, whatever the display.
+    /// - Parameter alignFELDeliveryMetadata: **opt-in, unmeasured.** A Profile 7
+    ///   FEL source plays as its base layer (the enhancement layer is
+    ///   dropped), but its RPU still describes the BL+EL picture — typically
+    ///   4000 nit over a 1000 nit base — so display management tone-maps for
+    ///   highlights that are not there and the picture runs dark. `true`
+    ///   lowers the converted RPU's `source_max_pq`, L1 max / avg and L6
+    ///   mastering peak / MaxCLL to the base layer's MDCV peak, only ever
+    ///   downwards, only for FEL (never MEL), only when the source's MDCV
+    ///   says ≤ 1000 nit and the RPU says ≥ 4000, and only where the
+    ///   bitstream edit is proved safe; anything else is left as converted.
+    ///   Trims (L2 / L8) are untouched. `false` (the default) is byte-for-byte
+    ///   the conversion as before. Nobody has yet measured that this improves
+    ///   the picture, hence off. `DolbyVisionConversionStats.alignedRPUs` /
+    ///   `alignSkippedRPUs` report what it did.
     /// - Parameter inBandClosedCaptions: what the master says about the
     ///   CEA-608/708 captions carried in the video's own SEI. `false` (the
     ///   default) writes `CLOSED-CAPTIONS=NONE`: without it AVPlayer finds
@@ -933,7 +953,8 @@ public actor PrismCoreSession {
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
         heightsOutput: HeightsOutput = .apac,
-        dolbyVisionPreference: DolbyVisionPreference = .automatic
+        dolbyVisionPreference: DolbyVisionPreference = .automatic,
+        alignFELDeliveryMetadata: Bool = false
     ) throws {
         self.configuration = Options(
             sourceURL: url,
@@ -961,7 +982,8 @@ public actor PrismCoreSession {
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
             heightsOutput: heightsOutput,
-            dolbyVisionPreference: dolbyVisionPreference
+            dolbyVisionPreference: dolbyVisionPreference,
+            alignFELDeliveryMetadata: alignFELDeliveryMetadata
         )
         // A `ProbedSource` that was probed through a host input carries its
         // factory; a session built from one must not have to be told twice
@@ -997,6 +1019,7 @@ public actor PrismCoreSession {
             displayIsDolbyVisionCapable: display.isDolbyVisionCapable,
             displaySource: display.source,
             dolbyVisionPreference: dolbyVisionPreference,
+            alignFELDeliveryMetadata: alignFELDeliveryMetadata,
             demand: demand,
             segmentCacheBytes: segmentCacheBytes,
             sequentialPlaylist: sequentialPlaylist,
@@ -1103,7 +1126,8 @@ public actor PrismCoreSession {
         allowsAtmosOutput: Bool = false,
         heightsLayout: HeightsLayout = .atmos7_1_4,
         heightsOutput: HeightsOutput = .apac,
-        dolbyVisionPreference: DolbyVisionPreference = .automatic
+        dolbyVisionPreference: DolbyVisionPreference = .automatic,
+        alignFELDeliveryMetadata: Bool = false
     ) throws -> PrismCoreSession {
         try PrismCoreSession(
             url: url,
@@ -1132,7 +1156,8 @@ public actor PrismCoreSession {
             allowsAtmosOutput: allowsAtmosOutput,
             heightsLayout: heightsLayout,
             heightsOutput: heightsOutput,
-            dolbyVisionPreference: dolbyVisionPreference
+            dolbyVisionPreference: dolbyVisionPreference,
+            alignFELDeliveryMetadata: alignFELDeliveryMetadata
         )
     }
 
@@ -1279,7 +1304,8 @@ public actor PrismCoreSession {
             allowsAtmosOutput: options.allowsAtmosOutput,
             heightsLayout: options.heightsLayout,
             heightsOutput: options.heightsOutput,
-            dolbyVisionPreference: options.dolbyVisionPreference
+            dolbyVisionPreference: options.dolbyVisionPreference,
+            alignFELDeliveryMetadata: options.alignFELDeliveryMetadata
         )
         // A tripwire, not a doubt about today's initializer: the day someone
         // adds a work-directory parameter for a test or a cache, this is the
