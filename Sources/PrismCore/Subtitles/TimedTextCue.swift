@@ -35,9 +35,9 @@ public struct TimedTextCue: Sendable, Equatable {
     /// The same cue with its inline styling kept as runs — italics, colours
     /// (`<font color>`, ASS `\c` and the style's colours, tx3g `styl`),
     /// fonts, WebVTT voice and classes — and the placement the source asked
-    /// for, the ASS style's alignment included. `text` above is unchanged
-    /// and stays the derived plain(ish) view; a host that ignores this
-    /// draws exactly what it drew before. `nil` only for cues with no
+    /// for, the ASS style's alignment included. `text` above stays the
+    /// derived plain(ish) view; a host that ignores this draws what it drew
+    /// before, minus ASS drawing commands, which 4.0.7 removes from both. `nil` only for cues with no
     /// markup source (closed captions, OCR'd bitmaps).
     /// `styled.withoutSourceColors()` is the "ignore source colours" view.
     public let styled: StyledSubtitleText?

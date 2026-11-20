@@ -62,8 +62,9 @@ public struct StyledTextRun: Sendable, Hashable, Codable {
 }
 
 /// Cue text with its inline styling preserved — the structured twin of the
-/// WebVTT-safe `TimedTextCue.text`, which stays exactly what it was so hosts
-/// that read only the string see no change.
+/// WebVTT-safe `TimedTextCue.text`, which stays what it was so hosts that
+/// read only the string see no change — except that ASS drawings are gone
+/// from both since 4.0.7.
 ///
 /// `runs` hold *plain* text: no tags, no entities, no ASS override blocks;
 /// line breaks are `"\n"` inside a run. Concatenated they are `plainText`.
@@ -150,7 +151,8 @@ struct InlineStyle: Equatable {
 /// ASS override blocks, any mix of them, because real files mix them — into
 /// styled runs. Separate from `TextSubtitleConverter.sanitizeStyled` on
 /// purpose: that one produces the WebVTT payload the served renditions and
-/// every existing host depend on byte for byte, and must not move.
+/// every existing host depend on, and must not move. The one rule they
+/// share on purpose is drawing mode (`drawingMode(after:current:)`).
 ///
 /// Never fails: unknown tags and unbalanced braces stay visible as text,
 /// which is what a viewer would rather see than a silently missing line.
@@ -416,13 +418,35 @@ enum StyledTextParser {
 
     // MARK: ASS override blocks
 
+    /// Drawing mode (`\pN`, N > 0 on, `\p0` off) after one override block's
+    /// tags, read exactly as `applyASS` reads them: text before the first
+    /// backslash is not a tag, `\t(…)` contents are animation targets and
+    /// do not apply, the last `\p` wins. Shared with the WebVTT text path
+    /// (`TextSubtitleConverter.strippingDrawings`) so both views drop the
+    /// same characters.
+    static func drawingMode<S: StringProtocol>(after block: S, current: Bool) -> Bool {
+        var drawing = current
+        var transformDepth = 0
+        for rawTag in block.split(separator: "\\", omittingEmptySubsequences: false).dropFirst() where !rawTag.isEmpty {
+            let tag = rawTag.trimmingCharacters(in: .whitespaces)
+            if transformDepth > 0 || tag.hasPrefix("t(") {
+                transformDepth = max(0, transformDepth + tag.filter { $0 == "(" }.count - tag.filter { $0 == ")" }.count)
+                continue
+            }
+            if tag.hasPrefix("p"), !tag.hasPrefix("pos("), let level = Int(tag.dropFirst()) { drawing = level > 0 }
+        }
+        return drawing
+    }
+
     private static func applyASS(
         _ block: String, to style: inout InlineStyle, base: InlineStyle, header: ASSScriptHeader?,
         alignment: inout Int?, anchor: inout TextCuePlacement.Anchor?, drawing: inout Bool,
         resolution: TextSubtitleConverter.PlayResolution?
     ) {
         var transformDepth = 0
-        for rawTag in block.split(separator: "\\", omittingEmptySubsequences: true) {
+        // Text before a block's first backslash is not a tag (libass skips
+        // it): `{p1\i1}` must not switch drawing mode on.
+        for rawTag in block.split(separator: "\\", omittingEmptySubsequences: false).dropFirst() where !rawTag.isEmpty {
             let tag = rawTag.trimmingCharacters(in: .whitespaces)
             // `\t(…,\c&H…&)` animates TOWARD its tags; reading them as
             // immediate would paint a fade's end colour from its first frame.

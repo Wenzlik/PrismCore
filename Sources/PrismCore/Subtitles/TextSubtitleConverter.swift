@@ -324,7 +324,11 @@ enum TextSubtitleConverter {
 
     /// `sanitize`, plus the placement the ASS override blocks asked for.
     static func sanitizeStyled(_ text: String, playResolution: PlayResolution?) -> Converted {
-        var result = normalized(text)
+        // Drawing stretches (`{\p1}m 0 0 l 10 0{\p0}`) first: they are vector
+        // commands, and until 4.0.7 the translation below dropped the `\p1`
+        // and kept the coordinates as dialogue — in every embedded and
+        // external ASS cue, the renditions PiP and AirPlay show included.
+        var result = strippingDrawings(normalized(text))
 
         // ASS override blocks (`{\i1}`, `{\an8}`, `{\pos(…)}`). The inline
         // styles WebVTT has words for become its tags; the placement is
