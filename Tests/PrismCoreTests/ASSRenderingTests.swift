@@ -346,6 +346,23 @@ struct ASSRenderingTests {
         _ = try ASSSubtitleRenderer(script: Data(script.utf8), library: viaRenderer, storageSize: nil)
         #expect(viaRenderer.loadedFontBytes == 3_000)
 
+        // r5 P1.2: libass ends lines at CR too. A CR-only or CRLF script must
+        // have its `[Fonts]` found here — admitted under the budget, refused
+        // over it, never handed to libass — and still parse.
+        for ending in ["\r", "\r\n"] {
+            let other = script.replacingOccurrences(of: "\n", with: ending)
+            let admitted = try LibassLibrary(fontBudget: 10_000)
+            let out = String(decoding: admitted.admittingEmbeddedFonts(of: Data(other.utf8)), as: UTF8.self)
+            #expect(admitted.loadedFontBytes == 3_000)
+            #expect(!out.contains("fontname:") && !out.contains("[[[[") && out.contains("Dialogue:"))
+            let refusing = try LibassLibrary(fontBudget: 1_000)
+            #expect(try ASSSubtitleRenderer(script: Data(other.utf8), library: refusing, storageSize: nil).eventCount == 1)
+            #expect(refusing.loadedFontBytes == 0)
+        }
+        let bomFirst = try LibassLibrary(fontBudget: 10_000)
+        _ = bomFirst.admittingEmbeddedFonts(of: Data([0xEF, 0xBB, 0xBF]) + Data(fonts.utf8))
+        #expect(bomFirst.loadedFontBytes == 3_000)
+
         // Attachments first, then a header whose fonts no longer fit.
         let tight = try LibassLibrary(fontBudget: 4_000)
         #expect(tight.addFont(name: "attached.ttf", bytes: Data(repeating: 1, count: 2_000)))
@@ -354,6 +371,22 @@ struct ASSRenderingTests {
         // Parsing still happened: styles and events are there.
         renderer.appendEvent(Data("0,0,Default,,0,0,0,,still renders".utf8), start: 0, duration: 2)
         #expect(images(renderer.frame(at: 1, canvas: canvas))?.isEmpty == false)
+    }
+
+    /// r5 P2.7: a track with no CodecPrivate (or one without an `[Events]`
+    /// Format) must still accept and draw events, not stay empty for good.
+    @Test func headerlessTrackStillAcceptsEvents() throws {
+        let library = try LibassLibrary()
+        let renderers = [
+            try ASSSubtitleRenderer(header: Data()),
+            try ASSSubtitleRenderer(header: Data("[Script Info]\nPlayResY: 360\n".utf8)),
+            try ASSSubtitleRenderer(header: nil, library: library, storageSize: nil),
+        ]
+        for renderer in renderers {
+            renderer.appendEvent(Data("0,0,Default,,0,0,0,,headerless".utf8), start: 0, duration: 2)
+            #expect(renderer.eventCount == 1)
+            #expect(images(renderer.frame(at: 1, canvas: canvas))?.isEmpty == false)
+        }
     }
 
     /// P2.4: a clear handed to the host invalidates libass's cached picture;

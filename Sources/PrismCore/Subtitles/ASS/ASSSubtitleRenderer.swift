@@ -198,18 +198,33 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         guard let track = library.withLock({ ass_new_track(library.handle) }) else {
             throw ASSRendererError.allocationFailed
         }
-        if let original = header, !original.isEmpty {
-            let header = library.admittingEmbeddedFonts(of: original)
+        func process(_ data: Data) {
             library.withLock {
-                header.withUnsafeBytes { raw in
+                data.withUnsafeBytes { raw in
                     ass_process_codec_private(
                         track, raw.bindMemory(to: CChar.self).baseAddress, Int32(clamping: raw.count)
                     )
                 }
             }
         }
+        if let header, !header.isEmpty { process(library.admittingEmbeddedFonts(of: header)) }
+        // No usable header (a Matroska track without CodecPrivate, or one
+        // with no `[Events]` Format) leaves libass without an event format:
+        // it drops every chunk and the renderer stays empty for good while
+        // the host believes it works (review r5 P2.7). libass's own default
+        // style stands in for the missing styles.
+        if library.withLock({ track.pointee.event_format == nil }) { process(Self.minimalHeader) }
         self.init(library: library, track: track, storageSize: storageSize)
     }
+
+    static let minimalHeader = Data("""
+        [Script Info]
+        ScriptType: v4.00+
+
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+
+        """.utf8)
 
     private init(library: LibassLibrary, track: UnsafeMutablePointer<ASS_Track>, storageSize: (width: Int, height: Int)?) {
         self.library = library
@@ -521,15 +536,23 @@ final class LibassLibrary: @unchecked Sendable {
             refused = false
         }
 
+        // Lines end where libass ends them: at CR, LF or CRLF. Splitting on
+        // LF alone read a CR-only script as one line, missed its `[Fonts]`,
+        // and handed every embedded font to libass unbudgeted (review r5 P1.2).
+        let cr = UInt8(ascii: "\r"), lf = UInt8(ascii: "\n")
+        // A UTF-8 BOM is not part of the first line's content (libass skips it).
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
         var lineStart = 0
         while lineStart < bytes.count {
             var lineEnd = lineStart
-            while lineEnd < bytes.count, bytes[lineEnd] != UInt8(ascii: "\n") { lineEnd += 1 }
-            let next = min(bytes.count, lineEnd + 1)
+            while lineEnd < bytes.count, bytes[lineEnd] != lf, bytes[lineEnd] != cr { lineEnd += 1 }
+            var next = min(bytes.count, lineEnd + 1)
+            if lineEnd < bytes.count, bytes[lineEnd] == cr, next < bytes.count, bytes[next] == lf { next += 1 }
             var first = lineStart
+            if lineStart == 0, bytes.starts(with: bom) { first = min(lineEnd, 3) }
             while first < lineEnd, bytes[first] == UInt8(ascii: " ") || bytes[first] == UInt8(ascii: "\t") { first += 1 }
             var last = lineEnd
-            while last > first, bytes[last - 1] == UInt8(ascii: "\r") || bytes[last - 1] == UInt8(ascii: " ") { last -= 1 }
+            while last > first, bytes[last - 1] == UInt8(ascii: " ") || bytes[last - 1] == UInt8(ascii: "\t") { last -= 1 }
             let content = bytes[first..<last]
 
             if let section = Self.knownSection(content) {
