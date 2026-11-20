@@ -411,11 +411,19 @@ package enum FuzzTargets {
             assertPlacementSane(converted.placement, from: "convert(\(kind))")
         }
         _ = TextSubtitleConverter.playResolution(fromASSHeader: data)
+        let header = ASSScriptHeader(data: data)
+        if let styled = TextSubtitleConverter.convert(
+            data, kind: .ass, playResolution: header?.playResolution, assHeader: header
+        )?.styled {
+            assertStyledSane(styled, from: "styled(ass)")
+        }
+        if let styled = TextSubtitleConverter.movTextStyled(data) { assertStyledSane(styled, from: "styled(tx3g)") }
 
         guard let text = String(data: data, encoding: .utf8) else { return }
         assertWebVTTSafe(TextSubtitleConverter.sanitize(text), from: "sanitize")
         for cue in TextSubtitleConverter.cues(fromSRT: text)
-            + TextSubtitleConverter.cues(fromWebVTT: text) {
+            + TextSubtitleConverter.cues(fromWebVTT: text)
+            + TextSubtitleConverter.cues(fromASS: text) {
             guard cue.end > cue.start else {
                 fatalError("cue with non-positive duration: \(cue.start)…\(cue.end)")
             }
@@ -423,6 +431,7 @@ package enum FuzzTargets {
             assertBalancedTags(cue.text, from: "cues(from…)")
             if let settings = cue.settings { assertSettingsSafe(settings, from: "cues(from…)") }
             assertPlacementSane(cue.placement, from: "cues(from…)")
+            if let styled = cue.styled { assertStyledSane(styled, from: "cues(from…).styled") }
         }
         // Raw side-data settings take this path in production; the string
         // here stands in for whatever a demuxer attached.
@@ -433,6 +442,22 @@ package enum FuzzTargets {
         _ = TextCuePlacement(webVTTSettings: text)
         _ = TextSubtitleConverter.parseTimingLineWithSettings(text)
         _ = TextSubtitleConverter.parseTimestamp(text)
+    }
+
+    /// Styled runs are the host's drawing input: no empty run, no blank line
+    /// (the same hygiene as the WebVTT text), no line padded with spaces,
+    /// a sane placement, and a lossless `Codable` round trip — a host
+    /// caching parsed sidecars must get back exactly what it stored.
+    private static func assertStyledSane(_ styled: StyledSubtitleText, from source: String) {
+        if styled.runs.contains(where: \.text.isEmpty) { fatalError("\(source): empty run in \(styled)") }
+        let plain = styled.plainText
+        if plain.contains("\n\n") || plain.hasPrefix("\n") || plain.hasSuffix("\n") {
+            fatalError("\(source): blank line in styled text \(plain.debugDescription)")
+        }
+        assertPlacementSane(styled.placement, from: source)
+        guard let data = try? JSONEncoder().encode(styled),
+              let back = try? JSONDecoder().decode(StyledSubtitleText.self, from: data), back == styled
+        else { fatalError("\(source): styled text does not survive a Codable round trip: \(styled)") }
     }
 
     /// A settings string shares the cue's timing line, where a newline ends

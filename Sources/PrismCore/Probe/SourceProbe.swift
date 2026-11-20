@@ -563,6 +563,10 @@ public struct SubtitleTrackInfo: Sendable, Equatable {
     /// turn this track into text here: a PGS / DVB / DVD stream on a platform
     /// with Vision. Always `false` for text tracks, which need no OCR.
     public let isOCRReadable: Bool
+
+    /// ASS or SSA — a track that `ASSRenderingMode.libass` can draw with the
+    /// file's own styles (`PrismCoreSession.assRenderer(streamIndex:)`).
+    public var isASS: Bool { codecName == "ass" || codecName == "ssa" }
 }
 
 /// One chapter mark from the container — a Matroska `Chapters` edition entry

@@ -51,6 +51,8 @@ enum TextSubtitleConverter {
     struct Converted: Equatable {
         var text: String
         var placement: TextCuePlacement?
+        /// The same payload as styled runs; `nil` from the pure text helpers.
+        var styled: StyledSubtitleText? = nil
     }
 
     // MARK: - Packet payloads
@@ -65,7 +67,9 @@ enum TextSubtitleConverter {
     /// Text and placement for one packet payload; `nil` on no visible text.
     /// `playResolution` is the ASS script's, for `\pos` — `nil` keeps the
     /// alignment and drops the point.
-    static func convert(_ payload: Data, kind: Kind, playResolution: PlayResolution?) -> Converted? {
+    static func convert(
+        _ payload: Data, kind: Kind, playResolution: PlayResolution?, assHeader: ASSScriptHeader? = nil
+    ) -> Converted? {
         let raw: String?
         switch kind {
         case .subrip, .webvtt:
@@ -76,8 +80,10 @@ enum TextSubtitleConverter {
             raw = movTextPayload(payload)
         }
         guard let raw else { return nil }
-        let converted = sanitizeStyled(raw, playResolution: playResolution)
-        return converted.text.isEmpty ? nil : converted
+        var converted = sanitizeStyled(raw, playResolution: playResolution)
+        guard !converted.text.isEmpty else { return nil }
+        converted.styled = styledText(payload, kind: kind, playResolution: playResolution, header: assHeader)
+        return converted
     }
 
     /// `PlayResX`/`PlayResY` from an ASS script header (the stream's
@@ -171,11 +177,13 @@ enum TextSubtitleConverter {
             // SRT has no placement syntax of its own, so authors borrow the
             // ASS `{\an8}` — common enough that every desktop player honours
             // it. `\pos` has no resolution to be measured against here.
-            let body = sanitizeStyled(lines.joined(separator: "\n"), playResolution: nil)
+            let raw = lines.joined(separator: "\n")
+            let body = sanitizeStyled(raw, playResolution: nil)
             guard !body.text.isEmpty, timing.end > timing.start else { return }
             cues.append(SubtitleCue(
                 start: timing.start, end: timing.end, text: body.text,
-                settings: body.placement?.webVTTSettings, placement: body.placement
+                settings: body.placement?.webVTTSettings, placement: body.placement,
+                styled: StyledTextParser.parse(raw)
             ))
         }
 
@@ -214,13 +222,17 @@ enum TextSubtitleConverter {
         func flush() {
             defer { timing = nil; lines = [] }
             guard let timing else { return }
-            let body = sanitizeStyled(lines.joined(separator: "\n"), playResolution: nil)
+            let raw = lines.joined(separator: "\n")
+            let body = sanitizeStyled(raw, playResolution: nil)
             guard !body.text.isEmpty, timing.end > timing.start else { return }
             let settings = timing.settings.flatMap(TextCuePlacement.sanitizedWebVTTSettings)
+            let placement = settings.flatMap(TextCuePlacement.init(webVTTSettings:)) ?? body.placement
+            var styled = StyledTextParser.parse(raw)
+            styled.placement = placement
             cues.append(SubtitleCue(
                 start: timing.start, end: timing.end, text: body.text,
                 settings: settings ?? body.placement?.webVTTSettings,
-                placement: settings.flatMap(TextCuePlacement.init(webVTTSettings:)) ?? body.placement
+                placement: placement, styled: styled
             ))
         }
 

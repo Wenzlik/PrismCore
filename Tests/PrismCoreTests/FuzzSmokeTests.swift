@@ -90,6 +90,14 @@ struct FuzzSmokeTests {
             TextSubtitleConverter.cueText(from: Data(FuzzSeeds.tx3gSample), kind: .movText)
                 == "Sample"
         )
+        // The styled seeds must reach the style lookup, the drawing skip and
+        // the styl entries, or the styled-runs invariants never run deep.
+        let script = TextSubtitleConverter.cues(fromASS: FuzzSeeds.assScript)
+        #expect(script.first?.styled?.plainText == "Red sign")
+        #expect(script.first?.styled?.runs.first?.color == SubtitleColor(red: 255, green: 0, blue: 0))
+        #expect(script.first?.styled?.runs.last?.isBold == true)
+        #expect(script.first?.styled?.placement?.alignment == 8)
+        #expect(TextSubtitleConverter.movTextStyled(Data(FuzzSeeds.tx3gStyledSample))?.runs.first?.isBold == true)
         // The caption seed must reach the terminal, not merely the SEI walk: a
         // flipped-and-erased pop-on caption is the whole path in one packet.
         let captionReader = ClosedCaptionReader(framing: .annexB, codec: .h264)

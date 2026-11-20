@@ -20,6 +20,7 @@ package enum FuzzSeeds {
         "isobmff-patch": [videoInitSegment, audioInitSegment],
         "text-subtitles": [
             Array(srtText.utf8), Array(vttText.utf8), Array(assEvent.utf8), tx3gSample,
+            Array(assScript.utf8), tx3gStyledSample,
         ],
         "a53-captions": [captionedAccessUnit, xdsAccessUnit],
         "container-layout": [matroskaHead, faststartMP4Head],
@@ -358,6 +359,27 @@ package enum FuzzSeeds {
     package static let tx3gSample: [UInt8] = {
         let text = Array("Sample".utf8)
         return [0, UInt8(text.count)] + text + [0, 0, 0, 8] + Array("styl".utf8)
+    }()
+
+    /// A whole script: styles (a colour, a bold flag, a top alignment) the
+    /// styled runs must pick up, and a Dialogue the document parser reads.
+    package static let assScript = """
+        [Script Info]
+        PlayResX: 640
+        PlayResY: 360
+        [V4+ Styles]
+        Format: Name, Fontname, PrimaryColour, Bold, Alignment
+        Style: Sign,Arial,&H0000FFFF,-1,8
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+        Dialogue: 0,0:00:01.00,0:00:02.00,Sign,,0,0,0,,{\\c&H0000FF&}Red{\\r} {\\p1}m 0 0{\\p0}sign
+        """
+
+    /// tx3g with a real `styl` entry (bold, red) over the first three characters.
+    package static let tx3gStyledSample: [UInt8] = {
+        let text = Array("Styled".utf8)
+        return [0, UInt8(text.count)] + text
+            + box("styl", payload: [0, 1, 0, 0, 0, 3, 0, 1, 0x01, 18, 255, 0, 0, 255])
     }()
 
     // MARK: helpers

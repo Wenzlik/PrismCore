@@ -112,7 +112,8 @@ struct SubtitleConversionTests {
             + "00:00:04,500 --> 00:00:05,000\r\nno index here\r\n"
         let cues = TextSubtitleConverter.cues(fromSRT: file)
         #expect(cues.count == 2)
-        #expect(cues.first == SubtitleCue(start: 1, end: 3, text: "first line\nsecond line"))
+        #expect(cues.first == SubtitleCue(start: 1, end: 3, text: "first line\nsecond line",
+                                          styled: StyledSubtitleText(runs: [StyledTextRun(text: "first line\nsecond line")])))
         #expect(cues.last?.start == 4.5)
     }
 

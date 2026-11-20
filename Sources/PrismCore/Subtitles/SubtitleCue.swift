@@ -21,6 +21,9 @@ struct SubtitleCue: Equatable {
     /// The placement the source asked for, for hosts that draw text
     /// themselves; `settings` is its WebVTT rendering (or the source's own).
     var placement: TextCuePlacement? = nil
+    /// The cue's inline styling as runs (`StyledSubtitleText`), for hosts
+    /// that draw text themselves. The WebVTT writer never reads it.
+    var styled: StyledSubtitleText? = nil
 
     /// Clamped copy for a segment that only partially contains this cue.
     func clamped(to range: ClosedRange<Double>) -> SubtitleCue {

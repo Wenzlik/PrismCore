@@ -260,3 +260,33 @@ public struct TextCuePlacement: Sendable, Equatable {
         Int((min(1, max(0, fraction)) * 100).rounded())
     }
 }
+
+// Codable so a host can persist or ship `StyledSubtitleText` (a cache of
+// parsed sidecars, a cue handed across a process boundary). In this file
+// because synthesized conformances must live beside the type.
+extension TextCuePlacement.Anchor: Codable {}
+
+extension TextCuePlacement: Codable {
+    private enum CodingKeys: String, CodingKey { case alignment, anchor }
+
+    /// Validated like `init?(alignment:anchor:)`: decoded data is input, and
+    /// a placement outside `1…9` must not exist however it arrived.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let alignment = try container.decode(Int.self, forKey: .alignment)
+        guard let valid = TextCuePlacement(
+            alignment: alignment, anchor: try container.decodeIfPresent(Anchor.self, forKey: .anchor)
+        ) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .alignment, in: container, debugDescription: "alignment \(alignment) outside 1…9"
+            )
+        }
+        self = valid
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(alignment, forKey: .alignment)
+        try container.encodeIfPresent(anchor, forKey: .anchor)
+    }
+}

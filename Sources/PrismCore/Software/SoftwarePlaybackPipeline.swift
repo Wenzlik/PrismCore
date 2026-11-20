@@ -261,6 +261,22 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         stateLock.withLock { storedSubtitleDelaySeconds = value }
     }
 
+    /// Render ASS/SSA tracks with libass for the host overlay; see
+    /// `ASSRenderingMode`. Takes effect at the next `load` — set it before.
+    public func setASSRendering(_ mode: ASSRenderingMode) {
+        stateLock.withLock { storedASSRendering = mode }
+    }
+
+    /// The libass renderer of one ASS/SSA stream after a `load` under
+    /// `.libass`, else `nil`. Its frames are on this pipeline's source axis —
+    /// the clock `currentTime` reads — without `subtitleDelaySeconds`: ask
+    /// for `frame(at: CMTimeGetSeconds(currentTime) - subtitleDelaySeconds,
+    /// canvas:)`. Events arrive with the demux; a seek needs nothing (see
+    /// `ASSSubtitleRenderer`).
+    public func assRenderer(streamIndex: Int) -> ASSSubtitleRenderer? {
+        stateLock.withLock { storedASSTracks }?.renderer(streamIndex: streamIndex)
+    }
+
     /// Select embedded text or `nil` for Off. Conversion runs as packets arrive
     /// for every supported text track, so switching needs no A/V flush or seek,
     /// including while paused. Completion runs on the feed queue; dispatch to
@@ -307,6 +323,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private var storedSourceInfo: SourceInfo?
     private let subtitleCues = SoftwareSubtitleCueStore()
     private var storedSelectedSubtitleStreamIndex: Int?
+    private var storedASSRendering: ASSRenderingMode = .text
+    private var storedASSTracks: ASSTrackSet?
+    /// Feed-queue confined: each ASS stream's parsed script header, so the
+    /// styled runs do not re-parse the styles on every packet.
+    private var assHeaders: [Int32: ASSScriptHeader] = [:]
     private var storedSelectableAudioTracks: [AudioTrackInfo] = []
     /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
     private var storedSelectedAudioStreamIndex: Int32 = -1
@@ -1040,6 +1061,10 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             storedSourceInfo = description
             storedSelectableAudioTracks = selectable
         }
+        if stateLock.withLock({ storedASSRendering }) == .libass {
+            let tracks = ASSTrackSet(input: context)
+            stateLock.withLock { storedASSTracks = tracks }
+        }
 
         guard let allocated = av_packet_alloc() else {
             throw FFmpegError(code: -1, operation: "av_packet_alloc")
@@ -1375,7 +1400,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                                 // is still on screen until its end plus the delay.
                                 currentTime: clockAnchored
                                     ? CMTimeGetSeconds(timeline.currentTime) - subtitleDelaySeconds : .nan,
-                                playResolution: SubtitleRenditionSet.playResolution(of: stream.pointee.codecpar, kind: kind))
+                                playResolution: SubtitleRenditionSet.playResolution(of: stream.pointee.codecpar, kind: kind),
+                                assHeader: kind == .ass ? assHeader(for: stream) : nil)
+            if kind == .ass { stateLock.withLock { storedASSTracks }?.ingest(packet) }
         }
 
         switch Int32(packet.pointee.stream_index) {
@@ -1387,6 +1414,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         default:
             break   // a stream we didn't select (second audio track, subtitles)
         }
+    }
+
+    private func assHeader(for stream: UnsafeMutablePointer<AVStream>) -> ASSScriptHeader? {
+        if let cached = assHeaders[stream.pointee.index] { return cached }
+        let parsed = SubtitleRenditionSet.assHeader(of: stream.pointee.codecpar)
+        if let parsed { assHeaders[stream.pointee.index] = parsed }
+        return parsed
     }
 
     private func acceptVideo(_ sampleBuffer: CMSampleBuffer) throws {
@@ -1482,7 +1516,11 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     private func teardown() {
         cancelEndObserver()
         subtitleCues.reset()
-        stateLock.withLock { storedSelectedSubtitleStreamIndex = nil }
+        assHeaders = [:]
+        stateLock.withLock {
+            storedSelectedSubtitleStreamIndex = nil
+            storedASSTracks = nil
+        }
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         videoDecoder?.close()

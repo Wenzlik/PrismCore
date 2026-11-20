@@ -32,16 +32,26 @@ public struct TimedTextCue: Sendable, Equatable {
     /// what nearly every cue wants. A host that ignores it draws exactly what
     /// it drew before.
     public let placement: TextCuePlacement?
+    /// The same cue with its inline styling kept as runs — italics, colours
+    /// (`<font color>`, ASS `\c` and the style's colours, tx3g `styl`),
+    /// fonts, WebVTT voice and classes — and the placement the source asked
+    /// for, the ASS style's alignment included. `text` above is unchanged
+    /// and stays the derived plain(ish) view; a host that ignores this
+    /// draws exactly what it drew before. `nil` only for cues with no
+    /// markup source (closed captions, OCR'd bitmaps).
+    /// `styled.withoutSourceColors()` is the "ignore source colours" view.
+    public let styled: StyledSubtitleText?
 
     public init(
         streamIndex: Int32, start: Double, end: Double, text: String,
-        placement: TextCuePlacement? = nil
+        placement: TextCuePlacement? = nil, styled: StyledSubtitleText? = nil
     ) {
         self.streamIndex = streamIndex
         self.start = start
         self.end = end
         self.text = text
         self.placement = placement
+        self.styled = styled
     }
 }
 
@@ -65,7 +75,9 @@ extension TimedTextCue {
         let start = Swift.max(0, self.start + delay)
         let end = self.end + delay
         guard end > start else { return nil }
-        return TimedTextCue(streamIndex: streamIndex, start: start, end: end, text: text, placement: placement)
+        return TimedTextCue(
+            streamIndex: streamIndex, start: start, end: end, text: text, placement: placement, styled: styled
+        )
     }
 }
 
@@ -83,9 +95,10 @@ public enum SubtitleCueHistory: Sendable, Equatable {
     /// necessarily for a long captioned stream or a disc with many tracks.
     case complete
     /// The newest cues only, at most `maxCues` of them and at most `maxBytes`
-    /// of UTF-8 between their text and their dedup keys (a key is the cue's
-    /// stream, source times and text, so a cue costs a little over twice its
-    /// text). The oldest go first, cue and key together.
+    /// of UTF-8 between their text, their styled runs' text and their dedup
+    /// keys (a key is the cue's stream, source times and text, so a cue costs
+    /// a little over three times its text). The oldest go first, cue and key
+    /// together.
     ///
     /// What a host opting in takes on:
     /// - A replay is the retained window, not the film: a late handler, or a
