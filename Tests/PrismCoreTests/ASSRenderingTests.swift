@@ -312,20 +312,39 @@ struct ASSRenderingTests {
         #expect(showsBothOverlapEvents(renderer, at: 58.7))
     }
 
-    /// P1.3: fonts a script embeds in `[Fonts]` are charged to the same
-    /// budget as attachments, and skipped when they do not fit.
+    /// P1.3 / r3 P1.2: fonts a script embeds in `[Fonts]` are decoded on our
+    /// side, charged to the same budget as attachments, skipped when they do
+    /// not fit — and never handed to libass either way. A data line that
+    /// begins with `[` (inside the encoding's alphabet) is still data.
     @Test func embeddedScriptFontsShareTheAttachmentBudget() throws {
-        // libass's uuencoding alphabet is `!`…`` ` ``: 4 chars → 3 bytes.
-        let line = String(repeating: "!", count: 80)
+        // The encoding's alphabet is `!`…`` ` ``: 4 chars → 3 bytes. Lines of
+        // `[` are data too; r2's estimate stopped counting at the first one.
+        let line = String(repeating: "[", count: 80)
         let fonts = "[Fonts]\nfontname: embedded_0.ttf\n" + Array(repeating: line, count: 50).joined(separator: "\n") + "\n"
         let script = Self.header.replacingOccurrences(of: "[Events]", with: fonts + "\n[Events]")
             + "\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,x\n"
-        #expect(LibassLibrary.embeddedFontBytes(in: Data(script.utf8)) == 3_000)
-        #expect(LibassLibrary.embeddedFontBytes(in: Data(Self.header.utf8)) == 0)
 
         let roomy = try LibassLibrary(fontBudget: 10_000)
-        _ = try ASSSubtitleRenderer(script: Data(script.utf8), library: roomy, storageSize: nil)
+        let stripped = String(decoding: roomy.admittingEmbeddedFonts(of: Data(script.utf8)), as: UTF8.self)
         #expect(roomy.loadedFontBytes == 3_000)
+        #expect(!stripped.contains("[Fonts]") && !stripped.contains("[[[[") && !stripped.contains("fontname:"))
+        #expect(stripped.contains("[Events]") && stripped.contains("Dialogue:") && stripped.contains("Style: Default"))
+        #expect(String(decoding: roomy.admittingEmbeddedFonts(of: Data(Self.header.utf8)), as: UTF8.self) == Self.header)
+
+        // Decoding matches the encoding: three bytes per group, partial tail groups.
+        #expect(LibassLibrary.decodeEmbeddedFont(Array("!!!!".utf8)) == [0, 0, 0])
+        #expect(LibassLibrary.decodeEmbeddedFont(Array("````".utf8)) == [255, 255, 255])
+        #expect(LibassLibrary.decodeEmbeddedFont(Array("````!".utf8)) == nil)
+        #expect(LibassLibrary.decodeEmbeddedFont(Array("``!".utf8))?.count == 2)
+
+        // A font larger than what is left is refused before it is buffered whole.
+        let small = try LibassLibrary(fontBudget: 1_000)
+        _ = small.admittingEmbeddedFonts(of: Data(script.utf8))
+        #expect(small.loadedFontBytes == 0)
+
+        let viaRenderer = try LibassLibrary(fontBudget: 10_000)
+        _ = try ASSSubtitleRenderer(script: Data(script.utf8), library: viaRenderer, storageSize: nil)
+        #expect(viaRenderer.loadedFontBytes == 3_000)
 
         // Attachments first, then a header whose fonts no longer fit.
         let tight = try LibassLibrary(fontBudget: 4_000)

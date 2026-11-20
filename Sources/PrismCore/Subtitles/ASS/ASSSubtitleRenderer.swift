@@ -176,10 +176,12 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
     }
 
     convenience init(script: Data, library: LibassLibrary, storageSize: (width: Int, height: Int)?) throws {
+        // `[Fonts]` are admitted (or refused) on our side and never reach libass.
+        let script = library.admittingEmbeddedFonts(of: script)
         // A mutable, NUL-terminated copy: libass tokenizes the buffer in place.
         var bytes = [CChar](repeating: 0, count: script.count + 1)
         bytes.withUnsafeMutableBytes { _ = script.copyBytes(to: $0.bindMemory(to: UInt8.self), count: script.count) }
-        let track = library.admittingEmbeddedFonts(of: script) {
+        let track = library.withLock {
             bytes.withUnsafeMutableBufferPointer { ass_read_memory(library.handle, $0.baseAddress, script.count, nil) }
         }
         guard let track else { throw ASSRendererError.unreadableScript }
@@ -196,8 +198,9 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         guard let track = library.withLock({ ass_new_track(library.handle) }) else {
             throw ASSRendererError.allocationFailed
         }
-        if let header, !header.isEmpty {
-            library.admittingEmbeddedFonts(of: header) {
+        if let original = header, !original.isEmpty {
+            let header = library.admittingEmbeddedFonts(of: original)
+            library.withLock {
                 header.withUnsafeBytes { raw in
                     ass_process_codec_private(
                         track, raw.bindMemory(to: CChar.self).baseAddress, Int32(clamping: raw.count)
@@ -454,11 +457,11 @@ final class LibassLibrary: @unchecked Sendable {
         // libass logs every font lookup to stderr by default; a TV app has
         // no stderr reader, and a busy script logs per frame.
         ass_set_message_cb(handle, { _, _, _, _ in }, nil)
-        // `[Fonts]` sections inside a script (uuencoded) become memory fonts
-        // only through `admittingEmbeddedFonts`, which charges them to the
-        // budget first. Left on, libass extracted them behind the budget's
-        // back: a header could add its own font set beside 96 MB of
-        // attachments.
+        // `[Fonts]` sections inside a script (uuencoded) are decoded and
+        // admitted by `admittingEmbeddedFonts`, and taken out of the script
+        // before libass parses it. Left to libass, they were extracted behind
+        // the budget's back — and even with extraction off, libass buffers
+        // and decodes every embedded font before deciding to drop it.
         ass_set_extract_fonts(handle, 0)
         for font in fonts { addFont(name: font.name, bytes: font.data) }
     }
@@ -488,43 +491,108 @@ final class LibassLibrary: @unchecked Sendable {
     /// Font bytes libass holds for this library.
     var loadedFontBytes: Int { withLock { fontBytes } }
 
-    /// Run a libass parse of `script` (a whole file, or a track header) under
-    /// the lock, with `[Fonts]` extraction on only when the fonts the script
-    /// embeds fit what is left of the budget — then they are charged to it,
-    /// exactly like attachments. Over budget, the parse still runs and the
-    /// embedded fonts are skipped (system faces stand in). `body` must not
-    /// take the lock again.
-    func admittingEmbeddedFonts<T>(of script: Data, _ body: () throws -> T) rethrows -> T {
-        let embedded = Self.embeddedFontBytes(in: script)
-        return try withLock {
-            let admitted = embedded > 0 && embedded <= fontBudget - fontBytes
-            if admitted { fontBytes += embedded }
-            ass_set_extract_fonts(handle, admitted ? 1 : 0)
-            defer { ass_set_extract_fonts(handle, 0) }
-            return try body()
+    /// `script` (a whole file, or a track header) without its `[Fonts]`
+    /// sections, every font they embed decoded here and admitted like an
+    /// attachment — per-file cap, then what is left of the set budget.
+    ///
+    /// Done on our side because libass's own handling cannot be bounded: it
+    /// buffers and decodes each embedded font whether or not extraction is
+    /// on, and a size estimate from outside disagreed with its parser (a
+    /// data line may begin with `[`, which only ends the section when it
+    /// opens a section libass knows — review r3 P1.2). Here, a font over
+    /// its cap or the remaining budget stops being buffered the moment it
+    /// is, and libass never sees any font data at all.
+    func admittingEmbeddedFonts(of script: Data) -> Data {
+        let bytes = [UInt8](script)
+        var output: [UInt8] = []
+        output.reserveCapacity(bytes.count)
+        var inFonts = false
+        var name: String?
+        var encoded: [UInt8] = []
+        var refused = false
+        var encodedLimit = 0
+
+        func finishFont() {
+            if let name, !refused, let decoded = Self.decodeEmbeddedFont(encoded) {
+                addFont(name: name, bytes: Data(decoded))
+            }
+            name = nil
+            encoded = []
+            refused = false
         }
+
+        var lineStart = 0
+        while lineStart < bytes.count {
+            var lineEnd = lineStart
+            while lineEnd < bytes.count, bytes[lineEnd] != UInt8(ascii: "\n") { lineEnd += 1 }
+            let next = min(bytes.count, lineEnd + 1)
+            var first = lineStart
+            while first < lineEnd, bytes[first] == UInt8(ascii: " ") || bytes[first] == UInt8(ascii: "\t") { first += 1 }
+            var last = lineEnd
+            while last > first, bytes[last - 1] == UInt8(ascii: "\r") || bytes[last - 1] == UInt8(ascii: " ") { last -= 1 }
+            let content = bytes[first..<last]
+
+            if let section = Self.knownSection(content) {
+                if inFonts { finishFont() }
+                inFonts = section == "[fonts]"
+                if !inFonts { output += bytes[lineStart..<next] }
+            } else if inFonts {
+                if content.starts(with: Array("fontname:".utf8)) {
+                    finishFont()
+                    name = String(decoding: content.dropFirst(9), as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                    // Decoded is ¾ of encoded: stop buffering at the cap or
+                    // at what the budget still allows, whichever is lower.
+                    encodedLimit = (min(Self.maximumFontBytes, remainingFontBudget) / 3 + 1) * 4
+                } else if name != nil, !refused {
+                    if encoded.count + content.count > encodedLimit {
+                        refused = true
+                        encoded = []
+                    } else {
+                        encoded += content
+                    }
+                }
+            } else {
+                output += bytes[lineStart..<next]
+            }
+            lineStart = next
+        }
+        if inFonts { finishFont() }
+        return Data(output)
     }
 
-    /// Decoded size of a script's `[Fonts]` section: its data lines are
-    /// uuencoded, four characters for three bytes (`fontname:` lines name
-    /// the next font and carry none). One linear pass over the bytes; no
-    /// decode.
-    static func embeddedFontBytes(in script: Data) -> Int {
-        var inFonts = false
-        var encoded = 0
-        for rawLine in script.split(separator: UInt8(ascii: "\n")) {
-            var line = rawLine[...]
-            while let last = line.last, last == UInt8(ascii: "\r") || last == UInt8(ascii: " ") { line = line.dropLast() }
-            while let first = line.first, first == UInt8(ascii: " ") || first == UInt8(ascii: "\t") { line = line.dropFirst() }
-            guard let first = line.first else { continue }
-            if first == UInt8(ascii: "[") {
-                inFonts = line.count == 7 && String(decoding: line, as: UTF8.self).lowercased() == "[fonts]"
-                continue
+    private var remainingFontBudget: Int { withLock { max(0, fontBudget - fontBytes) } }
+
+    /// The sections libass's parser switches on (case-insensitive, by
+    /// prefix, as libass compares them), lowercased; `nil` for any other
+    /// line — including a `[`-led line of font data.
+    static func knownSection(_ line: ArraySlice<UInt8>) -> String? {
+        guard line.first == UInt8(ascii: "[") else { return nil }
+        let lowered = String(decoding: line.prefix(13), as: UTF8.self).lowercased()
+        return ["[script info]", "[v4 styles]", "[v4+ styles]", "[events]", "[fonts]"]
+            .first { lowered.hasPrefix($0) }
+    }
+
+    /// The `[Fonts]` encoding (the SSA spec's uuencode variant): each
+    /// character carries six bits as `char - 33`; four characters make three
+    /// bytes, a trailing group of two or three makes one or two. A trailing
+    /// single character cannot encode a byte, so such data is refused.
+    static func decodeEmbeddedFont(_ encoded: [UInt8]) -> [UInt8]? {
+        guard !encoded.isEmpty, encoded.count % 4 != 1 else { return nil }
+        var decoded: [UInt8] = []
+        decoded.reserveCapacity(encoded.count / 4 * 3 + 2)
+        var index = 0
+        while index < encoded.count {
+            let group = min(4, encoded.count - index)
+            var bits: UInt32 = 0
+            for offset in 0..<4 {
+                let sixBits = offset < group ? UInt32((encoded[index + offset] &- 33) & 63) : 0
+                bits = bits << 6 | sixBits
             }
-            guard inFonts else { continue }
-            if line.count >= 9, String(decoding: line.prefix(9), as: UTF8.self).lowercased() == "fontname:" { continue }
-            encoded += line.count
+            decoded.append(UInt8(bits >> 16 & 0xFF))
+            if group >= 3 { decoded.append(UInt8(bits >> 8 & 0xFF)) }
+            if group == 4 { decoded.append(UInt8(bits & 0xFF)) }
+            index += group
         }
-        return encoded / 4 * 3
+        return decoded
     }
 }
