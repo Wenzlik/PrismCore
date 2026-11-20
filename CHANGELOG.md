@@ -34,7 +34,8 @@ exactly the cues, renditions and playback it got before (issue #197).
   - **Fonts:** the container's attachments (MIME, extension or FFmpeg's
     TTF/OTF codec id) become libass memory fonts, loaded once per source into
     one `ASS_Library` shared by its tracks, within a 96 MB budget per source
-    (64 MB per file; fonts past it are skipped, first-declared first).
+    (64 MB per file; fonts past it are skipped, first-declared first). A
+    script's own `[Fonts]` section counts against the same budget.
     Everything else falls back to
     system faces through libass's CoreText provider (AUTODETECT; there is no
     fontconfig on Apple platforms), default family Helvetica Neue — present
@@ -43,7 +44,15 @@ exactly the cues, renditions and playback it got before (issue #197).
   - **Seeks:** every event stays in the libass track and re-demuxed events
     are dropped by their Matroska ReadOrder, so a seek in either direction
     needs no flush or re-feed — the same trade as `SubtitleCueHistory
-    .complete` (events are text; a film's worth is small).
+    .complete` (events are text; a film's worth is small). A jump into a
+    region not yet read would miss a sign that started before the target,
+    so under `.libass` a remux re-anchor reads ahead of its anchor from the
+    earliest plan entry within 8 MB of source (at most 30 s) and keeps the
+    subtitle packets of that stretch; events that began earlier are still
+    missed (libavformat does not expose Matroska's CueDuration). The
+    software path has no such preroll yet.
+  - `invalidate()` forces the next frame after a host dropped its overlay;
+    an empty frame (a clear) does the same on its own.
   - **Cost:** nothing at all under `.text`. Under `.libass` the renderer
     (CoreText set-up) is created on the first frame, an idle or static
     stretch costs one `ass_render_frame` and no compositing, layers are
@@ -61,7 +70,9 @@ exactly the cues, renditions and playback it got before (issue #197).
 - `SubtitleTextParser` — the same parsers for sources PrismCore does not
   demux (server sidecars, another engine's cues): whole SRT / WebVTT / ASS
   documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`.
-  The model is `Codable` (`TextCuePlacement` too, validated on decode).
+  The model is `Codable` and `Hashable` (`TextCuePlacement` too, validated
+  on decode). Two same-text cues that differ only in style or position are
+  no longer merged by the remux cue tap's dedup.
 - `SubtitleTrackInfo.isASS`.
 - `addExternalSubtitle` now reads `.ass` / `.ssa` files (their `Dialogue:`
   lines) into a WebVTT rendition; before, they produced no rendition.
