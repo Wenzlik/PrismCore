@@ -141,6 +141,16 @@ struct InlineStyle: Equatable {
 /// which is what a viewer would rather see than a silently missing line.
 enum StyledTextParser {
 
+    /// Bounds a real cue never comes near — a few nested spans, a few
+    /// classes, a few dozen style changes — and that keep a hostile one
+    /// linear: every open tag saves a style and every style change keeps
+    /// one, so unbounded nesting of classed spans grew memory with the
+    /// square of the depth on the demux thread (review r3 P1.3). Past a
+    /// bound the markup still parses; it just stops adding style.
+    static let maximumTagDepth = 32
+    static let maximumClasses = 16
+    static let maximumStyles = 512
+
     static func parse(
         _ raw: String, base: InlineStyle = InlineStyle(), header: ASSScriptHeader? = nil,
         playResolution: TextSubtitleConverter.PlayResolution? = nil,
@@ -151,13 +161,14 @@ enum StyledTextParser {
         var styles: [InlineStyle] = [base]
         var style = base
         var tagStack: [(name: String, saved: InlineStyle)] = []
+        var ignoredTagDepth = 0
         var alignment: Int?
         var anchor: TextCuePlacement.Anchor?
         var drawing = false
 
         func emit(_ character: Character) {
             guard !drawing else { return }
-            if styles[styles.count - 1] != style { styles.append(style) }
+            if styles[styles.count - 1] != style, styles.count < maximumStyles { styles.append(style) }
             chars.append((character, styles.count - 1))
         }
 
@@ -204,7 +215,8 @@ enum StyledTextParser {
                 // copies cover disjoint spans and stay linear in total.
                 let close = nextGreater[index]
                 guard close < text.count, nextLess[index + 1] > close,
-                      applyTag(String(text[(index + 1)..<close]), to: &style, stack: &tagStack)
+                      applyTag(String(text[(index + 1)..<close]), to: &style, stack: &tagStack,
+                               ignoredDepth: &ignoredTagDepth)
                 else { emit(character); index += 1; continue }
                 index = close + 1
             case "&":
@@ -281,7 +293,8 @@ enum StyledTextParser {
     /// Applies one `<…>` tag; `false` when it is not a tag we recognize, so
     /// the caller keeps the `<` as text (`I <3 you` must survive).
     private static func applyTag(_ inner: String, to style: inout InlineStyle,
-                                 stack: inout [(name: String, saved: InlineStyle)]) -> Bool {
+                                 stack: inout [(name: String, saved: InlineStyle)],
+                                 ignoredDepth: inout Int) -> Bool {
         guard !inner.isEmpty, !inner.contains("<") else { return false }
         if inner.first?.isNumber == true {
             // A WebVTT karaoke timestamp (`<00:00:01.500>`): invisible.
@@ -292,14 +305,37 @@ enum StyledTextParser {
         let name = String(body.prefix { $0.isLetter }).lowercased()
         guard ["b", "i", "u", "s", "font", "c", "v", "lang", "ruby", "rt", "span"].contains(name) else { return false }
         if closing {
-            if let match = stack.lastIndex(where: { $0.name == name }) {
+            // The innermost tags are the ones past the depth bound, so they
+            // close first; an outer span keeps its own closing tag.
+            if ignoredDepth > 0 {
+                ignoredDepth -= 1
+            } else if let match = stack.lastIndex(where: { $0.name == name }) {
                 style = stack[match].saved
                 stack.removeSubrange(match...)
             }
             return true
         }
+        guard stack.count < maximumTagDepth else {
+            ignoredDepth += 1
+            return true
+        }
         stack.append((name, style))
         let rest = body.dropFirst(name.count)
+        if name != "font" {
+            // Every WebVTT tag may carry classes — `<i.yellow>`, `<c.a.b>`,
+            // `<v.loud Esme>` — not only `c` and `v` (review r3 P2.7). The
+            // classes go first; the tag's own meaning applies on top.
+            let classPart = rest.prefix { !$0.isWhitespace }
+            let classes = classPart.split(separator: ".").map(String.init)
+            if !classes.isEmpty {
+                style.classes = Array((style.classes + classes).prefix(maximumClasses))
+                if let color = classes.lazy.compactMap({ webVTTColorClasses[$0] }).last { style.color = color }
+            }
+            if name == "v" {
+                let voice = rest.dropFirst(classPart.count).trimmingCharacters(in: .whitespaces)
+                if !voice.isEmpty { style.voice = voice }
+            }
+        }
         switch name {
         case "b": style.bold = true
         case "i": style.italic = true
@@ -308,16 +344,6 @@ enum StyledTextParser {
         case "font":
             if let value = attribute("color", in: rest), let color = htmlColor(value) { style.color = color }
             if let face = attribute("face", in: rest), !face.isEmpty { style.fontName = face }
-        case "c", "v":
-            // `<c.yellow.bg_black>`, `<v.loud Esme>`: classes, then (for v) the voice.
-            let classPart = rest.prefix { !$0.isWhitespace }
-            let classes = classPart.split(separator: ".").map(String.init)
-            style.classes += classes
-            if let color = classes.lazy.compactMap({ webVTTColorClasses[$0] }).last { style.color = color }
-            if name == "v" {
-                let voice = rest.dropFirst(classPart.count).trimmingCharacters(in: .whitespaces)
-                if !voice.isEmpty { style.voice = voice }
-            }
         default: break
         }
         return true

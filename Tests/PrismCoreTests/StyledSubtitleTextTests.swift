@@ -124,6 +124,40 @@ struct StyledSubtitleTextTests {
         #expect(StyledTextParser.parse(String(repeating: " ", count: length) + "x").plainText == "x")
     }
 
+    /// r3 P1.3: thousands of nested classed spans with one visible word —
+    /// each saved style used to copy every class before it (quadratic
+    /// memory). Bounded depth and classes keep it linear and the word intact.
+    @Test func deeplyNestedClassedSpansStayBounded() throws {
+        let depth = 20_000
+        let line = String(repeating: "<c.a.b.c.d>", count: depth) + "word" + String(repeating: "</c>", count: depth)
+            + " <i>after</i>"
+        let clock = ContinuousClock()
+        let started = clock.now
+        let parsed = StyledTextParser.parse(line)
+        #expect(clock.now - started < .seconds(3))
+        #expect(parsed.plainText == "word after")
+        let word = try #require(parsed.runs.first)
+        #expect(word.classes.count == StyledTextParser.maximumClasses)
+        // The spans past the bound closed themselves, so the outer ones did
+        // too: the trailing italic run carries no leftover classes.
+        #expect(parsed.runs.last == StyledTextRun(text: "after", isItalic: true))
+        // Style changes past the bound stop adding runs, not text.
+        let flicker = (0..<5_000).map { "<b>\($0 % 10)</b><i>.</i>" }.joined()
+        let many = StyledTextParser.parse(flicker)
+        #expect(many.runs.count <= StyledTextParser.maximumStyles * 2)
+        #expect(many.plainText.count == 10_000)
+    }
+
+    /// r3 P2.7: classes on any WebVTT tag, not only `c` and `v`.
+    @Test func classesOnEmphasisTagsAreKept() throws {
+        let text = try #require(styled("<i.yellow>Ahoj</i> <b.loud.red>pozor</b> <u>u</u>", .webvtt))
+        let ahoj = try #require(text.runs.first { $0.text == "Ahoj" })
+        #expect(ahoj.isItalic && ahoj.classes == ["yellow"] && ahoj.color == SubtitleColor(red: 255, green: 255, blue: 0))
+        let pozor = try #require(text.runs.first { $0.text == "pozor" })
+        #expect(pozor.isBold && pozor.classes == ["loud", "red"] && pozor.color == red)
+        #expect(text.runs.last == StyledTextRun(text: "u", isUnderlined: true))
+    }
+
     /// P2.6: two events of one track at one time with the same word but
     /// different styling both reach the host; the same event re-demuxed
     /// (identical styling) is still deduplicated.
