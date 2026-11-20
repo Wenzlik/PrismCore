@@ -36,6 +36,10 @@ struct StyledSubtitleTextTests {
         #expect(text.runs[0].outlineColor == SubtitleColor(red: 0, green: 0, blue: 255))
         let bold = try #require(text.runs.first { $0.text.contains("bold") })
         #expect(bold.isBold && bold.fontName == "Comic" && bold.color == nil)
+        // A `\t` animation's target is not the starting colour.
+        #expect(styled("{\\c&H0000FF&\\t(0,500,\\c&HFF0000&\\fscx120)\\i1}x")?.runs.first
+                == StyledTextRun(text: "x", isItalic: true, color: red))
+        #expect(styled("<font bgcolor=\"#00ff00\" color=\"#ff0000\">x</font>")?.runs.first?.color == red)
         // `\bord`, `\blur`, `\shad` and `\clip` are not emphasis or colour.
         #expect(styled("{\\bord2\\blur3\\shad1\\clip(0,0,1,1)}x", .subrip)?.runs == [StyledTextRun(text: "x")])
     }

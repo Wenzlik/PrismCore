@@ -305,7 +305,17 @@ enum StyledTextParser {
     }
 
     private static func attribute(_ key: String, in text: Substring) -> String? {
-        guard let range = text.range(of: key + "=", options: .caseInsensitive) else { return nil }
+        // Whole attribute names only: `bgcolor=` is not `color=`.
+        var search = text[...]
+        var found: Range<Substring.Index>?
+        while let range = search.range(of: key + "=", options: .caseInsensitive) {
+            if range.lowerBound == text.startIndex || !text[text.index(before: range.lowerBound)].isLetter {
+                found = range
+                break
+            }
+            search = text[range.upperBound...]
+        }
+        guard let range = found else { return nil }
         var value = text[range.upperBound...]
         if let quote = value.first, quote == "\"" || quote == "'" {
             value = value.dropFirst()
@@ -351,8 +361,17 @@ enum StyledTextParser {
         alignment: inout Int?, anchor: inout TextCuePlacement.Anchor?, drawing: inout Bool,
         resolution: TextSubtitleConverter.PlayResolution?
     ) {
+        var transformDepth = 0
         for rawTag in block.split(separator: "\\", omittingEmptySubsequences: true) {
             let tag = rawTag.trimmingCharacters(in: .whitespaces)
+            // `\t(…,\c&H…&)` animates TOWARD its tags; reading them as
+            // immediate would paint a fade's end colour from its first frame.
+            // A text reading cannot animate, so it keeps the start state.
+            if transformDepth > 0 || tag.hasPrefix("t(") {
+                transformDepth += tag.filter { $0 == "(" }.count - tag.filter { $0 == ")" }.count
+                transformDepth = max(0, transformDepth)
+                continue
+            }
             // Longest names first: `\bord` must not read as `\b`, `\shad` as `\s`.
             if tag.hasPrefix("pos(") {
                 guard let resolution, resolution.width > 0, resolution.height > 0,
