@@ -100,6 +100,21 @@ public struct StyledSubtitleText: Sendable, Hashable, Codable {
     }
 }
 
+extension StyledSubtitleText {
+    /// What holding this costs, for the cue stores' byte bounds: every
+    /// stored string (text, font name, voice, classes) plus each run's and
+    /// each class's fixed size. Charging only the visible words let a short
+    /// line with a long `\fn` name — or many tiny runs — through a 1 MiB
+    /// bound almost for free (review r5 P1.3).
+    var footprint: Int {
+        runs.reduce(MemoryLayout<StyledSubtitleText>.stride) { total, run in
+            total + MemoryLayout<StyledTextRun>.stride + run.text.utf8.count
+                + (run.fontName?.utf8.count ?? 0) + (run.voice?.utf8.count ?? 0)
+                + run.classes.reduce(0) { $0 + MemoryLayout<String>.stride + $1.utf8.count }
+        }
+    }
+}
+
 extension StyledTextRun {
     func sameStyle(as other: StyledTextRun) -> Bool {
         var a = self

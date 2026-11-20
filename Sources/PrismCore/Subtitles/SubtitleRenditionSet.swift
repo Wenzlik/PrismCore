@@ -856,10 +856,11 @@ final class SubtitleRenditionSet: @unchecked Sendable {
 
     /// What a cue costs the history: its text plus its key, both as UTF-8 —
     /// the key holds a second copy of the text, and leaving it out would let
-    /// the real footprint run to twice the bound. The styled runs are a third
-    /// copy of the words and are charged as one.
+    /// the real footprint run to twice the bound. The styled runs are charged
+    /// in full — fonts, voices, classes and per-run overhead, not only their
+    /// words (`StyledSubtitleText.footprint`, review r5 P1.3).
     private static func historyBytes(key: String, cue: SubtitleCue) -> Int {
-        key.utf8.count + cue.text.utf8.count + (cue.styled?.plainText.utf8.count ?? 0)
+        key.utf8.count + cue.text.utf8.count + (cue.styled?.footprint ?? 0)
     }
 
     /// Admit one deduplicated cue to the history, evicting the oldest under

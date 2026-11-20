@@ -82,9 +82,9 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
         }
     }
 
-    /// The styled runs repeat the words, so they count against the bound too.
-    private static func bytes(_ cue: TimedTextCue) -> Int {
-        cue.text.utf8.count + (cue.styled?.plainText.utf8.count ?? 0)
+    /// The styled runs count against the bound in full (`footprint`).
+    static func bytes(_ cue: TimedTextCue) -> Int {
+        cue.text.utf8.count + (cue.styled?.footprint ?? 0)
     }
 
     private func prune(at time: Double) {
