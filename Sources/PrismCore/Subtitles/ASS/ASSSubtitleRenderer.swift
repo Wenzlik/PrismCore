@@ -1,0 +1,621 @@
+import Foundation
+import CoreGraphics
+import Libass
+
+/// How a session (or the software pipeline) treats ASS/SSA tracks.
+public enum ASSRenderingMode: Sendable, Equatable {
+    /// Today's behaviour, and the default: ASS events become text cues
+    /// (`TimedTextCue.text`, plus `styled` runs and placement) that the host
+    /// draws in its own style. No libass work at all.
+    case text
+    /// Additionally keep every ASS/SSA track in a libass renderer, with the
+    /// container's font attachments loaded, so the host can draw the file's
+    /// own typesetting — `assRenderer(streamIndex:)`. Text cues keep flowing
+    /// (the WebVTT renditions for PiP/AirPlay need them anyway).
+    case libass
+}
+
+/// A font handed to libass from memory: a Matroska attachment, a `[Fonts]`
+/// section the host extracted, a bundled typeface.
+public struct SubtitleFont: Sendable, Equatable {
+    /// The attachment's file name; libass only uses it in log messages —
+    /// faces are matched by the family names inside the font data.
+    public var name: String
+    public var data: Data
+
+    public init(name: String, data: Data) {
+        self.name = name
+        self.data = data
+    }
+}
+
+/// Edge insets in canvas pixels.
+public struct SubtitleInsets: Sendable, Equatable {
+    public var top: Double
+    public var left: Double
+    public var bottom: Double
+    public var right: Double
+
+    public init(top: Double = 0, left: Double = 0, bottom: Double = 0, right: Double = 0) {
+        self.top = top
+        self.left = left
+        self.bottom = bottom
+        self.right = right
+    }
+
+    public static let zero = SubtitleInsets()
+}
+
+/// The surface a libass frame is rendered for — the host's overlay, in
+/// **pixels** (points × scale), origin top-left.
+public struct SubtitleCanvas: Sendable, Equatable {
+    /// Overlay size in pixels. Clamped to `ASSSubtitleRenderer.maximumCanvasSide`.
+    public var width: Int
+    public var height: Int
+    /// Where the picture is drawn inside the overlay (letterbox / pillarbox
+    /// bands outside it). `nil` = the whole canvas.
+    public var videoRect: CGRect?
+    /// Title-safe / control-safe area. ASS coordinates map onto the part of
+    /// the picture inside it, so a full-screen picture on a TV keeps its
+    /// typesetting off the overscanned edge — the whole script is scaled in
+    /// proportionally, signs included, rather than lines being shoved about.
+    public var safeAreaInsets: SubtitleInsets
+    /// Let unpositioned dialogue use the letterbox bands
+    /// (`ass_set_use_margins`). Off by default: the file's layout wins.
+    public var placesDialogueInBlackBars: Bool
+
+    public init(
+        width: Int, height: Int, videoRect: CGRect? = nil,
+        safeAreaInsets: SubtitleInsets = .zero, placesDialogueInBlackBars: Bool = false
+    ) {
+        self.width = width
+        self.height = height
+        self.videoRect = videoRect
+        self.safeAreaInsets = safeAreaInsets
+        self.placesDialogueInBlackBars = placesDialogueInBlackBars
+    }
+}
+
+/// One composited region of a rendered frame: premultiplied BGRA
+/// (`CGImageAlphaInfo.premultipliedFirst`, 32-bit little-endian, sRGB), to be
+/// drawn at `frame` (canvas pixels, origin top-left) — e.g. as a
+/// `CALayer.contents` at that frame.
+///
+/// The same shape a decoded bitmap track (PGS/VobSub) will take, so a host
+/// overlay has one image path for both.
+public struct SubtitleImage: @unchecked Sendable {
+    // Safety: CGImage is immutable once created.
+    public let image: CGImage
+    public let frame: CGRect
+}
+
+/// Everything visible at one instant.
+public struct ASSFrame: @unchecked Sendable {
+    // Safety: only immutable values (see SubtitleImage).
+    /// The time asked for (cue timeline, seconds).
+    public let time: Double
+    public let canvas: SubtitleCanvas
+    /// Back to front. Empty = nothing on screen (clear the overlay).
+    public let images: [SubtitleImage]
+}
+
+public enum ASSFrameUpdate: @unchecked Sendable {
+    // Safety: see ASSFrame.
+    /// Identical to the previous frame for this canvas — keep showing it.
+    /// libass's own change detection; nothing was composited.
+    case unchanged
+    case frame(ASSFrame)
+}
+
+/// How much of the file's styling libass may replace.
+public enum ASSStyleOverride: Sendable, Equatable {
+    /// The file's styles untouched — `ASS_OVERRIDE_DEFAULT`. "File styles ON".
+    case none
+    /// Scale every font by `scale` (the viewer's size setting) and, when
+    /// given, replace the font family — styles only; inline `\fs`/`\fn`
+    /// overrides in the events still apply, as in every libass player.
+    case font(name: String? = nil, scale: Double = 1)
+}
+
+/// libass for one ASS/SSA track: events in, composited bitmaps out.
+///
+/// ## Timeline
+/// `frame(at:)` takes a time on the **same clock as `TimedTextCue`** for the
+/// path that produced the renderer — the remux session's played timeline
+/// (`AVPlayerItem.currentTime()`), the software pipeline's source axis — and
+/// does NOT apply `setSubtitleDelaySeconds`: the host passes
+/// `playerTime - subtitleDelay`. That keeps one delay knob, the host's, for
+/// every subtitle type and engine.
+///
+/// ## Seeks
+/// Every event ever fed stays in the libass track (text, small), and
+/// `ass_process_chunk` drops a re-fed Matroska event by its ReadOrder. So a
+/// seek needs nothing at all: the demux re-reads a region, duplicates are
+/// ignored, and `ass_render_frame` picks the events covering whatever time
+/// is asked for — backwards included. This mirrors `SubtitleCueHistory
+/// .complete`; a feed with no ReadOrder (`appendEvent` from a host) can call
+/// `removeAllEvents()` on its own seek.
+///
+/// ## Threading
+/// libass is not thread-safe, and renderers of one session share one
+/// `ASS_Library` (so a 40 MB font set is loaded once, not per track). Every
+/// libass call goes through that library's lock: the producer's feed and
+/// the host's render serialize there. A render is milliseconds; call
+/// `frame(at:canvas:)` from any one thread — the main thread or a display
+/// link is fine — at most once per displayed frame.
+// Safety: all mutable state and every libass handle is touched only under `library.lock`.
+public final class ASSSubtitleRenderer: @unchecked Sendable {
+
+    /// Canvas sides above this are refused (a 4K overlay is the ceiling a
+    /// host has a use for; past it a composite is pure memory risk).
+    public static let maximumCanvasSide = 4_096
+
+    /// Whether libass is linked into this build — always true while MPVKit
+    /// ships it; kept so a host can gate its "file styles" UI on a fact.
+    public static var isAvailable: Bool { ass_library_version() > 0 }
+
+    let library: LibassLibrary
+    private let track: UnsafeMutablePointer<ASS_Track>
+    private var renderer: OpaquePointer?
+    private var configuredCanvas: SubtitleCanvas?
+    private var appliedOverride: ASSStyleOverride?
+    private var styleOverride: ASSStyleOverride = .none
+    private var hasFrame = false
+    /// Source size of the video stream (anamorphic storage), for libass's
+    /// pixel aspect and blur scale. `nil` = assume square pixels.
+    private let storageSize: (width: Int, height: Int)?
+    /// Seconds added to every `frame(at:)` time: the remux session's
+    /// presentation origin, since events are fed on the source axis.
+    private var timelineOrigin: Double = 0
+    private var compositor = ASSCompositor()
+
+    /// An external `.ass`/`.ssa` file, whole (`ass_read_memory`). `[Fonts]`
+    /// embedded in the script are extracted too.
+    public convenience init(script: Data, fonts: [SubtitleFont] = [], videoSize: CGSize? = nil) throws {
+        try self.init(script: script, library: LibassLibrary(fonts: fonts), storageSize: Self.storage(videoSize))
+    }
+
+    convenience init(script: Data, library: LibassLibrary, storageSize: (width: Int, height: Int)?) throws {
+        // `[Fonts]` are admitted (or refused) on our side and never reach libass.
+        let script = library.admittingEmbeddedFonts(of: script)
+        // A mutable, NUL-terminated copy: libass tokenizes the buffer in place.
+        var bytes = [CChar](repeating: 0, count: script.count + 1)
+        bytes.withUnsafeMutableBytes { _ = script.copyBytes(to: $0.bindMemory(to: UInt8.self), count: script.count) }
+        let track = library.withLock {
+            bytes.withUnsafeMutableBufferPointer { ass_read_memory(library.handle, $0.baseAddress, script.count, nil) }
+        }
+        guard let track else { throw ASSRendererError.unreadableScript }
+        self.init(library: library, track: track, storageSize: storageSize)
+    }
+
+    /// An event stream: the script header (a Matroska ASS track's
+    /// CodecPrivate) now, events later through `appendEvent`.
+    public convenience init(header: Data, fonts: [SubtitleFont] = [], videoSize: CGSize? = nil) throws {
+        try self.init(header: header, library: LibassLibrary(fonts: fonts), storageSize: Self.storage(videoSize))
+    }
+
+    convenience init(header: Data?, library: LibassLibrary, storageSize: (width: Int, height: Int)?) throws {
+        guard let track = library.withLock({ ass_new_track(library.handle) }) else {
+            throw ASSRendererError.allocationFailed
+        }
+        func process(_ data: Data) {
+            library.withLock {
+                data.withUnsafeBytes { raw in
+                    ass_process_codec_private(
+                        track, raw.bindMemory(to: CChar.self).baseAddress, Int32(clamping: raw.count)
+                    )
+                }
+            }
+        }
+        if let header, !header.isEmpty { process(library.admittingEmbeddedFonts(of: header)) }
+        // No usable header (a Matroska track without CodecPrivate, or one
+        // with no `[Events]` Format) leaves libass without an event format:
+        // it drops every chunk and the renderer stays empty for good while
+        // the host believes it works (review r5 P2.7). libass's own default
+        // style stands in for the missing styles.
+        if library.withLock({ track.pointee.event_format == nil }) { process(Self.minimalHeader) }
+        self.init(library: library, track: track, storageSize: storageSize)
+    }
+
+    static let minimalHeader = Data("""
+        [Script Info]
+        ScriptType: v4.00+
+
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+
+        """.utf8)
+
+    private init(library: LibassLibrary, track: UnsafeMutablePointer<ASS_Track>, storageSize: (width: Int, height: Int)?) {
+        self.library = library
+        self.track = track
+        self.storageSize = storageSize
+    }
+
+    deinit {
+        library.withLock {
+            if let renderer { ass_renderer_done(renderer) }
+            ass_free_track(track)
+        }
+    }
+
+    /// Widest video a storage size may claim. Real streams stop at 8K;
+    /// past this a host value is a slip, and it would trap converting to
+    /// libass's `int` (3 000 000 000 did, on the first frame).
+    static let maximumStorageSide = 16_384
+
+    private static func storage(_ size: CGSize?) -> (width: Int, height: Int)? {
+        guard let size, size.width.isFinite, size.height.isFinite,
+              (1...Double(maximumStorageSide)).contains(size.width),
+              (1...Double(maximumStorageSide)).contains(size.height) else { return nil }
+        return (Int(size.width), Int(size.height))
+    }
+
+    // MARK: Feeding
+
+    /// One Matroska-style event (`ReadOrder,Layer,Style,Name,MarginL,
+    /// MarginR,MarginV,Effect,Text`) at `start` for `duration` seconds, on
+    /// the source axis. A ReadOrder already seen is ignored — that is the
+    /// seek story (see the type doc).
+    public func appendEvent(_ chunk: Data, start: Double, duration: Double) {
+        guard start.isFinite, duration.isFinite, duration > 0, !chunk.isEmpty,
+              abs(start) < 1e9, duration < 1e9 else { return }
+        let startMS = Int64((start * 1000).rounded())
+        let durationMS = Int64((duration * 1000).rounded())
+        library.withLock {
+            chunk.withUnsafeBytes { raw in
+                ass_process_chunk(track, raw.bindMemory(to: CChar.self).baseAddress,
+                                  Int32(clamping: raw.count), startMS, durationMS)
+            }
+        }
+    }
+
+    /// Drop every event (styles stay) — for a host-fed stream whose events
+    /// carry no usable ReadOrder and which re-feeds after a seek.
+    public func removeAllEvents() {
+        library.withLock {
+            ass_flush_events(track)
+            hasFrame = false
+        }
+    }
+
+    /// Events held right now.
+    public var eventCount: Int { library.withLock { Int(track.pointee.n_events) } }
+
+    /// Make the next `frame(at:canvas:)` return a `.frame` even if nothing
+    /// changed — for a host that dropped what it showed (an overlay torn
+    /// down and rebuilt, a switch to another track and back while paused)
+    /// and needs the picture again rather than `.unchanged`.
+    public func invalidate() {
+        library.withLock { hasFrame = false }
+    }
+
+    /// See `ASSStyleOverride`; applies from the next `frame(at:canvas:)`.
+    public func setStyleOverride(_ override: ASSStyleOverride) {
+        library.withLock { styleOverride = override }
+    }
+
+    func setTimelineOrigin(_ seconds: Double) {
+        library.withLock {
+            timelineOrigin = seconds.isFinite ? seconds : 0
+            hasFrame = false
+        }
+    }
+
+    // MARK: Rendering
+
+    /// The subtitle picture at `time` (cue timeline, delay already applied
+    /// by the host — see the type doc) for `canvas`.
+    ///
+    /// `.unchanged` when nothing moved since the previous call with the same
+    /// canvas and override: libass's own change detection, so an idle
+    /// stretch costs one `ass_render_frame` call and no compositing. A frame
+    /// with no images means "clear". A canvas outside
+    /// `1…maximumCanvasSide` or a non-finite time yields an empty frame.
+    public func frame(at time: Double, canvas: SubtitleCanvas) -> ASSFrameUpdate {
+        guard time.isFinite, abs(time) < 1e9,
+              (1...Self.maximumCanvasSide).contains(canvas.width),
+              (1...Self.maximumCanvasSide).contains(canvas.height)
+        else { return clearedLocking(time: time, canvas: canvas) }
+        return library.withLock {
+            guard let renderer = rendererLocked() else {
+                hasFrame = false
+                return .frame(ASSFrame(time: time, canvas: canvas, images: []))
+            }
+            var forced = !hasFrame
+            if configuredCanvas != canvas {
+                configure(renderer, for: canvas)
+                configuredCanvas = canvas
+                forced = true
+            }
+            if appliedOverride != styleOverride {
+                apply(styleOverride, to: renderer)
+                appliedOverride = styleOverride
+                forced = true
+            }
+            var changed: Int32 = 0
+            let now = Int64(((time + timelineOrigin) * 1000).rounded())
+            let images = ass_render_frame(renderer, track, now, &changed)
+            guard changed != 0 || forced else { return .unchanged }
+            hasFrame = true
+            return .frame(ASSFrame(time: time, canvas: canvas,
+                                   images: compositor.composite(images, canvasWidth: canvas.width, canvasHeight: canvas.height)))
+        }
+    }
+
+    /// An empty frame tells the host to clear, so whatever libass last
+    /// rendered is no longer on screen: the next valid call must draw again.
+    /// Without this, valid canvas → zero width mid-layout → the same canvas
+    /// returned `.unchanged` and the line stayed hidden.
+    private func clearedLocking(time: Double, canvas: SubtitleCanvas) -> ASSFrameUpdate {
+        library.withLock { hasFrame = false }
+        return .frame(ASSFrame(time: time, canvas: canvas, images: []))
+    }
+
+    /// Built on first render, not with the track: the font provider costs a
+    /// CoreText set-up, and a track nobody draws should cost only its text.
+    private func rendererLocked() -> OpaquePointer? {
+        if let renderer { return renderer }
+        guard let created = ass_renderer_init(library.handle) else { return nil }
+        // AUTODETECT resolves to CoreText on every Apple slice MPVKit ships
+        // (no fontconfig there); a missing glyph — CJK in a Latin style —
+        // falls back through CoreText's cascade list. The default family
+        // must exist on tvOS too, which rules Arial out.
+        ass_set_fonts(created, nil, LibassLibrary.defaultFamily, Int32(ASS_FONTPROVIDER_AUTODETECT.rawValue), nil, 1)
+        // Glyph count and a bitmap cache in MB: modest, an Apple TV is the
+        // constrained device and the cache refills in a frame or two.
+        ass_set_cache_limits(created, 1_000, 32)
+        ass_set_hinting(created, ASS_HINTING_NONE)
+        renderer = created
+        return created
+    }
+
+    /// A pixel value as libass's `int`, clamped to a range no real layout
+    /// reaches: a host rect far off the canvas must not trap the conversion.
+    private static func px(_ value: Double) -> Int32 {
+        guard value.isFinite else { return 0 }
+        return Int32(min(1e6, max(-1e6, value)).rounded())
+    }
+
+    private func configure(_ renderer: OpaquePointer, for canvas: SubtitleCanvas) {
+        let bounds = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+        let video = (canvas.videoRect ?? bounds).standardized
+        // A picture rect libass can be told about: finite, at least a pixel,
+        // and touching the canvas. Anything else is a host slip; the whole
+        // canvas is the honest fallback.
+        let usable = [video.minX, video.minY, video.width, video.height].allSatisfy(\.isFinite)
+            && video.width >= 1 && video.height >= 1 && video.intersects(bounds)
+            && video.width <= 64 * bounds.width && video.height <= 64 * bounds.height
+        let video0 = usable ? video : bounds
+        let insets = canvas.safeAreaInsets
+        let safe = CGRect(x: insets.left, y: insets.top,
+                          width: Double(canvas.width) - insets.left - insets.right,
+                          height: Double(canvas.height) - insets.top - insets.bottom)
+        var content = video0.intersection(safe)
+        if content.isNull || content.width < 1 || content.height < 1 { content = video0 }
+        ass_set_frame_size(renderer, Int32(canvas.width), Int32(canvas.height))
+        ass_set_margins(renderer,
+                        Self.px(content.minY), Self.px(Double(canvas.height) - content.maxY),
+                        Self.px(content.minX), Self.px(Double(canvas.width) - content.maxX))
+        ass_set_use_margins(renderer, canvas.placesDialogueInBlackBars ? 1 : 0)
+        if let storageSize {
+            ass_set_storage_size(renderer, Int32(storageSize.width), Int32(storageSize.height))
+            // From the picture as displayed, not the safe-area content rect:
+            // the inset may not keep the aspect exactly, and libass's own
+            // default would read that sliver as anamorphic squeeze.
+            let par = (video0.width / video0.height) / (Double(storageSize.width) / Double(storageSize.height))
+            ass_set_pixel_aspect(renderer, par.isFinite && par > 0 ? par : 0)
+        } else {
+            ass_set_storage_size(renderer, Self.px(content.width), Self.px(content.height))
+            ass_set_pixel_aspect(renderer, 1)
+        }
+    }
+
+    private func apply(_ override: ASSStyleOverride, to renderer: OpaquePointer) {
+        switch override {
+        case .none:
+            ass_set_selective_style_override_enabled(renderer, Int32(ASS_OVERRIDE_DEFAULT.rawValue))
+            ass_set_font_scale(renderer, 1)
+        case .font(let name, let scale):
+            let scale = scale.isFinite ? min(4, max(0.25, scale)) : 1
+            if let name, !name.isEmpty {
+                // The override style is copied by libass at this call, so a
+                // temporary C string is enough.
+                var style = ASS_Style()
+                name.withCString { pointer in
+                    style.FontName = UnsafeMutablePointer(mutating: pointer)
+                    ass_set_selective_style_override(renderer, &style)
+                }
+                ass_set_selective_style_override_enabled(
+                    renderer, Int32(ASS_OVERRIDE_BIT_FONT_NAME.rawValue | ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE.rawValue)
+                )
+            } else {
+                ass_set_selective_style_override_enabled(
+                    renderer, Int32(ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE.rawValue)
+                )
+            }
+            ass_set_font_scale(renderer, scale)
+        }
+    }
+}
+
+enum ASSRendererError: Error, Equatable {
+    case allocationFailed
+    case unreadableScript
+}
+
+/// One `ASS_Library` and the lock every libass call under it takes.
+// Safety: `handle` is used only inside `withLock`.
+final class LibassLibrary: @unchecked Sendable {
+    static let defaultFamily = "Helvetica Neue"
+    /// Past this one file is a broken or hostile attachment, not a typeface
+    /// (a full CJK collection is ~30 MB).
+    static let maximumFontBytes = 64 << 20
+    /// What all fonts of one library may hold together. libass keeps its own
+    /// copy of every font, and the cap was per file only: eight 40 MB
+    /// attachments loaded 320 MB beside the decoder — jetsam on an Apple TV.
+    /// Fonts past the budget are skipped (system faces stand in), in
+    /// container order, so the first-declared — usually the dialogue face —
+    /// win. A heavy anime release is 20–60 MB.
+    static let maximumFontSetBytes = 96 << 20
+
+    let handle: OpaquePointer
+    private let lock = NSLock()
+    private let fontBudget: Int
+    /// Bytes handed to libass so far. Under `lock`.
+    private var fontBytes = 0
+
+    init(fonts: [SubtitleFont] = [], fontBudget: Int = LibassLibrary.maximumFontSetBytes) throws {
+        guard let handle = ass_library_init() else { throw ASSRendererError.allocationFailed }
+        self.handle = handle
+        self.fontBudget = fontBudget
+        // libass logs every font lookup to stderr by default; a TV app has
+        // no stderr reader, and a busy script logs per frame.
+        ass_set_message_cb(handle, { _, _, _, _ in }, nil)
+        // `[Fonts]` sections inside a script (uuencoded) are decoded and
+        // admitted by `admittingEmbeddedFonts`, and taken out of the script
+        // before libass parses it. Left to libass, they were extracted behind
+        // the budget's back — and even with extraction off, libass buffers
+        // and decodes every embedded font before deciding to drop it.
+        ass_set_extract_fonts(handle, 0)
+        for font in fonts { addFont(name: font.name, bytes: font.data) }
+    }
+
+    deinit { ass_library_done(handle) }
+
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        try lock.withLock(body)
+    }
+
+    /// libass copies the bytes, so the caller's buffer may go away after.
+    /// `false` when the font was refused: empty, over the per-file cap, or
+    /// over what is left of the library's budget.
+    @discardableResult
+    func addFont(name: String, bytes: Data) -> Bool {
+        guard !bytes.isEmpty, bytes.count <= Self.maximumFontBytes else { return false }
+        return withLock {
+            guard bytes.count <= fontBudget - fontBytes else { return false }
+            fontBytes += bytes.count
+            bytes.withUnsafeBytes { raw in
+                ass_add_font(handle, name, raw.bindMemory(to: CChar.self).baseAddress, Int32(raw.count))
+            }
+            return true
+        }
+    }
+
+    /// Font bytes libass holds for this library.
+    var loadedFontBytes: Int { withLock { fontBytes } }
+
+    /// `script` (a whole file, or a track header) without its `[Fonts]`
+    /// sections, every font they embed decoded here and admitted like an
+    /// attachment — per-file cap, then what is left of the set budget.
+    ///
+    /// Done on our side because libass's own handling cannot be bounded: it
+    /// buffers and decodes each embedded font whether or not extraction is
+    /// on, and a size estimate from outside disagreed with its parser (a
+    /// data line may begin with `[`, which only ends the section when it
+    /// opens a section libass knows — review r3 P1.2). Here, a font over
+    /// its cap or the remaining budget stops being buffered the moment it
+    /// is, and libass never sees any font data at all.
+    func admittingEmbeddedFonts(of script: Data) -> Data {
+        let bytes = [UInt8](script)
+        var output: [UInt8] = []
+        output.reserveCapacity(bytes.count)
+        var inFonts = false
+        var name: String?
+        var encoded: [UInt8] = []
+        var refused = false
+        var encodedLimit = 0
+
+        func finishFont() {
+            if let name, !refused, let decoded = Self.decodeEmbeddedFont(encoded) {
+                addFont(name: name, bytes: Data(decoded))
+            }
+            name = nil
+            encoded = []
+            refused = false
+        }
+
+        // Lines end where libass ends them: at CR, LF or CRLF. Splitting on
+        // LF alone read a CR-only script as one line, missed its `[Fonts]`,
+        // and handed every embedded font to libass unbudgeted (review r5 P1.2).
+        let cr = UInt8(ascii: "\r"), lf = UInt8(ascii: "\n")
+        // A UTF-8 BOM is not part of the first line's content (libass skips it).
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        var lineStart = 0
+        while lineStart < bytes.count {
+            var lineEnd = lineStart
+            while lineEnd < bytes.count, bytes[lineEnd] != lf, bytes[lineEnd] != cr { lineEnd += 1 }
+            var next = min(bytes.count, lineEnd + 1)
+            if lineEnd < bytes.count, bytes[lineEnd] == cr, next < bytes.count, bytes[next] == lf { next += 1 }
+            var first = lineStart
+            if lineStart == 0, bytes.starts(with: bom) { first = min(lineEnd, 3) }
+            while first < lineEnd, bytes[first] == UInt8(ascii: " ") || bytes[first] == UInt8(ascii: "\t") { first += 1 }
+            var last = lineEnd
+            while last > first, bytes[last - 1] == UInt8(ascii: " ") || bytes[last - 1] == UInt8(ascii: "\t") { last -= 1 }
+            let content = bytes[first..<last]
+
+            if let section = Self.knownSection(content) {
+                if inFonts { finishFont() }
+                inFonts = section == "[fonts]"
+                if !inFonts { output += bytes[lineStart..<next] }
+            } else if inFonts {
+                if content.starts(with: Array("fontname:".utf8)) {
+                    finishFont()
+                    name = String(decoding: content.dropFirst(9), as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                    // Decoded is ¾ of encoded: stop buffering at the cap or
+                    // at what the budget still allows, whichever is lower.
+                    encodedLimit = (min(Self.maximumFontBytes, remainingFontBudget) / 3 + 1) * 4
+                } else if name != nil, !refused {
+                    if encoded.count + content.count > encodedLimit {
+                        refused = true
+                        encoded = []
+                    } else {
+                        encoded += content
+                    }
+                }
+            } else {
+                output += bytes[lineStart..<next]
+            }
+            lineStart = next
+        }
+        if inFonts { finishFont() }
+        return Data(output)
+    }
+
+    private var remainingFontBudget: Int { withLock { max(0, fontBudget - fontBytes) } }
+
+    /// The sections libass's parser switches on (case-insensitive, by
+    /// prefix, as libass compares them), lowercased; `nil` for any other
+    /// line — including a `[`-led line of font data.
+    static func knownSection(_ line: ArraySlice<UInt8>) -> String? {
+        guard line.first == UInt8(ascii: "[") else { return nil }
+        let lowered = String(decoding: line.prefix(13), as: UTF8.self).lowercased()
+        return ["[script info]", "[v4 styles]", "[v4+ styles]", "[events]", "[fonts]"]
+            .first { lowered.hasPrefix($0) }
+    }
+
+    /// The `[Fonts]` encoding (the SSA spec's uuencode variant): each
+    /// character carries six bits as `char - 33`; four characters make three
+    /// bytes, a trailing group of two or three makes one or two. A trailing
+    /// single character cannot encode a byte, so such data is refused.
+    static func decodeEmbeddedFont(_ encoded: [UInt8]) -> [UInt8]? {
+        guard !encoded.isEmpty, encoded.count % 4 != 1 else { return nil }
+        var decoded: [UInt8] = []
+        decoded.reserveCapacity(encoded.count / 4 * 3 + 2)
+        var index = 0
+        while index < encoded.count {
+            let group = min(4, encoded.count - index)
+            var bits: UInt32 = 0
+            for offset in 0..<4 {
+                let sixBits = offset < group ? UInt32((encoded[index + offset] &- 33) & 63) : 0
+                bits = bits << 6 | sixBits
+            }
+            decoded.append(UInt8(bits >> 16 & 0xFF))
+            if group >= 3 { decoded.append(UInt8(bits >> 8 & 0xFF)) }
+            if group == 4 { decoded.append(UInt8(bits & 0xFF)) }
+            index += group
+        }
+        return decoded
+    }
+}

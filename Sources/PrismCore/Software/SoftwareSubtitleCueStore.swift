@@ -21,7 +21,9 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
     func ingest(
         _ packet: UnsafeMutablePointer<AVPacket>, timeBase: AVRational,
         kind: TextSubtitleConverter.Kind, currentTime: Double,
-        playResolution: TextSubtitleConverter.PlayResolution? = nil
+        playResolution: TextSubtitleConverter.PlayResolution? = nil,
+        assHeader: ASSScriptHeader? = nil,
+        movText: TextSubtitleConverter.MovTextDescription? = nil
     ) {
         // Reject oversized payloads before copying or parsing: subtitle data
         // must not bypass the decoded video pipeline's memory discipline.
@@ -34,17 +36,21 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
         guard start.isFinite, end.isFinite, end > start,
               !currentTime.isFinite || end > currentTime,
               let converted = TextSubtitleConverter.convert(
-                Data(bytes: bytes, count: Int(packet.pointee.size)), kind: kind, playResolution: playResolution
+                Data(bytes: bytes, count: Int(packet.pointee.size)), kind: kind, playResolution: playResolution,
+                assHeader: assHeader, movText: movText
               ) else { return }
         // A WebVTT track's own settings outrank anything read off the payload
         // — the same precedence the remux renditions use.
-        let placement = kind == .webvtt
+        let sourcePlacement = kind == .webvtt
             ? SubtitleRenditionSet.webVTTSettings(on: packet)
                 .flatMap(TextCuePlacement.sanitizedWebVTTSettings)
-                .flatMap(TextCuePlacement.init(webVTTSettings:)) ?? converted.placement
-            : converted.placement
+                .flatMap(TextCuePlacement.init(webVTTSettings:))
+            : nil
+        let placement = sourcePlacement ?? converted.placement
+        var styled = converted.styled
+        if sourcePlacement != nil { styled?.placement = sourcePlacement }
         insert(TimedTextCue(streamIndex: packet.pointee.stream_index,
-                            start: start, end: end, text: converted.text, placement: placement),
+                            start: start, end: end, text: converted.text, placement: placement, styled: styled),
                currentTime: currentTime)
     }
 
@@ -52,7 +58,7 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
         lock.withLock {
             prune(at: currentTime)
             guard !cues.contains(cue) else { return } // Audio switches re-read packets.
-            let size = cue.text.utf8.count
+            let size = Self.bytes(cue)
             guard cues.count < maximumCues, size <= maximumBytes - byteCount else { return }
             cues.append(cue)
             byteCount += size
@@ -76,11 +82,16 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
         }
     }
 
+    /// The styled runs count against the bound in full (`footprint`).
+    static func bytes(_ cue: TimedTextCue) -> Int {
+        cue.text.utf8.count + (cue.styled?.footprint ?? 0)
+    }
+
     private func prune(at time: Double) {
         guard time.isFinite else { return }
         cues.removeAll { cue in
             guard cue.end <= time else { return false }
-            byteCount -= cue.text.utf8.count
+            byteCount -= Self.bytes(cue)
             return true
         }
     }

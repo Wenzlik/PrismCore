@@ -45,6 +45,11 @@ final class WebVTTRenditionWriter {
     /// extends past the current boundary stays here so the next segment can
     /// repeat it (standard segmented-VTT practice).
     private var pending: [SubtitleCue] = []
+    /// An external file's whole cue list, kept because nothing can re-read
+    /// it: a demuxed track's cues come back with the packets after a
+    /// re-anchor, a preloaded track's would not (review r5 P1.1). `nil` for
+    /// demuxed tracks.
+    private var preloaded: [SubtitleCue]?
     private var segmentIndex = 0
     /// Planned mode: playlist published upfront; flushes write files only.
     private var plannedMode = false
@@ -77,8 +82,24 @@ final class WebVTTRenditionWriter {
         max(0, originSeconds + delaySeconds)
     }
 
+    /// An identical cue already held is not added again: a re-anchor keeps
+    /// a long cue that spans its anchor (`reanchor` drops only cues wholly
+    /// before it), and the libass preroll then re-reads that very packet —
+    /// which printed the same block twice in one segment (review r3 P2.5).
+    /// Identity is the whole cue (times, text, settings, styling), so two
+    /// different events that merely share a time still both print.
+    /// An external file, converted up front. Kept whole (see `preloaded`)
+    /// and placed in `pending` without `add`'s duplicate scan, which made a
+    /// 10 000-cue sidecar quadratic before the first segment (review r5 P2.5).
+    func preload(_ cues: [SubtitleCue]) {
+        let usable = cues.filter { !$0.overlapsNothing && !$0.text.isEmpty }
+            .sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+        preloaded = usable
+        pending = usable
+    }
+
     func add(_ cue: SubtitleCue) {
-        guard !cue.overlapsNothing, !cue.text.isEmpty else { return }
+        guard !cue.overlapsNothing, !cue.text.isEmpty, !pending.contains(cue) else { return }
         pending.append(cue)
     }
 
@@ -101,10 +122,15 @@ final class WebVTTRenditionWriter {
 
     /// Demand-driven jump: continue numbering at the anchor and forget cues
     /// wholly before it (a later backward jump reproduces them from the
-    /// demuxer's own re-read).
+    /// demuxer's own re-read). A preloaded file has no re-read, so its
+    /// pending set is rebuilt from the whole list — in either direction.
     func reanchor(segmentIndex: Int, startSeconds: Double) {
         self.segmentIndex = segmentIndex
-        pending.removeAll { $0.end <= startSeconds }
+        if let preloaded {
+            pending = preloaded.filter { $0.end > startSeconds }
+        } else {
+            pending.removeAll { $0.end <= startSeconds }
+        }
     }
 
     func flushSegment(start: Double, end: Double, delaySeconds: Double = 0) throws {

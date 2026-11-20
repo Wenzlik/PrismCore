@@ -476,6 +476,8 @@ public actor PrismCoreSession {
     /// Bitmap streams the host asked to have OCR'd, replayed onto a fallback
     /// session with the handler they feed.
     private var hostOCRStreams: Set<Int> = []
+    /// Replayed onto successors like the OCR requests.
+    private var assRenderingMode: ASSRenderingMode = .text
     /// Where this session's playlists and segments live. Internal so the
     /// startup-cost benchmark can watch artifacts appear as they land.
     let workDirectory: URL
@@ -1462,6 +1464,9 @@ public actor PrismCoreSession {
         for streamIndex in hostOCRStreams.sorted() {
             await fallback.requestBitmapSubtitleOCR(streamIndex: streamIndex)
         }
+        if assRenderingMode != .text {
+            try await fallback.setASSRendering(assRenderingMode)
+        }
         if let handler = timedTextCueHandler {
             await fallback.setTimedTextCueHandler(handler)
         }
@@ -1553,6 +1558,40 @@ public actor PrismCoreSession {
     public func requestBitmapSubtitleOCR(streamIndex: Int) {
         hostOCRStreams.insert(streamIndex)
         remuxer.subtitles.requestHostOCR(streamIndex: Int32(streamIndex))
+    }
+
+    // MARK: - ASS / SSA with libass
+
+    /// Render ASS/SSA tracks with libass — the file's own fonts, colours,
+    /// positioning, karaoke and typesetting — for a host overlay. Before
+    /// `start()`; replayed onto `makeSession` and fallback sessions.
+    ///
+    /// `.text` (the default) changes nothing: ASS reaches the host as text
+    /// cues, `TimedTextCue.styled` included. `.libass` keeps those flowing
+    /// and also builds an `ASSSubtitleRenderer` per ASS/SSA stream, loaded
+    /// with the container's font attachments; get it with
+    /// `assRenderer(streamIndex:)` once `start()` returned.
+    ///
+    /// Fonts are read off the context the session opened (or adopted from
+    /// `SourceProbe.open`, which reads attachments unless asked not to). A
+    /// probe opened with `skipAttachments: true` leaves libass on system
+    /// faces only.
+    public func setASSRendering(_ mode: ASSRenderingMode) throws {
+        guard !started else { throw SessionError.alreadyStarted }
+        assRenderingMode = mode
+        remuxer.subtitles.setASSRendering(mode)
+    }
+
+    /// The libass renderer for one ASS/SSA stream (`SubtitleTrackInfo
+    /// .streamIndex`), or `nil`: before `start()` returned, for a stream that
+    /// is not ASS/SSA, or without `setASSRendering(.libass)`.
+    ///
+    /// Its frames are on the same timeline as `TimedTextCue` times (the
+    /// played item time) and do NOT include `subtitleDelaySeconds`: ask for
+    /// `frame(at: itemTime - delay, canvas:)`. Thread-safe; see
+    /// `ASSSubtitleRenderer`.
+    public nonisolated func assRenderer(streamIndex: Int) -> ASSSubtitleRenderer? {
+        remuxer.subtitles.assRenderer(streamIndex: streamIndex)
     }
 
     // MARK: - Startup checkpoints

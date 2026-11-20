@@ -112,7 +112,8 @@ struct SubtitleConversionTests {
             + "00:00:04,500 --> 00:00:05,000\r\nno index here\r\n"
         let cues = TextSubtitleConverter.cues(fromSRT: file)
         #expect(cues.count == 2)
-        #expect(cues.first == SubtitleCue(start: 1, end: 3, text: "first line\nsecond line"))
+        #expect(cues.first == SubtitleCue(start: 1, end: 3, text: "first line\nsecond line",
+                                          styled: StyledSubtitleText(runs: [StyledTextRun(text: "first line\nsecond line")])))
         #expect(cues.last?.start == 4.5)
     }
 
@@ -181,6 +182,27 @@ struct SubtitleConversionTests {
         #expect(second.contains("00:00:06.000 --> 00:00:06.500\nacross"))
         // The fully-contained cue is not repeated.
         #expect(!second.contains("inside"))
+    }
+
+    /// r3 P2.5: a re-anchor inside a long cue, then a preroll re-reading
+    /// its packet, must not print the block twice; a different event at
+    /// the same time still prints.
+    @Test("A re-read cue across a re-anchor is written once")
+    func rereadCueAcrossReanchorIsWrittenOnce() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = try WebVTTRenditionWriter(directory: root.appendingPathComponent("subs0"))
+        let sign = SubtitleCue(start: 2, end: 20, text: "long sign")
+        writer.add(sign)
+        try writer.flushSegment(start: 0, end: 6)
+        writer.reanchor(segmentIndex: 2, startSeconds: 12)
+        writer.add(sign)                                        // the preroll's re-read
+        writer.add(SubtitleCue(start: 2, end: 20, text: "other line"))
+        try writer.flushSegment(start: 12, end: 18)
+
+        let segment = try String(contentsOf: root.appendingPathComponent("subs0/seg00002.vtt"), encoding: .utf8)
+        #expect(segment.components(separatedBy: "long sign").count - 1 == 1)
+        #expect(segment.contains("other line"))
     }
 
     @Test("Every segment carries the timestamp map; the origin lands on the 90 kHz axis")

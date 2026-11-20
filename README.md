@@ -309,7 +309,66 @@ landing keyframe: a long caption whose packet precedes that keyframe may be
 missing until the next cue. Bitmap/OCR and external subtitle selection remain
 outside this software surface. ASS colours, fonts, karaoke and drawing overrides
 are not preserved by the text converter — only the inline styles and placement
-WebVTT has words for.
+WebVTT has words for; drawings themselves (`{\p1}…{\p0}`) are removed from the
+text since 4.0.7.
+
+### Styled cues and ASS with libass (4.0.7)
+
+Every text cue now carries its styling as runs next to the WebVTT string it
+always had: `TimedTextCue.styled` (`StyledSubtitleText`: `runs` of
+`StyledTextRun` — bold, italic, underline, strike, fill and outline colour,
+font, WebVTT voice/classes — plus `placement`, the ASS style's alignment
+included). `text` and `placement` are unchanged, except that ASS drawing
+commands (`{\p1}m 0 0 l 10 0{\p0}`) are no longer left in `text` as dialogue
+(4.0.7); `styled.withoutSourceColors()`
+is the view for a viewer who turned source colours off. The same parsers are
+public for subtitles PrismCore does not demux:
+
+```swift
+let cues = SubtitleTextParser.cues(from: sidecarData)            // SRT / WebVTT / ASS, sniffed
+let one = SubtitleTextParser.styledText(payload: sample, format: .tx3g, tx3gSampleDescription: extradata)
+```
+
+ASS/SSA can also be drawn with the file's own fonts, colours, positioning
+and karaoke, through libass (off by default):
+
+```swift
+let session = try PrismCoreSession(probed: probed)
+try await session.setASSRendering(.libass)          // before start()
+let playlist = try await session.start()
+
+// On the overlay's display link, for the track the viewer picked:
+if let renderer = session.assRenderer(streamIndex: track.streamIndex) {
+    let canvas = SubtitleCanvas(width: Int(bounds.width * scale), height: Int(bounds.height * scale),
+                                videoRect: videoRectInPixels,
+                                safeAreaInsets: .init(top: 0, left: 0, bottom: 0, right: 0))
+    switch renderer.frame(at: itemTime - subtitleDelay, canvas: canvas) {
+    case .unchanged: break                              // keep what is on screen
+    case .frame(let frame): overlay.show(frame.images)  // [SubtitleImage]: CGImage + frame, back to front
+    }
+}
+```
+
+- **Clock.** `frame(at:)` takes the `TimedTextCue` clock of the path that
+  made the renderer (the item time on the remux path, the source axis on the
+  software path — `SoftwarePlaybackPipeline.assRenderer(streamIndex:)`) and
+  does **not** apply `setSubtitleDelaySeconds`: the host subtracts its own
+  delay, the same one it applies to text cues.
+- **Images** are premultiplied BGRA `CGImage`s positioned in canvas pixels
+  (origin top-left), one per cluster of glyphs — set them as layer contents.
+  An empty frame means clear.
+- **Fonts** are the container's attachments (up to 96 MB per source, 64 MB
+  per file; the rest are skipped) plus system faces through CoreText. They are read off the source context, so a probe opened with
+  `skipAttachments: true` renders with system faces only.
+- **Seeks** need nothing from the host: every event stays loaded and
+  re-demuxed ones are ignored, and a jump into an unread region prerolls
+  the events already running there (from the subtitle Cues, up to 30 s back).
+- `ASSStyleOverride.font(name:scale:)` scales (or re-fonts) the file's styles
+  for a viewer's size setting; `.none`, the default, leaves them untouched.
+- For an external `.ass`, build `ASSSubtitleRenderer(script: data, fonts:)`
+  yourself; `appendEvent` feeds events from any other source.
+- Thread-safe; libass calls of one source serialize on one lock. Call
+  `frame(at:canvas:)` at most once per displayed frame.
 
 ### TrueHD Atmos with heights (opt-in)
 

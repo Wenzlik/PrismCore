@@ -34,6 +34,139 @@ source-compatible.)
   intended values, and escapes round-trip. Mutations run CRC-repaired too, so
   they reach the walk behind the CRC proof.
 
+## [4.0.7] — 2026-11-20
+
+Source-compatible: ASS/SSA rendered with libass for hosts that ask, and
+styled text cues for every text subtitle. A host that changes nothing gets
+the cues, renditions and playback it got before (issue #197), with one
+deliberate exception: ASS drawings no longer show up as subtitle text (see
+*Changed*).
+
+### Added
+
+- **libass rendering of ASS/SSA** (`ASSRenderingMode`, default `.text`).
+  `PrismCoreSession.setASSRendering(.libass)` (before `start()`, replayed onto
+  clones and fallbacks) and `SoftwarePlaybackPipeline.setASSRendering(_:)`
+  (before `load`) build an `ASSSubtitleRenderer` per ASS/SSA stream, fetched
+  with `assRenderer(streamIndex:)`. `frame(at:canvas:)` returns
+  `ASSFrameUpdate` — `.unchanged`, or premultiplied BGRA `SubtitleImage`
+  regions for a `SubtitleCanvas` (overlay pixels, video rect, safe-area
+  insets, optional black-bar placement). Frames use the `TimedTextCue`
+  clock of the path that made them and leave the subtitle delay to the
+  host (`frame(at: itemTime - delay)`), so one delay knob serves every
+  engine. `ASSStyleOverride.none` keeps the file's styles untouched
+  (`ASS_OVERRIDE_DEFAULT`); `.font(name:scale:)` is the viewer's size knob.
+  Hosts can also build a renderer from a whole `.ass` file
+  (`init(script:fonts:)`, `ass_read_memory`, `[Fonts]` admitted) or feed
+  events themselves (`init(header:fonts:)` + `appendEvent`).
+  - **Fonts:** the container's attachments (MIME, extension or FFmpeg's
+    TTF/OTF codec id) become libass memory fonts, loaded once per source into
+    one `ASS_Library` shared by its tracks, within a 96 MB budget per source
+    (64 MB per file; fonts past it are skipped, first-declared first). A
+    script's own `[Fonts]` section counts against the same budget: PrismCore
+    decodes those fonts itself, stops buffering one the moment it exceeds
+    what is left, and hands libass the script without them — libass would
+    otherwise buffer and decode each embedded font before any budget could
+    refuse it.
+    Everything else falls back to
+    system faces through libass's CoreText provider (AUTODETECT; there is no
+    fontconfig on Apple platforms), default family Helvetica Neue — present
+    on tvOS, unlike Arial — and CJK through CoreText's cascade. A probe opened
+    with `skipAttachments: true` leaves libass on system faces.
+  - **Seeks:** every event stays in the libass track and re-demuxed events
+    are dropped by their Matroska ReadOrder, so a seek in either direction
+    needs no flush or re-feed — the same trade as `SubtitleCueHistory
+    .complete` (events are text; a film's worth is small). A jump into a
+    region not yet read would miss a sign that started before the target
+    (Matroska stores an event in the cluster where it starts, and FFmpeg's
+    own seek backtracks only to the *latest* subtitle Cue). Under `.libass`
+    both paths therefore preroll: back to the earliest ASS event the
+    subtitle index (Cues) holds within 30 s of the target — whatever the
+    bitrate, and only when one is indexed there — else a blind 8 MB of
+    source (10 s at an unknown rate). The remux re-anchor starts at the plan
+    entry before it and keeps that stretch's subtitle packets; the software
+    path reads it subtitle-only, without decoding, before its normal seek.
+    Matroska parses its Cues on the first seek, so the first preroll of a
+    context may seek once more. A subtitle track without Cues still misses
+    events older than the blind window, and an indexed event that started
+    more than 30 s before the target (a long sign under busy dialogue) is
+    missed on the first jump into an unread region: FFmpeg's index carries
+    no event durations, so finding it would mean reading every byte from
+    there on each seek.
+  - A track with no CodecPrivate (or no `[Events]` Format) gets a minimal
+    header, so its events are accepted instead of silently dropped.
+    `[Fonts]` in CR-only and CRLF scripts are budgeted like LF ones.
+  - `invalidate()` forces the next frame after a host dropped its overlay;
+    an empty frame (a clear) does the same on its own.
+  - **Cost:** nothing at all under `.text`. Under `.libass` the renderer
+    (CoreText set-up) is created on the first frame, an idle or static
+    stretch costs one `ass_render_frame` and no compositing, layers are
+    composited only into the clusters they cover (never one canvas-sized
+    bitmap), and a canvas is capped at 4096 px a side. libass calls of one
+    source serialize on one lock — libass is not thread-safe.
+- `TimedTextCue.styled: StyledSubtitleText?` — the cue's inline styling as
+  runs (`StyledTextRun`: bold/italic/underline/strike, fill and outline
+  `SubtitleColor`, font, WebVTT voice and classes) plus placement, from SRT
+  `<font>`, WebVTT `<c>`/`<v>`/entities, ASS overrides and the ASS *style*
+  (colours, emphasis, alignment), and tx3g — the track's sample description
+  (default style, justification, `ftab` fonts) and each sample's `styl`
+  records, which must be ordered and non-overlapping or are ignored, as in
+  FFmpeg. WebVTT classes are read on every tag (`<i.yellow>`). Nesting,
+  classes and style changes per cue are bounded (32 / 16 / 512), so
+  hostile markup stays linear. ASS drawing mode
+  (`\p1`) no longer leaks vector commands into the runs.
+  `withoutSourceColors()` is the "ignore source colours" view. `placement`
+  is unchanged, and so is `text` except for ASS drawings (see *Changed*).
+- `SubtitleTextParser` — the same parsers for sources PrismCore does not
+  demux (server sidecars, another engine's cues): whole SRT / WebVTT / ASS
+  documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`
+  (`assHeader:` / `tx3gSampleDescription:` carry the track's metadata).
+  The model is `Codable` and `Hashable` (`TextCuePlacement` too, validated
+  on decode). Two same-text cues that differ only in style or position are
+  no longer merged by the remux cue tap's dedup.
+- `SubtitleTrackInfo.isASS`.
+- `addExternalSubtitle` now reads `.ass` / `.ssa` files (their `Dialogue:`
+  lines) into a WebVTT rendition; before, they produced no rendition.
+- A WebVTT rendition no longer prints one cue twice when a re-anchor lands
+  inside it and the libass preroll re-reads its packet.
+- An external subtitle file keeps its cues across re-anchors: jumping
+  forward and back used to leave the skipped interval's segments empty,
+  since a sidecar has no packets to re-read. Loading one is linear in its
+  cue count.
+- tx3g samples in UTF-16 (byte-order mark) are read instead of dropped.
+- The cue stores' byte bounds (software store, `SubtitleCueHistory
+  .bounded`) charge styled runs in full — fonts, voices, classes, per-run
+  overhead — not only their visible words.
+
+### Changed
+
+- **ASS drawings are no longer shown as dialogue.** ASS uses drawing mode
+  (`{\p1}` … `{\p0}`) for vector shapes — signs, boxes, masks — and the
+  text between those tags is coordinates like `m 0 0 l 10 0`, not words.
+  Until now the plain cue text removed the `{\p1}` tag but kept the
+  coordinates, so `TimedTextCue.text`, the WebVTT renditions AVPlayer shows
+  (PiP and AirPlay included) and the software path's cues all displayed them
+  as a subtitle line. Now everything from a `\pN` with N above zero up to
+  the next `\p0` (or the end of the event) is dropped from the plain text
+  too, exactly as `TimedTextCue.styled` already dropped it. An event that is
+  only a drawing produces no text cue at all. This applies to embedded
+  ASS/SSA tracks, external `.ass`/`.ssa` files, and ASS tags pasted into
+  SRT. Two quirks are now read the way libass reads them: text before the
+  first backslash in a `{…}` block is not a tag (`{p1\i1}` does not start a
+  drawing), and a `\p` inside a `\t(…)` animation is not applied.
+
+### Licensing
+
+libass and its dependencies are not new to an app that links PrismCore:
+MPVKit already ships them (`mpvkit/libass-build` 0.17.5 xcframeworks, static,
+every slice PrismCore supports) and links them into its FFmpeg target; this
+release only calls libass directly. Their licences — libass ISC, FreeType
+FTL (chosen over GPLv2), FriBidi LGPL-2.1+, HarfBuzz MIT ("Old MIT"),
+libunibreak zlib — are all compatible with PrismCore's LGPL-2.1+; FriBidi
+being LGPL adds the same relinking obligation FFmpeg already carries, which
+the App Store Exception does not lift (it covers PrismCore's own code only).
+See NOTICE.md.
+
 ## [4.0.6] — 2026-11-19
 
 Source-compatible: a diagnostics label for Profile 7 sources. Playback is
@@ -4117,7 +4250,9 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.7...HEAD
+[4.0.7]: https://github.com/Wenzlik/PrismCore/compare/4.0.6...4.0.7
+[4.0.6]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...4.0.6
 [4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...4.0.5
 [4.0.4]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...4.0.4
 [4.0.3]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...4.0.3

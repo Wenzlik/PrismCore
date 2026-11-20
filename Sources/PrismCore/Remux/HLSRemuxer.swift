@@ -883,6 +883,31 @@ final class HLSRemuxer: @unchecked Sendable {
         var isAttachment = false
     }
 
+    /// The plan entry a libass session's re-anchor seeks to.
+    ///
+    /// When an ASS stream has an index entry (a subtitle Cue) within
+    /// `ASSTrackSet.indexedPrerollSeconds` before the anchor,
+    /// `indexedStart` is the earliest such event's start and the seek goes to
+    /// the last entry at or before it — whatever the bitrate, so a 4K remux
+    /// (80 Mb/s, where 8 MB is under a second) still reaches a sign that
+    /// started 25 s earlier (review r3 P1.1). Otherwise the blind window: the
+    /// earliest entry within `ASSTrackSet.blindPrerollSeconds` of the anchor
+    /// (`anchor` itself when the bitrate leaves no room).
+    /// Entries, not timestamps: an `av_seek_frame` to an arbitrary time can
+    /// land a whole GOP earlier, while an entry is a keyframe the plan knows.
+    static func subtitlePrerollEntry(
+        anchor: Int, startSeconds: (Int) -> Double, bitRate: Int64, indexedStart: Double? = nil
+    ) -> Int {
+        let window = ASSTrackSet.blindPrerollSeconds(bitRate: bitRate)
+        let anchorStart = startSeconds(anchor)
+        var blind = anchor
+        while blind > 0, anchorStart - startSeconds(blind - 1) <= window { blind -= 1 }
+        guard let indexedStart, indexedStart < anchorStart else { return blind }
+        var indexed = anchor
+        while indexed > 0, startSeconds(indexed) > indexedStart { indexed -= 1 }
+        return min(blind, indexed)
+    }
+
     static func streamSignatures(of context: UnsafeMutablePointer<AVFormatContext>) -> [StreamSignature] {
         trimmingTrailingAttachments((0..<Int(context.pointee.nb_streams)).map { index in
             let stream = context.pointee.streams[index]!.pointee
@@ -1083,6 +1108,10 @@ final class HLSRemuxer: @unchecked Sendable {
             closedCaptionLanguage: closedCaptionLanguage
         )
         let tapsClosedCaptions = subtitles.hasClosedCaptions
+        // Only with libass on: a re-anchor then seeks a little earlier and
+        // lets subtitle packets through the drop window (see
+        // `subtitlePrerollEntry`). The default path seeks exactly as before.
+        let subtitlePreroll = subtitles.prerollsSubtitlePackets
 
         // Heights put `apac` into the master, so whether a TrueHD track is Atmos has to be
         // known now — from its bitstream, not the probe's profile claim, which is silent
@@ -2173,10 +2202,35 @@ final class HLSRemuxer: @unchecked Sendable {
         func reanchor(to anchor: Int) throws {
             guard let plannedPlan else { return }
             let target = plannedPlan.entries[anchor].startPTS
+            // An ASS sign that started before the anchor lives in a cluster
+            // the seek skips, and libass only knows packets it was handed —
+            // so with libass on, start reading a few plan entries earlier and
+            // keep their subtitle packets (the drop window below lets them
+            // through; audio and video before the anchor are still dropped).
+            func prerollPTS() -> Int64 {
+                plannedPlan.entries[Self.subtitlePrerollEntry(
+                    anchor: anchor,
+                    startSeconds: { Double(plannedPlan.entries[$0].startPTS) * tickSeconds },
+                    bitRate: input.pointee.bit_rate,
+                    indexedStart: subtitles.earliestIndexedASSEventStart(
+                        in: input, before: Double(target) * tickSeconds
+                    )
+                )].startPTS
+            }
+            let seekPTS = subtitlePreroll ? prerollPTS() : target
             // A seek is a read: over HTTP it is a Range request to the same
             // origin the copy loop reads from, so its failure is a source
             // failure and goes to recovery like one (`reanchorRecovering`).
-            let sought = av_seek_frame(input, videoIndex, target, AVSEEK_FLAG_BACKWARD)
+            var sought = av_seek_frame(input, videoIndex, seekPTS, AVSEEK_FLAG_BACKWARD)
+            // Matroska parses its Cues on the first seek, so on a context that
+            // had never sought (a plan from the keyframe cache) the subtitle
+            // index was empty above. The seek just made loaded it; if it now
+            // reaches further back, seek once more — only ever on that first
+            // re-anchor, never on later ones.
+            if sought >= 0, subtitlePreroll {
+                let indexed = prerollPTS()
+                if indexed < seekPTS { sought = av_seek_frame(input, videoIndex, indexed, AVSEEK_FLAG_BACKWARD) }
+            }
             if sought < 0 {
                 throw SourceReadFailure(underlying: sourceFailure(code: sought, operation: "av_seek_frame"))
             }
@@ -2470,6 +2524,11 @@ final class HLSRemuxer: @unchecked Sendable {
                     if isAnchorKeyframe {
                         droppingUntilPTS = nil
                     } else {
+                        // The preroll's whole point: a subtitle event read
+                        // before the anchor may still be on screen at it.
+                        if subtitlePreroll, subtitleStreams.contains(Int32(packet.pointee.stream_index)) {
+                            subtitles.ingest(packet)
+                        }
                         continue
                     }
                 }

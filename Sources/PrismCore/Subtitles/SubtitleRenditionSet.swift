@@ -81,6 +81,11 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         let timeBase: AVRational?
         let converter: Converter
         let writer: WebVTTRenditionWriter
+        /// An ASS track's script header (styles, play resolution), parsed
+        /// once here rather than per packet, for the styled runs.
+        var assHeader: ASSScriptHeader? = nil
+        /// A tx3g track's sample description (default style, fonts), same reason.
+        var movText: TextSubtitleConverter.MovTextDescription? = nil
     }
 
     /// The pending-cue lifecycle of one OCR-fed bitmap rendition.
@@ -222,6 +227,11 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// the overwhelmingly common case — is what keeps the copy loop's caption
     /// tap free for every source that has none.
     private var captionReader: ClosedCaptionReader?
+
+    /// `.libass` once the host asked (before `prepare`); then `assTracks` is
+    /// built from the source's ASS streams and fonts. Under `lock`.
+    private var assRendering: ASSRenderingMode = .text
+    private var assTracks: ASSTrackSet?
 
     /// Whether this session has any closed-caption rendition, so the copy loop
     /// can skip the tap on one boolean rather than an optional chain per packet.
@@ -399,7 +409,9 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                     inputIndex: index,
                     timeBase: stream.pointee.time_base,
                     converter: converter,
-                    writer: writer
+                    writer: writer,
+                    assHeader: Self.assHeader(of: stream.pointee.codecpar),
+                    movText: Self.movTextDescription(of: stream.pointee.codecpar)
                 )
             )
             descriptions.append(
@@ -465,7 +477,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             // The whole file is converted up front; segmentation then follows
             // the video boundaries exactly like an embedded track's, so the
             // rendition playlist lines up 1:1 with the variant.
-            for cue in cues { writer.add(cue) }
+            writer.preload(cues)
             built.append(Track(inputIndex: nil, timeBase: nil, converter: .preloaded, writer: writer))
             descriptions.append(
                 MasterPlaylistBuilder.SubtitleRendition(
@@ -475,6 +487,10 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                     isForced: file.isForced
                 )
             )
+        }
+
+        if lock.withLock({ assRendering }) == .libass, let assSet = ASSTrackSet(input: input) {
+            lock.withLock { assTracks = assSet }
         }
 
         adopt(
@@ -515,6 +531,28 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// no fixture can carry: no FFmpeg build encodes PGS.
     func adoptHostOnlyBitmapsForTesting(_ hostOnly: [Int32: BitmapRenditionTrack]) {
         adopt(tracks: [], hostOnly: hostOnly, renditions: [])
+    }
+
+    // MARK: - libass
+
+    /// Takes effect at `prepare`; the session refuses it after `start()`.
+    func setASSRendering(_ mode: ASSRenderingMode) {
+        lock.withLock { assRendering = mode }
+    }
+
+    /// Whether re-anchors should read subtitle packets ahead of the anchor:
+    /// only when libass renderers exist (read after `prepare`).
+    var prerollsSubtitlePackets: Bool { lock.withLock { assTracks != nil } }
+
+    /// See `ASSTrackSet.earliestIndexedEventStart`; `nil` without libass.
+    func earliestIndexedASSEventStart(in input: UnsafeMutablePointer<AVFormatContext>, before target: Double) -> Double? {
+        lock.withLock { assTracks }?.earliestIndexedEventStart(in: input, before: target)
+    }
+
+    /// The libass renderer of one ASS/SSA stream — `nil` before `prepare`,
+    /// for any other stream, or when the host never asked for `.libass`.
+    func assRenderer(streamIndex: Int) -> ASSSubtitleRenderer? {
+        lock.withLock { assTracks }?.renderer(streamIndex: streamIndex)
     }
 
     // MARK: - Host-requested OCR
@@ -720,6 +758,9 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         guard !originSet else { return }
         originSet = true
         for track in tracks { track.writer.setTimelineOrigin(seconds: seconds) }
+        // The same rebase the cue tap applies, so a frame asked for at a
+        // cue's `start` shows that cue.
+        lock.withLock { assTracks }?.setTimelineOrigin(max(0, seconds))
 
         // The origin is what the host tap rebases against — flush whatever
         // arrived before it existed.
@@ -787,24 +828,39 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         let key = Self.historyKey(streamIndex: streamIndex, cue)
         guard !emittedKeys.contains(key) else { return nil }
         let rebased = TimedTextCue(
-            streamIndex: streamIndex, start: start, end: end, text: cue.text, placement: cue.placement
+            streamIndex: streamIndex, start: start, end: end, text: cue.text, placement: cue.placement,
+            styled: cue.styled
         )
-        retainLocked(HistoryEntry(key: key, cue: rebased, bytes: Self.historyBytes(key: key, text: cue.text)))
+        retainLocked(HistoryEntry(key: key, cue: rebased, bytes: Self.historyBytes(key: key, cue: cue)))
         return rebased
     }
 
     /// The dedup identity of a produced cue: its source, not its rebased,
     /// times — so it is known before the origin is, and the pre-origin queue
     /// can be charged the same bytes the history will be.
+    ///
+    /// Styling is part of the identity: two ASS events of one track at one
+    /// time with the same word ("EXIT" over two doors) differ only in style
+    /// and position, and keyed on text alone the second never reached the
+    /// host. A re-demux of the same event styles it identically, so the
+    /// fingerprint still dedups it. Unstyled cues keep the plain key.
     private static func historyKey(streamIndex: Int32, _ cue: SubtitleCue) -> String {
-        "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+        let plain = "\(streamIndex)|\(cue.start)|\(cue.end)|\(cue.text)"
+        guard cue.styled != nil || cue.placement != nil else { return plain }
+        var hasher = Hasher()
+        hasher.combine(cue.styled)
+        hasher.combine(cue.placement)
+        // Per-process seed is fine: the history never outlives the process.
+        return plain + "|" + String(UInt(bitPattern: hasher.finalize()), radix: 36)
     }
 
     /// What a cue costs the history: its text plus its key, both as UTF-8 —
     /// the key holds a second copy of the text, and leaving it out would let
-    /// the real footprint run to twice the bound.
-    private static func historyBytes(key: String, text: String) -> Int {
-        key.utf8.count + text.utf8.count
+    /// the real footprint run to twice the bound. The styled runs are charged
+    /// in full — fonts, voices, classes and per-run overhead, not only their
+    /// words (`StyledSubtitleText.footprint`, review r5 P1.3).
+    private static func historyBytes(key: String, cue: SubtitleCue) -> Int {
+        key.utf8.count + cue.text.utf8.count + (cue.styled?.footprint ?? 0)
     }
 
     /// Admit one deduplicated cue to the history, evicting the oldest under
@@ -846,7 +902,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// `.bounded` — these were never delivered, so every drop is counted.
     /// Caller holds `lock`.
     private func enqueuePreOriginLocked(streamIndex: Int32, _ cue: SubtitleCue) {
-        let bytes = Self.historyBytes(key: Self.historyKey(streamIndex: streamIndex, cue), text: cue.text)
+        let bytes = Self.historyBytes(key: Self.historyKey(streamIndex: streamIndex, cue), cue: cue)
         if case .bounded(let maxCues, let maxBytes) = historyPolicy {
             // No origin, so it cannot be delivered live either.
             guard bytes <= maxBytes else {
@@ -870,6 +926,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// tracked (a codec we neither convert nor OCR) are ignored.
     func ingest(_ packet: UnsafeMutablePointer<AVPacket>) {
         let streamIndex = Int32(packet.pointee.stream_index)
+        lock.withLock { assTracks }?.ingest(packet)
         if let bitmap = hostOnlyBitmaps[streamIndex] {
             // No rendition to write into: the host tap is the only consumer.
             for cue in bitmap.ingest(packet) { emitHostCue(streamIndex: streamIndex, cue) }
@@ -896,8 +953,10 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                   let data = packet.pointee.data, packet.pointee.size > 0
             else { return }
             let payload = Data(bytes: data, count: Int(packet.pointee.size))
-            guard let converted = TextSubtitleConverter.convert(payload, kind: kind, playResolution: playResolution)
-            else { return }
+            guard let converted = TextSubtitleConverter.convert(
+                payload, kind: kind, playResolution: playResolution, assHeader: track.assHeader,
+                movText: track.movText
+            ) else { return }
 
             let tick = av_q2d(timeBase)
             let start = Double(packet.pointee.pts) * tick
@@ -910,10 +969,12 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                 ? Self.webVTTSettings(on: packet).flatMap(TextCuePlacement.sanitizedWebVTTSettings)
                 : nil
             let placement = sourceSettings.flatMap(TextCuePlacement.init(webVTTSettings:)) ?? converted.placement
+            var styled = converted.styled
+            if sourceSettings != nil { styled?.placement = placement }
             let cue = SubtitleCue(
                 start: start, end: start + duration, text: converted.text,
                 settings: sourceSettings ?? converted.placement?.webVTTSettings,
-                placement: placement
+                placement: placement, styled: styled
             )
             track.writer.add(cue)
             emitHostCue(streamIndex: streamIndex, cue)
@@ -1066,6 +1127,24 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         )
     }
 
+    /// The parsed script header of an ASS/SSA stream (its extradata), `nil`
+    /// for any other codec or an empty header.
+    /// A mov_text stream's sample description (its extradata), `nil` for
+    /// any other codec or a record too short to hold one.
+    static func movTextDescription(
+        of codecpar: UnsafePointer<AVCodecParameters>
+    ) -> TextSubtitleConverter.MovTextDescription? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_MOV_TEXT, let extradata = codecpar.pointee.extradata,
+              codecpar.pointee.extradata_size > 0 else { return nil }
+        return .init(Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size)))
+    }
+
+    static func assHeader(of codecpar: UnsafePointer<AVCodecParameters>) -> ASSScriptHeader? {
+        guard kind(for: codecpar.pointee.codec_id) == .ass, let extradata = codecpar.pointee.extradata,
+              codecpar.pointee.extradata_size > 0 else { return nil }
+        return ASSScriptHeader(data: Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size)))
+    }
+
     /// The cue-settings string the demuxer attached to a WebVTT packet, if
     /// any — verbatim, as it followed the timing line in the source. Both the
     /// WebVTT and the Matroska demuxers attach it; the payload itself never
@@ -1091,6 +1170,8 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             return TextSubtitleConverter.cues(fromWebVTT: text)
         case "srt":
             return TextSubtitleConverter.cues(fromSRT: text)
+        case "ass", "ssa":
+            return TextSubtitleConverter.cues(fromASS: text)
         default:
             let asVTT = TextSubtitleConverter.cues(fromWebVTT: text)
             return asVTT.isEmpty ? TextSubtitleConverter.cues(fromSRT: text) : asVTT
