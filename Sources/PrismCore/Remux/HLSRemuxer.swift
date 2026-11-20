@@ -312,6 +312,9 @@ final class HLSRemuxer: @unchecked Sendable {
     /// The host's choice between Dolby Vision and a base layer
     /// (`PrismCoreSession.Options.dolbyVisionPreference`).
     private let dolbyVisionPreference: DolbyVisionPreference
+    /// The host's opt-in to lowering a converted P7 FEL RPU's peak metadata
+    /// to its base layer's (`PrismCoreSession.Options.alignFELDeliveryMetadata`).
+    private let alignFELDeliveryMetadata: Bool
     /// Present = demand-driven session (phase 5): plan the segmentation
     /// upfront, publish complete VOD playlists, and re-anchor the producer
     /// wherever the loopback reports AVPlayer is fetching.
@@ -728,6 +731,7 @@ final class HLSRemuxer: @unchecked Sendable {
         displayIsDolbyVisionCapable: Bool = false,
         displaySource: DisplayCapabilities.Source = .caller,
         dolbyVisionPreference: DolbyVisionPreference = .automatic,
+        alignFELDeliveryMetadata: Bool = false,
         demand: DemandCoordinator? = nil,
         segmentCacheBytes: Int? = nil,
         sequentialPlaylist: PrismCoreSession.SequentialPlaylist = .event,
@@ -771,6 +775,7 @@ final class HLSRemuxer: @unchecked Sendable {
         self.displayIsDolbyVisionCapable = displayIsDolbyVisionCapable
         self.displaySource = displaySource
         self.dolbyVisionPreference = dolbyVisionPreference
+        self.alignFELDeliveryMetadata = alignFELDeliveryMetadata
         self.demand = demand
         self.segmentCacheBytes = segmentCacheBytes
         self.sequentialPlaylist = sequentialPlaylist
@@ -1161,7 +1166,9 @@ final class HLSRemuxer: @unchecked Sendable {
             }
         }
         let recordCorrected = sourceDolbyVision != videoTrack.dolbyVision
-        let dolbyVisionConverter = makeDolbyVisionConverter(video: videoTrack, dolbyVision: sourceDolbyVision)
+        let dolbyVisionConverter = makeDolbyVisionConverter(
+            input: input, video: videoTrack, dolbyVision: sourceDolbyVision
+        )
         // The host asked for the base layer, and this source has one: nothing
         // Dolby Vision is declared anywhere — no `dvh1`, no supplemental, no
         // record, HDR10 / HLG criteria. A P7 conversion still runs, because it
@@ -3470,14 +3477,28 @@ final class HLSRemuxer: @unchecked Sendable {
     /// - Parameter dolbyVision: the record the session believes — the
     ///   source's, or the 7 its RPU corrected a relabelled Profile 5 to.
     private func makeDolbyVisionConverter(
-        video: VideoTrackInfo, dolbyVision: DolbyVisionConfiguration?
+        input: UnsafeMutablePointer<AVFormatContext>,
+        video: VideoTrackInfo,
+        dolbyVision: DolbyVisionConfiguration?
     ) -> DolbyVisionRPUConverter? {
         guard let dv = dolbyVision, dv.isDualLayer, dv.rpuPresent else { return nil }
         guard video.hevcConfiguration != nil else { return nil }
+        // Read only when opted in: with the flag off nothing about the
+        // conversion may change, not even what it was told.
+        var baseLayerPeakNits: Double?
+        if alignFELDeliveryMetadata, video.streamIndex >= 0, video.streamIndex < Int(input.pointee.nb_streams) {
+            baseLayerPeakNits = SourceProbe.masteringDisplayPeakNits(
+                input.pointee.streams[video.streamIndex]?.pointee.codecpar
+            )
+        }
         // The prefix width comes from the record itself; a source whose hvcC we
         // couldn't parse never gets here (no `CODECS` string either, so it plays
         // media-direct).
-        return DolbyVisionRPUConverter(lengthSize: video.nalUnitLengthSize)
+        return DolbyVisionRPUConverter(
+            lengthSize: video.nalUnitLengthSize,
+            alignFELDeliveryMetadata: alignFELDeliveryMetadata,
+            baseLayerPeakNits: baseLayerPeakNits
+        )
     }
 
     // MARK: - Master playlist description

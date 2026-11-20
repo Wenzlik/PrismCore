@@ -1380,6 +1380,33 @@ public enum SourceProbe {
         )
     }
 
+    /// The stream's mastering-display peak (MDCV max luminance) in nits, from
+    /// `AV_PKT_DATA_MASTERING_DISPLAY_METADATA` — or `nil` when the container
+    /// did not carry one.
+    ///
+    /// Read only for the opt-in Profile 7 FEL peak alignment, which needs the
+    /// BASE LAYER's peak: in a P7 source the HDR10 static metadata describes
+    /// the base layer, while the RPU describes the BL+EL reconstruction.
+    /// Matroska and MP4 hand MDCV over as stream side data; a raw transport
+    /// stream carries it only in SEI, which `avformat_find_stream_info` does
+    /// not lift into `coded_side_data` — there this stays `nil` and the
+    /// alignment does nothing, which is the safe answer.
+    static func masteringDisplayPeakNits(
+        _ codecpar: UnsafeMutablePointer<AVCodecParameters>?
+    ) -> Double? {
+        guard let codecpar else { return nil }
+        let par = codecpar.pointee
+        guard let sideData = av_packet_side_data_get(
+            par.coded_side_data, par.nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA
+        ), let raw = sideData.pointee.data,
+              sideData.pointee.size >= MemoryLayout<AVMasteringDisplayMetadata>.size
+        else { return nil }
+        let metadata = raw.withMemoryRebound(to: AVMasteringDisplayMetadata.self, capacity: 1) { $0.pointee }
+        guard metadata.has_luminance != 0, metadata.max_luminance.den != 0 else { return nil }
+        let nits = av_q2d(metadata.max_luminance)
+        return nits.isFinite && nits > 0 ? nits : nil
+    }
+
     // MARK: - Small C bridges
 
     /// The demuxer's own name for a codec. Internal so the remuxer can check
