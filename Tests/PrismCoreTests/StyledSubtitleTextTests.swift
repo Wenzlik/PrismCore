@@ -351,6 +351,74 @@ struct StyledSubtitleTextTests {
         let cues = try #require(SubtitleRenditionSet.loadExternalCues(url))
         #expect(cues.map(\.text) == ["<i>ahoj</i>"])
     }
+
+    /// r5 P1.3: a short line with a long `\fn` name (or many runs) must cost
+    /// what it holds, in the software store and in a bounded remux history.
+    @Test func styledFootprintCountsAgainstBothCueBounds() {
+        let font = String(repeating: "F", count: 4_000)
+        func styled(_ index: Int) -> StyledSubtitleText {
+            StyledSubtitleText(runs: [StyledTextRun(text: "hi", fontName: font + "\(index)")])
+        }
+        #expect(styled(0).footprint > 4_000)
+        #expect(StyledSubtitleText(runs: Array(repeating: StyledTextRun(text: "a"), count: 100)).footprint
+                > 100 * MemoryLayout<StyledTextRun>.stride)
+
+        let store = SoftwareSubtitleCueStore(maximumCues: 100, maximumBytes: 10_000)
+        for index in 0..<10 {
+            store.insert(TimedTextCue(streamIndex: 0, start: Double(index), end: 100, text: "hi",
+                                      placement: nil, styled: styled(index)), currentTime: 0)
+        }
+        #expect(store.active(streamIndex: 0, at: 50).count == 2)
+
+        let set = SubtitleRenditionSet(
+            outputDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("r5-\(UUID())"),
+            cueHistory: .bounded(maxCues: 100, maxBytes: 10_000)
+        )
+        set.setTimelineOrigin(seconds: 0)
+        for index in 0..<10 {
+            set.emitHostCue(streamIndex: 0, SubtitleCue(start: Double(index), end: Double(index) + 1,
+                                                        text: "hi", styled: styled(index)))
+        }
+        #expect(set.historyStats.retainedCues == 2)
+        #expect(set.historyStats.retainedBytes <= 10_000)
+    }
+
+    /// r5 P1.1 / P2.5: an external file has no packets to re-read, so a
+    /// re-anchor — forward, then back — must restore its cues from the list
+    /// it was loaded with; and loading a big file must not be quadratic.
+    @Test func preloadedCuesSurviveReanchorBothWays() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("r5-vtt-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try WebVTTRenditionWriter(directory: directory)
+        writer.setTimelineOrigin(seconds: 0)
+        writer.preload([SubtitleCue(start: 600, end: 602, text: "ten minutes"),
+                        SubtitleCue(start: 1200, end: 1202, text: "twenty minutes")])
+        writer.reanchor(segmentIndex: 200, startSeconds: 1200)
+        try writer.flushSegment(start: 1200, end: 1206)
+        writer.reanchor(segmentIndex: 100, startSeconds: 600)
+        try writer.flushSegment(start: 600, end: 606)
+        let forward = try String(contentsOf: directory.appendingPathComponent("seg00200.vtt"), encoding: .utf8)
+        let back = try String(contentsOf: directory.appendingPathComponent("seg00100.vtt"), encoding: .utf8)
+        #expect(forward.contains("twenty minutes"))
+        #expect(back.contains("ten minutes"), "the cue the forward jump passed over must come back")
+
+        let many = (0..<10_000).map { SubtitleCue(start: Double($0), end: Double($0) + 0.5, text: "line \($0)") }
+        let big = try WebVTTRenditionWriter(directory: directory.appendingPathComponent("big"))
+        let elapsed = ContinuousClock().measure { big.preload(many) }
+        #expect(elapsed < .seconds(1), "preload took \(elapsed)")
+    }
+
+    /// r5 P2.6: a tx3g sample may be UTF-16 with a BOM; it must not vanish,
+    /// and its `styl` box still applies (offsets are characters).
+    @Test func tx3gUTF16SamplesAreRead() throws {
+        let bigEndian: [UInt8] = [0, 6, 0xFE, 0xFF, 0, 0x41, 0, 0x42]
+            + [0, 0, 0, 22] + Array("styl".utf8) + [0, 1] + [0, 0, 0, 1, 0, 1, 0x02, 18, 255, 0, 0, 255]
+        let text = try #require(SubtitleTextParser.styledText(payload: Data(bigEndian), format: .tx3g))
+        #expect(text.plainText == "AB")
+        #expect(text.runs.first?.isItalic == true && text.runs.first?.text == "A")
+        #expect(TextSubtitleConverter.cueText(from: Data([0, 4, 0xFE, 0xFF, 0, 0x41]), kind: .movText) == "A")
+        #expect(TextSubtitleConverter.cueText(from: Data([0, 4, 0xFF, 0xFE, 0x41, 0]), kind: .movText) == "A")
+    }
 }
 
 /// Cross-thread box for the cue handler.
@@ -360,4 +428,5 @@ private final class StyledCueBox<Value>: @unchecked Sendable {
     private var value: Value
     init(_ value: Value) { self.value = value }
     func withLock<T>(_ body: (inout Value) -> T) -> T { lock.withLock { body(&value) } }
+
 }

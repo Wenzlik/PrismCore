@@ -201,7 +201,7 @@ extension TextSubtitleConverter {
         guard bytes.count >= 2 else { return nil }
         let length = Int(bytes[0]) << 8 | Int(bytes[1])
         guard length > 0, bytes.count >= 2 + length,
-              let text = String(bytes: bytes[2..<(2 + length)], encoding: .utf8) else { return nil }
+              let text = movTextString(bytes[2..<(2 + length)]) else { return nil }
         let scalars = Array(text.unicodeScalars)
         var styleOf = [Int](repeating: 0, count: scalars.count)
         var styles = [description?.style ?? InlineStyle()]

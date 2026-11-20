@@ -158,7 +158,16 @@ enum TextSubtitleConverter {
         let bytes = [UInt8](payload)
         let length = Int(bytes[0]) << 8 | Int(bytes[1])
         guard length > 0, payload.count >= 2 + length else { return nil }
-        return String(data: payload[(payload.startIndex + 2)..<(payload.startIndex + 2 + length)], encoding: .utf8)
+        return movTextString(bytes[2..<(2 + length)])
+    }
+
+    /// A tx3g sample's text: UTF-8, or UTF-16 when it opens with a byte-order
+    /// mark (3GPP TS 26.245 § 5.17; RFC 4396 § 3). Read as UTF-8 only, a valid
+    /// UTF-16 sample was dropped whole (review r5 P2.6).
+    static func movTextString(_ bytes: ArraySlice<UInt8>) -> String? {
+        if bytes.starts(with: [0xFE, 0xFF]) { return String(bytes: bytes.dropFirst(2), encoding: .utf16BigEndian) }
+        if bytes.starts(with: [0xFF, 0xFE]) { return String(bytes: bytes.dropFirst(2), encoding: .utf16LittleEndian) }
+        return String(bytes: bytes, encoding: .utf8)
     }
 
     // MARK: - Sidecar files
