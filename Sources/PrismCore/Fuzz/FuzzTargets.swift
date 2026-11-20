@@ -45,6 +45,7 @@ package enum FuzzTargets {
         "alternative-transfer-sei": { @Sendable in alternativeTransferSEI($0) },
         "truehd-major-sync": { @Sendable in trueHDMajorSync($0) },
         "flac-streaminfo": { @Sendable in flacStreamInfo($0) },
+        "dovi-rpu-peak-align": { @Sendable in doviRPUPeakAlign($0) },
     ]
 
     // MARK: - Targets
@@ -170,6 +171,85 @@ package enum FuzzTargets {
                 fatalError("\(format): claimed a container declares no index, which this walk cannot know")
             }
         }
+    }
+
+    /// The FEL peak aligner (`DolbyVisionRPUPeakAligner`): emulation-prevention
+    /// escaping, the CRC proof, the bit-offset search for the DM block and the
+    /// ext-block walk, then the in-place patch — over an arbitrary unspec62 NAL
+    /// read against the seed's libdovi report (there is no libdovi here).
+    ///
+    /// Its output replaces an RPU the display trusts, so the wrong answers are
+    /// the ones that matter: bits changed outside the fields it may lower, a
+    /// value raised, a CRC nothing downstream accepts, an escape that changes
+    /// form. Every input also runs with its CRC repaired, or a single flipped
+    /// bit anywhere would stop it at the CRC proof and the walk behind it
+    /// would never see a mutation.
+    package static func doviRPUPeakAlign(_ bytes: [UInt8]) {
+        typealias Aligner = DolbyVisionRPUPeakAligner
+        guard Aligner.unescape(Aligner.escape(bytes)) == bytes else {
+            fatalError("unescape(escape(x)) != x")
+        }
+        let reported = FuzzSeeds.doviRPUReported
+        guard let target = Aligner.target(for: reported, elType: "FEL", baseLayerPeakNits: 1000) else {
+            fatalError("the seed's report is no longer eligible — this target would test nothing")
+        }
+        // Only ever lowers (checked here; `locate` below proves the output
+        // holds exactly `target`).
+        guard target.sourceMaxPQ <= reported.sourceMaxPQ,
+              let t1 = target.level1, let r1 = reported.level1, t1.maxPQ <= r1.maxPQ, t1.avgPQ <= r1.avgPQ,
+              let t6 = target.level6, let r6 = reported.level6,
+              t6.maxMasteringNits <= r6.maxMasteringNits, t6.maxCLL <= r6.maxCLL
+        else { fatalError("target(for:) raised a value") }
+
+        for nal in [bytes, repairingRPUCRC(bytes)].compactMap({ $0 }) {
+            let identity = Aligner.rewrite(nal, reported: reported, target: reported)
+            guard let out = Aligner.rewrite(nal, reported: reported, target: target) else {
+                // Both calls pass the same gates; only the values differ.
+                guard identity == nil else { fatalError("rewrite refused a target it accepts as identity") }
+                continue
+            }
+            // Writing back what is already there, CRC included, is a no-op —
+            // anything else means the patch or the escaper moved a bit.
+            guard identity == nal else { fatalError("identity rewrite changed the NAL") }
+            guard out.count > 2, out[0..<2] == nal[0..<2] else { fatalError("NAL header changed") }
+            let before = Aligner.unescape(Array(nal[2...]))
+            let after = Aligner.unescape(Array(out[2...]))
+            guard Aligner.escape(after) == Array(out[2...]), after.count == before.count else {
+                fatalError("rewritten payload does not escape round-trip / changed length")
+            }
+            guard let layout = Aligner.locate(in: before, reported: reported) else {
+                fatalError("rewrite succeeded on an RPU locate refuses")
+            }
+            // Fields read back as `target` at the same offsets, CRC valid.
+            guard Aligner.locate(in: after, reported: target) == layout else {
+                fatalError("rewritten RPU does not read back as the target")
+            }
+            let crcBit = (before.count - 5) * 8
+            var allowed = [layout.sourceMaxPQ..<(layout.sourceMaxPQ + 12), crcBit..<(crcBit + 32)]
+            if let at = layout.level1 { allowed.append((at + 12)..<(at + 36)) }
+            if let at = layout.level6 { allowed += [at..<(at + 16), (at + 32)..<(at + 48)] }
+            for index in before.indices where before[index] != after[index] {
+                for bit in 0..<8 where (before[index] ^ after[index]) & (0x80 >> UInt8(bit)) != 0 {
+                    guard allowed.contains(where: { $0.contains(index * 8 + bit) }) else {
+                        fatalError("bit \(index * 8 + bit) changed outside the permitted fields")
+                    }
+                }
+            }
+        }
+    }
+
+    /// `nal` with its RPU's terminator and CRC rewritten to be valid (and the
+    /// payload re-escaped), or `nil` when it is too short to hold an RPU. The
+    /// header byte is left alone: a wrong NAL type is a legitimate refusal.
+    static func repairingRPUCRC(_ nal: [UInt8]) -> [UInt8]? {
+        guard nal.count > 2 else { return nil }
+        var rpu = DolbyVisionRPUPeakAligner.unescape(Array(nal[2...]))
+        guard rpu.count >= 7 else { return nil }
+        let crcAt = rpu.count - 5
+        rpu[rpu.count - 1] = 0x80
+        let crc = DolbyVisionRPUPeakAligner.crc32(rpu[1..<crcAt])
+        for i in 0..<4 { rpu[crcAt + i] = UInt8(truncatingIfNeeded: crc >> (24 - 8 * i)) }
+        return Array(nal[0..<2]) + DolbyVisionRPUPeakAligner.escape(rpu)
     }
 
     /// The JOC walk over an arbitrary packet. The walk is best-effort by

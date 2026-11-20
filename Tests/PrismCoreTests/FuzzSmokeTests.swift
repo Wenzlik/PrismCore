@@ -159,5 +159,27 @@ struct FuzzSmokeTests {
             }
             #expect(transfer == 18, "the alternative-transfer seed never reached its message (\(framing))")
         }
+
+        // The FEL peak-align seed must be escaped (so the escape round-trip
+        // runs), pass the CRC proof, find the DM block and both ext blocks
+        // past the L2 it steps over, and actually lower — the whole rewrite.
+        typealias Aligner = DolbyVisionRPUPeakAligner
+        let nal = FuzzSeeds.doviRPUNAL
+        let reported = FuzzSeeds.doviRPUReported
+        let rpu = Aligner.unescape(Array(nal[2...]))
+        #expect(rpu.count < nal.count - 2, "the peak-align seed carries no emulation-prevention byte")
+        let layout = Aligner.locate(in: rpu, reported: reported)
+        #expect(layout?.level1 != nil && layout?.level6 != nil, "the peak-align seed never reached its ext blocks")
+        let target = try #require(Aligner.target(for: reported, elType: "FEL", baseLayerPeakNits: 1000))
+        let aligned = Aligner.rewrite(nal, reported: reported, target: target)
+        #expect(aligned != nil && aligned != nal, "the peak-align seed was not rewritten")
+        // A mutation is only worth anything past the CRC proof: one flipped
+        // header bit is refused as-is and accepted once the target repairs it.
+        var mutated = nal
+        mutated[3] ^= 0x01
+        #expect(Aligner.rewrite(mutated, reported: reported, target: target) == nil)
+        #expect(FuzzTargets.repairingRPUCRC(mutated).flatMap {
+            Aligner.rewrite($0, reported: reported, target: target)
+        } != nil, "a CRC-repaired mutation never reaches the rewrite")
     }
 }

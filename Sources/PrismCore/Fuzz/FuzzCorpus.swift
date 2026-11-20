@@ -28,7 +28,73 @@ package enum FuzzSeeds {
         "alternative-transfer-sei": [alternativeTransferUnit, [0, 0, 0, 1] + alternativeTransferNAL],
         "truehd-major-sync": [trueHDAtmosUnits],
         "flac-streaminfo": [flacMatroskaPrivate],
+        "dovi-rpu-peak-align": [doviRPUNAL],
     ]
+
+    /// What libdovi would report for `doviRPUNAL` — the FEL peak aligner needs
+    /// a report to check the bitstream against, and the fuzzer has no libdovi.
+    /// A FEL-shaped 4000-nit grade, so against a 1000-nit base layer every
+    /// field the aligner may touch is lowered.
+    static let doviRPUReported = DolbyVisionRPUPeakAligner.DMFields(
+        yccToRGB: ([9574, 0, 13802, 9574, -1540, -5348, 9574, 17610, 0] as [Int16]).map { UInt16(bitPattern: $0) },
+        sourceMinPQ: 62,
+        sourceMaxPQ: 3696,
+        level1: DolbyVisionRPUPeakAligner.DMFields.Level1(minPQ: 0, maxPQ: 3600, avgPQ: 1200),
+        level6: DolbyVisionRPUPeakAligner.DMFields.Level6(maxMasteringNits: 4000, minMastering: 50, maxCLL: 3500, maxFALL: 400)
+    )
+
+    /// An unspec62 NAL carrying `doviRPUReported` in the DM syntax the aligner
+    /// assumes: a stand-in header and mapping (with a `00 00 01` run, so the
+    /// NAL is emulation-escaped), the DM block off a byte boundary, then L1,
+    /// an L2 the walk must step over, and L6 — with a valid CRC, or the seed
+    /// dies at the CRC proof. Built here rather than shared with the test
+    /// target's `SyntheticRPU`, which a non-test target cannot see.
+    package static let doviRPUNAL: [UInt8] = {
+        let dm = doviRPUReported
+        var bits: [Bool] = []
+        func put(_ value: UInt64, _ width: Int) {
+            for i in stride(from: width - 1, through: 0, by: -1) { bits.append((value >> UInt64(i)) & 1 == 1) }
+        }
+        func ue(_ value: UInt64) {
+            let coded = value + 1
+            let length = 64 - coded.leadingZeroBitCount
+            put(0, length - 1)
+            put(coded, length)
+        }
+        func align() { while bits.count % 8 != 0 { bits.append(false) } }
+
+        put(0x19, 8); put(0x08, 8)
+        for byte in [0x00, 0x00, 0x01, 0x5A, 0xC3] as [UInt64] { put(byte, 8) }
+        put(0b10110, 5)
+        ue(0); ue(1); ue(0)
+        for c in dm.yccToRGB { put(UInt64(c), 16) }
+        for offset in [8_388_608, 67_108_864, 67_108_864] as [UInt64] { put(offset, 32) }
+        for c in [7222, 8771, 390, 2654, 12430, 1300, 0, 422, 15962] as [UInt64] { put(c, 16) }
+        put(65535, 16); put(0, 16); put(0, 16); put(0, 32) // signal_eotf, params 0–2
+        put(12, 5); put(0, 2); put(0, 2); put(0, 2)
+        put(UInt64(dm.sourceMinPQ), 12); put(UInt64(dm.sourceMaxPQ), 12); put(42, 10)
+        ue(3)
+        align()
+        if let l1 = dm.level1 {
+            ue(5); put(1, 8)
+            put(UInt64(l1.minPQ), 12); put(UInt64(l1.maxPQ), 12); put(UInt64(l1.avgPQ), 12); put(0, 4)
+        }
+        ue(11); put(2, 8)
+        put(2081, 12)
+        for _ in 0..<5 { put(2048, 12) }
+        put(2048, 13); put(0, 3)
+        if let l6 = dm.level6 {
+            ue(8); put(6, 8)
+            for v in [l6.maxMasteringNits, l6.minMastering, l6.maxCLL, l6.maxFALL] { put(UInt64(v), 16) }
+        }
+        align()
+        var rpu: [UInt8] = stride(from: 0, to: bits.count, by: 8).map { start in
+            bits[start..<(start + 8)].reduce(UInt8(0)) { $0 << 1 | ($1 ? 1 : 0) }
+        }
+        let crc = DolbyVisionRPUPeakAligner.crc32(rpu[1...])
+        rpu += (0..<4).map { UInt8(truncatingIfNeeded: crc >> (24 - 8 * $0)) } + [0x80]
+        return [62 << 1, 0x01] + DolbyVisionRPUPeakAligner.escape(rpu)
+    }()
 
     /// An HEVC prefix SEI whose 147 message (preferred transfer 18, HLG) sits
     /// behind a user-data-unregistered one, so the loop has to step over a

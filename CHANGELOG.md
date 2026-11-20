@@ -8,6 +8,32 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Added
+
+- `PrismCoreSession.Options.alignFELDeliveryMetadata` (and the same
+  initializer parameter), **opt-in, default `false`**: for a Profile 7
+  **FEL** source converted to 8.1, lowers the RPU's `source_max_pq`, L1
+  `max_pq` / `avg_pq` and L6 mastering peak / MaxCLL to the base layer's MDCV
+  peak. The 8.1 stream plays the base layer alone (typically 1000 nit), but
+  a FEL RPU still describes the BL+EL picture (typically 4000 nit), so
+  display management tone-maps for highlights that are not there. Only ever
+  lowers; never touches MEL, trims (L2 / L8), L5 / L9 / L10 / L11, the
+  mapping or the enhancement layer; needs a known MDCV peak ≤ 1000 nit
+  (≥ 400) and an RPU ≥ 4000 nit. The edit is an in-place fixed-width patch
+  of the RPU libdovi wrote (libdovi has no setter for these fields), proved
+  per RPU — every field read back at its offset must equal libdovi's report,
+  the CRC must reproduce before it is recomputed, and libdovi must parse the
+  result back as exactly the intended values — or the RPU is left as
+  converted. Unmeasured on a display (no dEITP comparison yet), hence off.
+  With the flag off the conversion is byte-for-byte unchanged.
+- `DolbyVisionConversionStats.alignedRPUs` / `alignSkippedRPUs` — what the
+  alignment did; diagnostics only, outside `isClean` and `statsLabel`.
+- Fuzz target `dovi-rpu-peak-align` (with a synthetic, CRC-valid seed) for
+  the new RPU bit patcher: output is either refused or differs from the input
+  only in the permitted fields and the CRC, only ever lowers, re-reads as the
+  intended values, and escapes round-trip. Mutations run CRC-repaired too, so
+  they reach the walk behind the CRC proof.
+
 ## [4.0.7] — 2026-11-20
 
 Source-compatible: ASS/SSA rendered with libass for hosts that ask, and
