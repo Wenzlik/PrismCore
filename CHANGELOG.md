@@ -60,7 +60,14 @@ exactly the cues, renditions and playback it got before (issue #197).
     path reads it subtitle-only, without decoding, before its normal seek.
     Matroska parses its Cues on the first seek, so the first preroll of a
     context may seek once more. A subtitle track without Cues still misses
-    events older than the blind window.
+    events older than the blind window, and an indexed event that started
+    more than 30 s before the target (a long sign under busy dialogue) is
+    missed on the first jump into an unread region: FFmpeg's index carries
+    no event durations, so finding it would mean reading every byte from
+    there on each seek.
+  - A track with no CodecPrivate (or no `[Events]` Format) gets a minimal
+    header, so its events are accepted instead of silently dropped.
+    `[Fonts]` in CR-only and CRLF scripts are budgeted like LF ones.
   - `invalidate()` forces the next frame after a host dropped its overlay;
     an empty frame (a clear) does the same on its own.
   - **Cost:** nothing at all under `.text`. Under `.libass` the renderer
@@ -94,6 +101,14 @@ exactly the cues, renditions and playback it got before (issue #197).
   lines) into a WebVTT rendition; before, they produced no rendition.
 - A WebVTT rendition no longer prints one cue twice when a re-anchor lands
   inside it and the libass preroll re-reads its packet.
+- An external subtitle file keeps its cues across re-anchors: jumping
+  forward and back used to leave the skipped interval's segments empty,
+  since a sidecar has no packets to re-read. Loading one is linear in its
+  cue count.
+- tx3g samples in UTF-16 (byte-order mark) are read instead of dropped.
+- The cue stores' byte bounds (software store, `SubtitleCueHistory
+  .bounded`) charge styled runs in full — fonts, voices, classes, per-run
+  overhead — not only their visible words.
 
 ### Licensing
 
