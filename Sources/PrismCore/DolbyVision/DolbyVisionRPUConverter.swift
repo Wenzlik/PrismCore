@@ -78,6 +78,13 @@ final class DolbyVisionRPUConverter {
     private(set) var felRPUs = 0
     private(set) var melRPUs = 0
 
+    /// FEL RPUs whose peak / mastering fields were lowered to the base
+    /// layer's (`DolbyVisionRPUPeakAligner`), and eligible ones left as
+    /// converted because the rewrite could not be proved safe. Both stay zero
+    /// unless the host opted in.
+    private(set) var alignedRPUs = 0
+    private(set) var alignSkippedRPUs = 0
+
     /// Packets this converter DECIDED to rewrite and then could not: the walk
     /// found an RPU or an enhancement layer, but `HEVCNALUnits.rewrite` refused
     /// — the packet did not frame, or the output buffer could not be allocated.
@@ -102,14 +109,42 @@ final class DolbyVisionRPUConverter {
     private var pendingDropped = 0
     private var pendingFEL = 0
     private var pendingMEL = 0
+    private var pendingAligned = 0
+    private var pendingAlignSkipped = 0
 
     /// - Parameter lengthSize: from `HEVCNALUnits.lengthSize(fromHVCC:)`. A
     ///   source whose record can't be read isn't convertible: without the prefix
     ///   width the packet can't be walked at all.
-    convenience init?(lengthSize: Int?) {
+    /// - Parameter alignFELDeliveryMetadata: the host's opt-in
+    ///   (`PrismCoreSession.Options.alignFELDeliveryMetadata`). `false` keeps
+    ///   every RPU exactly as libdovi wrote it.
+    /// - Parameter baseLayerPeakNits: the source's MDCV max luminance; `nil`
+    ///   (unknown) aligns nothing even when opted in.
+    convenience init?(
+        lengthSize: Int?, alignFELDeliveryMetadata: Bool = false, baseLayerPeakNits: Double? = nil
+    ) {
         guard DolbyVisionRPUConverter.isAvailable else { return nil }
-        self.init(lengthSize: lengthSize, rpuProcessor: DolbyVisionRPUConverter.convertRPU)
+        self.init(
+            lengthSize: lengthSize,
+            rpuProcessor: DolbyVisionRPUConverter.convertRPU,
+            felPeakAlignment: alignFELDeliveryMetadata
+                ? FELPeakAlignment(baseLayerPeakNits: baseLayerPeakNits, readFields: DolbyVisionRPUConverter.readDMFields)
+                : nil
+        )
     }
+
+    /// What the opt-in FEL peak alignment needs: the base layer's peak, and a
+    /// way to read an RPU NAL's DM fields back — libdovi in production. The
+    /// read is injectable for the same reason `rpuProcessor` is: no fixture,
+    /// and libdovi may not be linked.
+    struct FELPeakAlignment {
+        let baseLayerPeakNits: Double?
+        let readFields: ([UInt8]) -> DolbyVisionRPUPeakAligner.DMFields?
+    }
+
+    /// `nil` = alignment off, which must stay byte-identical to a build
+    /// without it.
+    private let felPeakAlignment: FELPeakAlignment?
 
     /// One RPU NAL in, its 8.1 rewrite (or `nil` if refused) and the ORIGINAL
     /// header's raw `el_type` out. Production is always `convertRPU`.
@@ -125,10 +160,15 @@ final class DolbyVisionRPUConverter {
 
     /// Deliberately NOT gated on `isAvailable`: the injected processor stands
     /// in for libdovi, so the bookkeeping is testable in a build without it.
-    init?(lengthSize: Int?, rpuProcessor: @escaping RPUProcessor) {
+    init?(
+        lengthSize: Int?,
+        rpuProcessor: @escaping RPUProcessor,
+        felPeakAlignment: FELPeakAlignment? = nil
+    ) {
         guard let lengthSize else { return nil }
         self.lengthSize = lengthSize
         self.rpuProcessor = rpuProcessor
+        self.felPeakAlignment = felPeakAlignment
     }
 
     /// Converted packet payload, or `nil` when this packet needed no change (the
@@ -175,6 +215,8 @@ final class DolbyVisionRPUConverter {
         pendingDropped = 0
         pendingFEL = 0
         pendingMEL = 0
+        pendingAligned = 0
+        pendingAlignSkipped = 0
     }
 
     /// `rewrote == false` means one of two things, and only one of them is
@@ -199,6 +241,8 @@ final class DolbyVisionRPUConverter {
         droppedEnhancementLayerNALs += pendingDropped
         felRPUs += pendingFEL
         melRPUs += pendingMEL
+        alignedRPUs += pendingAligned
+        alignSkippedRPUs += pendingAlignSkipped
         resetPending()
     }
 
@@ -257,7 +301,41 @@ final class DolbyVisionRPUConverter {
             return .drop
         }
         pendingConverted += 1
-        return .replace(converted)
+        return .replace(alignedIfEligible(converted, elType: rawELType))
+    }
+
+    /// The converted RPU with its peak fields lowered to the base layer's, or
+    /// `converted` itself whenever that is not both wanted and proved safe.
+    ///
+    /// Two proofs, either of which failing leaves the RPU as converted (and
+    /// counts `alignSkippedRPUs`): the aligner's own — every field at its
+    /// computed offset reads what libdovi reported, the CRC reproduces — and
+    /// libdovi's, after the fact: the patched NAL must parse, and read back
+    /// as exactly the intended fields with everything else unchanged. Only
+    /// the RPU is ever passed here; the enhancement layer was dropped above
+    /// without being read.
+    private func alignedIfEligible(_ converted: [UInt8], elType: String?) -> [UInt8] {
+        // Cheap gates first: the read-back parses the RPU again, which only
+        // an opted-in FEL session with a usable base-layer peak should pay.
+        guard let alignment = felPeakAlignment,
+              Self.classify(elType: elType) == .fel,
+              DolbyVisionRPUPeakAligner.isEligibleBaseLayerPeak(alignment.baseLayerPeakNits)
+        else { return converted }
+        guard let reported = alignment.readFields(converted) else {
+            pendingAlignSkipped += 1
+            return converted
+        }
+        guard let target = DolbyVisionRPUPeakAligner.target(
+            for: reported, elType: elType, baseLayerPeakNits: alignment.baseLayerPeakNits
+        ) else { return converted }
+        guard let patched = DolbyVisionRPUPeakAligner.rewrite(converted, reported: reported, target: target),
+              alignment.readFields(patched) == target
+        else {
+            pendingAlignSkipped += 1
+            return converted
+        }
+        pendingAligned += 1
+        return patched
     }
 
     /// Whether this NAL is enhancement layer, and so must not reach a stream
@@ -316,6 +394,110 @@ final class DolbyVisionRPUConverter {
         return (nil, nil)
         #endif
     }
+
+    /// One written unspec62 NAL parsed back through libdovi into the fields
+    /// the aligner works on, or `nil` if libdovi reports an error, the RPU has
+    /// no DM block, or the block is the compressed form (which carries no
+    /// coefficients to locate it by).
+    ///
+    /// `untouched` fingerprints the rest of what libdovi reports — every
+    /// other DM scalar and the ext blocks the alignment must never change
+    /// (L2, L3, L4, L5, L8, L9, L10, L11, L254, L255) — so the read-back
+    /// after a rewrite proves they survived, not just that the new values
+    /// landed.
+    static func readDMFields(_ nal: [UInt8]) -> DolbyVisionRPUPeakAligner.DMFields? {
+        #if canImport(Libdovi)
+        return nal.withUnsafeBufferPointer { buffer -> DolbyVisionRPUPeakAligner.DMFields? in
+            guard let base = buffer.baseAddress,
+                  let rpu = dovi_parse_unspec62_nalu(base, buffer.count)
+            else { return nil }
+            defer { dovi_rpu_free(rpu) }
+            // Parsing returns an object even on failure; the error is how it
+            // says so (libdovi's own note on `dovi_rpu_get_error`). A CRC that
+            // does not match is one such error.
+            guard dovi_rpu_get_error(rpu) == nil, let dmPointer = dovi_rpu_get_vdr_dm_data(rpu) else { return nil }
+            defer { dovi_rpu_free_vdr_dm_data(dmPointer) }
+            let dm = dmPointer.pointee
+            guard !dm.compressed else { return nil }
+
+            let coefficients: [Int16] = [
+                dm.ycc_to_rgb_coef0, dm.ycc_to_rgb_coef1, dm.ycc_to_rgb_coef2,
+                dm.ycc_to_rgb_coef3, dm.ycc_to_rgb_coef4, dm.ycc_to_rgb_coef5,
+                dm.ycc_to_rgb_coef6, dm.ycc_to_rgb_coef7, dm.ycc_to_rgb_coef8,
+            ]
+            let ext = dm.dm_data
+            // UInt64 fields convert truncating: a fingerprint must never be
+            // the thing that traps in a playback path.
+            var untouched: [Int64] = [
+                Int64(truncatingIfNeeded: dm.affected_dm_metadata_id),
+                Int64(truncatingIfNeeded: dm.current_dm_metadata_id),
+                Int64(truncatingIfNeeded: dm.scene_refresh_flag),
+                Int64(dm.ycc_to_rgb_offset0), Int64(dm.ycc_to_rgb_offset1), Int64(dm.ycc_to_rgb_offset2),
+                Int64(dm.rgb_to_lms_coef0), Int64(dm.rgb_to_lms_coef1), Int64(dm.rgb_to_lms_coef2),
+                Int64(dm.rgb_to_lms_coef3), Int64(dm.rgb_to_lms_coef4), Int64(dm.rgb_to_lms_coef5),
+                Int64(dm.rgb_to_lms_coef6), Int64(dm.rgb_to_lms_coef7), Int64(dm.rgb_to_lms_coef8),
+                Int64(dm.signal_eotf), Int64(dm.signal_eotf_param0), Int64(dm.signal_eotf_param1),
+                Int64(dm.signal_eotf_param2), Int64(dm.signal_bit_depth), Int64(dm.signal_color_space),
+                Int64(dm.signal_chroma_format), Int64(dm.signal_full_range_flag), Int64(dm.source_diagonal),
+                Int64(truncatingIfNeeded: ext.num_ext_blocks),
+            ]
+            // A marker per block so "absent" and "present with zeros" differ.
+            func block<T>(_ pointer: UnsafePointer<T>?, _ fields: (T) -> [Int64]) {
+                guard let pointer else { untouched.append(-1); return }
+                untouched.append(1)
+                untouched += fields(pointer.pointee)
+            }
+            func list<T>(_ items: UnsafePointer<UnsafePointer<T>?>?, _ count: Int, _ fields: (T) -> [Int64]) {
+                untouched.append(Int64(count))
+                guard let items else { return }
+                for i in 0..<count { block(items[i], fields) }
+            }
+            list(ext.level2.list, ext.level2.len) {
+                [Int64($0.target_max_pq), Int64($0.trim_slope), Int64($0.trim_offset), Int64($0.trim_power),
+                 Int64($0.trim_chroma_weight), Int64($0.trim_saturation_gain), Int64($0.ms_weight)]
+            }
+            block(ext.level3) { [Int64($0.min_pq_offset), Int64($0.max_pq_offset), Int64($0.avg_pq_offset)] }
+            block(ext.level4) { [Int64($0.anchor_pq), Int64($0.anchor_power)] }
+            block(ext.level5) {
+                [Int64($0.active_area_left_offset), Int64($0.active_area_right_offset),
+                 Int64($0.active_area_top_offset), Int64($0.active_area_bottom_offset)]
+            }
+            list(ext.level8.list, ext.level8.len) {
+                [Int64(truncatingIfNeeded: $0.length), Int64($0.target_display_index), Int64($0.trim_slope), Int64($0.trim_offset),
+                 Int64($0.trim_power), Int64($0.trim_chroma_weight), Int64($0.trim_saturation_gain),
+                 Int64($0.ms_weight), Int64($0.target_mid_contrast), Int64($0.clip_trim)]
+            }
+            block(ext.level9) { [Int64(truncatingIfNeeded: $0.length), Int64($0.source_primary_index)] }
+            list(ext.level10.list, ext.level10.len) {
+                [Int64(truncatingIfNeeded: $0.length), Int64($0.target_display_index), Int64($0.target_max_pq),
+                 Int64($0.target_min_pq), Int64($0.target_primary_index)]
+            }
+            block(ext.level11) { [Int64($0.content_type), Int64($0.whitepoint), $0.reference_mode_flag ? 1 : 0] }
+            block(ext.level254) { [Int64($0.dm_mode), Int64($0.dm_version_index)] }
+            block(ext.level255) { [Int64($0.dm_run_mode), Int64($0.dm_run_version)] }
+
+            return DolbyVisionRPUPeakAligner.DMFields(
+                yccToRGB: coefficients.map { UInt16(bitPattern: $0) },
+                sourceMinPQ: dm.source_min_pq,
+                sourceMaxPQ: dm.source_max_pq,
+                level1: ext.level1.map {
+                    DolbyVisionRPUPeakAligner.DMFields.Level1(minPQ: $0.pointee.min_pq, maxPQ: $0.pointee.max_pq, avgPQ: $0.pointee.avg_pq)
+                },
+                level6: ext.level6.map {
+                    DolbyVisionRPUPeakAligner.DMFields.Level6(
+                        maxMasteringNits: $0.pointee.max_display_mastering_luminance,
+                        minMastering: $0.pointee.min_display_mastering_luminance,
+                        maxCLL: $0.pointee.max_content_light_level,
+                        maxFALL: $0.pointee.max_frame_average_light_level
+                    )
+                },
+                untouched: untouched
+            )
+        }
+        #else
+        return nil
+        #endif
+    }
 }
 
 /// Which kind of enhancement layer a Profile 7 source carried, as its RPUs
@@ -364,8 +546,16 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
     /// from the first produced segment onwards, not at probe time.
     public let felRPUs: Int
     public let melRPUs: Int
+    /// FEL RPUs whose peak / mastering metadata was lowered to the base
+    /// layer's (`PrismCoreSession.Options.alignFELDeliveryMetadata`), and
+    /// eligible FEL RPUs left exactly as converted because the rewrite could
+    /// not be proved safe. Diagnostics only: both are zero unless the host
+    /// opted in, and neither enters `isClean` — a skipped RPU still plays as a
+    /// correct 8.1 conversion.
+    public let alignedRPUs: Int
+    public let alignSkippedRPUs: Int
 
-    /// `staleUnconvertedPackets`, `felRPUs` and `melRPUs` default so that
+    /// Everything after `droppedEnhancementLayerNALs` defaults so that
     /// existing callers stay source compatible.
     public init(
         convertedRPUs: Int,
@@ -373,7 +563,9 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
         droppedEnhancementLayerNALs: Int,
         staleUnconvertedPackets: Int = 0,
         felRPUs: Int = 0,
-        melRPUs: Int = 0
+        melRPUs: Int = 0,
+        alignedRPUs: Int = 0,
+        alignSkippedRPUs: Int = 0
     ) {
         self.convertedRPUs = convertedRPUs
         self.failedRPUs = failedRPUs
@@ -381,6 +573,8 @@ public struct DolbyVisionConversionStats: Sendable, Equatable {
         self.staleUnconvertedPackets = staleUnconvertedPackets
         self.felRPUs = felRPUs
         self.melRPUs = melRPUs
+        self.alignedRPUs = alignedRPUs
+        self.alignSkippedRPUs = alignSkippedRPUs
     }
 
     /// The enhancement layer the source carried, or `nil` when no RPU said.
