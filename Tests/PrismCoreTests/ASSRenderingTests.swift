@@ -185,6 +185,131 @@ struct ASSRenderingTests {
         #expect(starts[entry(10, 0)] == 54)
         #expect(entry(1, 1_000) == 0)
         #expect(entry(0, 1_000) == 0)
+        // r3 P1.1: an indexed event start reaches back whatever the bitrate —
+        // 4K at 80 Mb/s, sign indexed at 35 s → the entry at or before it.
+        func indexed(_ anchor: Int, _ bitRate: Int64, _ start: Double) -> Int {
+            HLSRemuxer.subtitlePrerollEntry(anchor: anchor, startSeconds: { starts[$0] },
+                                            bitRate: bitRate, indexedStart: start)
+        }
+        #expect(starts[indexed(10, 80_000_000, 35)] == 30)
+        #expect(starts[indexed(10, 80_000_000, 36)] == 36)
+        // The blind window still wins when it reaches further.
+        #expect(starts[indexed(10, 2_000_000, 50)] == 30)
+        // An "event" at or after the anchor adds nothing.
+        #expect(indexed(10, 80_000_000, 60) == 10)
+    }
+
+    /// r3 P1.1: the Cue walk finds the EARLIEST indexed event in the window
+    /// — FFmpeg's own backtrack stops at the latest one (58 s here).
+    @Test func indexedPrerollFindsTheEarliestOverlappingEvent() throws {
+        let probed = try SourceProbe.open(url: try fixture("h264_aac_ass_overlap_80s.mkv"))
+        let input = try #require(probed.consumeContext())
+        let tracks = try #require(ASSTrackSet(input: input))
+        // Matroska parses Cues on the first seek, not at open: until then
+        // the subtitle index is empty.
+        #expect(tracks.earliestIndexedEventStart(in: input, before: 60) == nil)
+        #expect(avformat_seek_file(input, -1, Int64.min, 60 * Int64(AV_TIME_BASE), Int64.max, 0) >= 0)
+        #expect(tracks.earliestIndexedEventStart(in: input, before: 60) == 50)
+        #expect(tracks.earliestIndexedEventStart(in: input, before: 45) == nil)
+        // At 4K bitrates the blind window is under a second; the index still reaches 50 s.
+        input.pointee.bit_rate = 80_000_000
+        #expect(tracks.prerollStart(in: input, before: 60) == 50)
+        input.pointee.bit_rate = 0
+        #expect(tracks.prerollStart(in: input, before: 45) == 35)   // blind 10 s, nothing indexed
+        var closing: UnsafeMutablePointer<AVFormatContext>? = input
+        avformat_close_input(&closing)
+    }
+
+    /// Both events of the overlap fixture on screen at once: the sign at the
+    /// bottom and the short line at the top.
+    private func showsBothOverlapEvents(_ renderer: ASSSubtitleRenderer, at time: Double) -> Bool {
+        guard let shown = images(renderer.frame(at: time, canvas: canvas)) else { return false }
+        return shown.contains { $0.frame.minY > 180 } && shown.contains { $0.frame.maxY < 180 }
+    }
+
+    /// r3 P1.1, software path: `load(startAt:)` and `seek(to:)` into a region
+    /// never read still show the sign that started 8–10 s earlier.
+    @Test func softwareSeekIntoUnreadRegionPrerollsRunningEvents() throws {
+        let url = try fixture("h264_aac_ass_overlap_80s.mkv")
+        let started = SoftwarePlaybackPipeline(videoSink: RecordingVideoSink(), audioSink: RecordingAudioSink(),
+                                               timeline: RecordingTimeline(), allowHardwareDecode: false)
+        started.setASSRendering(.libass)
+        try started.load(probed: SourceProbe.open(url: url), startAt: CMTime(seconds: 58.5, preferredTimescale: 1_000))
+        defer { started.stop() }
+        started.waitForFeedQueue()
+        let first = try #require(started.assRenderer(streamIndex: 2))
+        #expect(showsBothOverlapEvents(first, at: 58.7))
+
+        let seeking = SoftwarePlaybackPipeline(videoSink: RecordingVideoSink(), audioSink: RecordingAudioSink(),
+                                               timeline: RecordingTimeline(), allowHardwareDecode: false)
+        seeking.setASSRendering(.libass)
+        try seeking.load(probed: SourceProbe.open(url: url))
+        defer { seeking.stop() }
+        seeking.waitForFeedQueue()
+        let renderer = try #require(seeking.assRenderer(streamIndex: 2))
+        #expect(renderer.eventCount == 0, "the head of the file has no events; nothing near 50 s was read yet")
+        seeking.seek(to: CMTime(seconds: 58.5, preferredTimescale: 1_000))
+        seeking.waitForFeedQueue()
+        #expect(showsBothOverlapEvents(renderer, at: 58.7))
+    }
+
+    /// r3 P1.1, remux path: over a slow origin the producer is still near
+    /// the head when a demand at ~58 s re-anchors into bytes never read;
+    /// the re-anchor's preroll must bring both events in.
+    @Test func remuxReanchorIntoUnreadRegionPrerollsRunningEvents() async throws {
+        // A fast local play stores the keyframe plan under a host identity;
+        // the slow origin then plans from it (cold, its index load would run
+        // out of budget and leave no plan to demand from). At ~30 KB/s the
+        // 313 KB fixture takes ~10 s to read, so the producer is still far
+        // from 50 s when the demand lands right after `start()`.
+        let local = try fixture("h264_aac_ass_overlap_80s.mkv")
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("prismcore-ass-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let identity = SourceCacheIdentity(namespace: "ass-tests", item: "overlap", etag: "1")
+        let warm = try PrismCoreSession(url: local, keyframeIndexCacheDirectory: cache, keyframeIndexCacheIdentity: identity)
+        _ = try await warm.start()
+        await warm.stop()
+        let server = try RangeFixtureServer(media: try Data(contentsOf: local), bytesPerSecond: 30_000)
+        let url = try await server.start()
+        defer { server.stop() }
+        let session = try PrismCoreSession(url: url, keyframeIndexCacheDirectory: cache,
+                                           keyframeIndexCacheIdentity: identity)
+        try await session.setASSRendering(.libass)
+        let playlist = try await session.start()
+        defer { Task { await session.stop() } }
+
+        var variant = playlist
+        let (masterData, _) = try await URLSession.uncached.data(from: playlist)
+        let master = String(decoding: masterData, as: UTF8.self)
+        if master.contains("#EXT-X-STREAM-INF"), let uri = PrismCoreSession.playlistURIs(inMaster: master).last {
+            variant = playlist.deletingLastPathComponent().appendingPathComponent(uri)
+        }
+        let (variantData, _) = try await URLSession.uncached.data(from: variant)
+        var segments: [(uri: String, start: Double, end: Double)] = []
+        var clock = 0.0
+        var duration: Double?
+        for line in String(decoding: variantData, as: UTF8.self).split(separator: "\n") {
+            if line.hasPrefix("#EXTINF:") {
+                duration = Double(line.dropFirst(8).split(separator: ",").first ?? "")
+            } else if !line.hasPrefix("#"), let length = duration {
+                segments.append((String(line), clock, clock + length))
+                clock += length
+                duration = nil
+            }
+        }
+        let base = variant.deletingLastPathComponent()
+        try #require(await session.diagnosticReport().startup.plan?.basis == "keyframeIndex")
+        let renderer = try #require(session.assRenderer(streamIndex: 2))
+        let produced = session.residentRanges.map(\.endSeconds).max() ?? 0
+        try #require(produced < 40, "the producer must not be near the sign's cluster before the re-anchor")
+        #expect(renderer.eventCount == 0)
+
+        let target = try #require(segments.first { $0.start <= 58.7 && 58.7 < $0.end },
+                                  "\(String(decoding: variantData, as: UTF8.self).prefix(600))")
+        let (media, status) = try await URLSession.uncached.data(from: base.appendingPathComponent(target.uri))
+        #expect((status as? HTTPURLResponse)?.statusCode == 200 && media.count > 0)
+        #expect(renderer.eventCount == 2)
+        #expect(showsBothOverlapEvents(renderer, at: 58.7))
     }
 
     /// P1.3: fonts a script embeds in `[Fonts]` are charged to the same

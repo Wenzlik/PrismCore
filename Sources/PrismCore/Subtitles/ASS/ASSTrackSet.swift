@@ -98,6 +98,71 @@ final class ASSTrackSet: @unchecked Sendable {
         )
     }
 
+    // MARK: Preroll — events already running at a seek target
+
+    /// How far back a seek looks for an indexed ASS event, FFmpeg's own
+    /// figure (matroskadec's subtitle backtrack). FFmpeg goes back only to
+    /// the *latest* subtitle Cue before the target, so an earlier event that
+    /// overlaps it (a 10 s sign under a 1 s line) is still lost; this walks
+    /// to the earliest one in the window.
+    static let indexedPrerollSeconds = 30.0
+    /// Without an index, a byte-sized look-back: one 8 MB bite of the host's
+    /// range proxy (AGENTS.md *Measuring*), which a seek to the target
+    /// usually fetches anyway.
+    static let blindPrerollBytes = 8 << 20
+
+    /// The blind window in seconds for a source of `bitRate` bit/s: capped
+    /// at `indexedPrerollSeconds`, 10 s when the rate is unknown.
+    static func blindPrerollSeconds(bitRate: Int64) -> Double {
+        bitRate > 0 ? min(indexedPrerollSeconds, Double(blindPrerollBytes) * 8 / Double(bitRate)) : 10
+    }
+
+    /// Where a seek to `target` (seconds, source axis) must start reading so
+    /// that every ASS event still on screen at `target` reaches libass: the
+    /// earliest event start any libass stream has an index entry (Matroska
+    /// CueTrackPositions — FFmpeg and mkvmerge write them for subtitle
+    /// tracks) for within `indexedPrerollSeconds`, else the blind window.
+    /// Index-driven, so a 4K remux whose bytes buy under a second still
+    /// reaches a sign that started 25 s earlier — and pays that read only
+    /// when an event is actually indexed there.
+    func prerollStart(in input: UnsafeMutablePointer<AVFormatContext>, before target: Double) -> Double {
+        let blind = target - Self.blindPrerollSeconds(bitRate: input.pointee.bit_rate)
+        return min(blind, earliestIndexedEventStart(in: input, before: target) ?? blind)
+    }
+
+    /// The index-driven half of `prerollStart`: `nil` when no libass stream
+    /// has an index entry within `indexedPrerollSeconds` before `target`.
+    func earliestIndexedEventStart(in input: UnsafeMutablePointer<AVFormatContext>, before target: Double) -> Double? {
+        var start: Double?
+        for (index, entry) in renderers {
+            guard Int(index) < Int(input.pointee.nb_streams), let stream = input.pointee.streams[Int(index)],
+                  let earliest = Self.earliestIndexedStart(stream, timeBase: entry.timeBase,
+                                                           before: target, within: Self.indexedPrerollSeconds)
+            else { continue }
+            start = min(start ?? earliest, earliest)
+        }
+        return start
+    }
+
+    /// The earliest index entry of `stream` in `[target - window, target]`,
+    /// in seconds: a binary search for the last entry at or before
+    /// `target`, then a walk back through the window.
+    static func earliestIndexedStart(
+        _ stream: UnsafeMutablePointer<AVStream>, timeBase: AVRational, before target: Double, within window: Double
+    ) -> Double? {
+        let tick = av_q2d(timeBase)
+        guard tick > 0, target.isFinite, abs(target / tick) < 9e18 else { return nil }
+        var index = av_index_search_timestamp(stream, Int64(target / tick), AVSEEK_FLAG_BACKWARD)
+        var earliest: Double?
+        while index >= 0, let entry = avformat_index_get_entry(stream, index) {
+            let seconds = Double(entry.pointee.timestamp) * tick
+            guard target - seconds <= window else { break }
+            earliest = seconds
+            index -= 1
+        }
+        return earliest
+    }
+
     func setTimelineOrigin(_ seconds: Double) {
         for entry in renderers.values { entry.renderer.setTimelineOrigin(seconds) }
     }

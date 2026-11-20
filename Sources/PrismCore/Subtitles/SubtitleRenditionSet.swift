@@ -541,6 +541,11 @@ final class SubtitleRenditionSet: @unchecked Sendable {
     /// only when libass renderers exist (read after `prepare`).
     var prerollsSubtitlePackets: Bool { lock.withLock { assTracks != nil } }
 
+    /// See `ASSTrackSet.earliestIndexedEventStart`; `nil` without libass.
+    func earliestIndexedASSEventStart(in input: UnsafeMutablePointer<AVFormatContext>, before target: Double) -> Double? {
+        lock.withLock { assTracks }?.earliestIndexedEventStart(in: input, before: target)
+    }
+
     /// The libass renderer of one ASS/SSA stream — `nil` before `prepare`,
     /// for any other stream, or when the host never asked for `.libass`.
     func assRenderer(streamIndex: Int) -> ASSSubtitleRenderer? {

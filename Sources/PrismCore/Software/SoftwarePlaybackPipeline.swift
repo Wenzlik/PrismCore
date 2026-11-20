@@ -328,6 +328,9 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// Feed-queue confined: each ASS stream's parsed script header, so the
     /// styled runs do not re-parse the styles on every packet.
     private var assHeaders: [Int32: ASSScriptHeader] = [:]
+    /// Feed-queue confined: whether `prerollASSEvents` has sought once on
+    /// this context, so Matroska has parsed its Cues.
+    private var assIndexPrimed = false
     private var storedSelectableAudioTracks: [AudioTrackInfo] = []
     /// Mirror of `audioStreamIndex` (feed-queue state) for cross-thread reads.
     private var storedSelectedAudioStreamIndex: Int32 = -1
@@ -542,6 +545,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                     // decoded, shown, and thrown away by the seek. A source
                     // that refuses the seek (no index) simply starts at the
                     // head — the same degradation `seek(to:)` accepts.
+                    prerollASSEvents(input, before: startAt)
                     if seekDemuxer(input, to: startAt) {
                         beginDiscarding(upTo: startAt)
                     }
@@ -617,6 +621,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
             // buffer we enqueue lands in the clock's past and is dropped.
             timeline.setRate(0, time: timeline.currentTime)
 
+            prerollASSEvents(input, before: time)
             guard seekDemuxer(input, to: time) || forceRefill else {
                 // A source with no index (raw MPEG-2 TS) can refuse; leaving the
                 // demuxer where it is beats tearing the session down.
@@ -702,6 +707,61 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         guard result >= 0 else { return false }
         avformat_flush(input)
         return true
+    }
+
+    /// With libass on, hand it the ASS events already running at `target`
+    /// before the real seek. Matroska keeps a subtitle event in the cluster
+    /// where it STARTS, and a seek lands on the target's keyframe — so a
+    /// sign that began earlier and is still up was never read (review r3
+    /// P1.1; FFmpeg's own backtrack reaches only the latest subtitle Cue).
+    ///
+    /// A separate pass rather than an earlier seek: the decode-and-discard
+    /// window is bounded at `maxSeekDiscardSeconds`, and starting the real
+    /// seek 30 s early would resume playback at the early keyframe. This
+    /// seeks to `ASSTrackSet.prerollStart` (the earliest indexed event in the
+    /// window, else a byte-sized blind window), reads packets WITHOUT
+    /// decoding, feeds only the ASS ones to libass (its ReadOrder dedup
+    /// makes overlap with the real read harmless) and stops at the first
+    /// video packet at or past the target; the caller then seeks as always.
+    /// Bounded by the same read guard as a seek. No-op without libass.
+    private func prerollASSEvents(_ input: UnsafeMutablePointer<AVFormatContext>, before target: CMTime) {
+        guard let tracks = stateLock.withLock({ storedASSTracks }) else { return }
+        let targetSeconds = CMTimeGetSeconds(target)
+        guard targetSeconds.isFinite, targetSeconds > 0 else { return }
+        // Matroska reads its Cues on the first seek; until then the subtitle
+        // index is empty and the walk below would find nothing. One index
+        // seek to the target (no packet read) loads them — once per load.
+        // (A non-empty index is no signal: reading packets adds video
+        // keyframe entries long before the Cues are parsed.)
+        if !assIndexPrimed {
+            assIndexPrimed = true
+            _ = seekDemuxer(input, to: target)
+        }
+        let start = max(0, tracks.prerollStart(in: input, before: targetSeconds))
+        guard start < targetSeconds,
+              seekDemuxer(input, to: CMTime(seconds: start, preferredTimescale: 90_000)),
+              let packet = av_packet_alloc() else { return }
+        defer {
+            var owned: UnsafeMutablePointer<AVPacket>? = packet
+            av_packet_free(&owned)
+        }
+        let readGuard = stateLock.withLock { interruptGuard }
+        readGuard?.arm(budget: Self.seekBudget)
+        defer {
+            readGuard?.disarm()
+            if let pb = input.pointee.pb, pb.pointee.error < 0 { pb.pointee.error = 0 }
+        }
+        while av_read_frame(input, packet) >= 0 {
+            defer { av_packet_unref(packet) }
+            let index = Int(packet.pointee.stream_index)
+            guard index < Int(input.pointee.nb_streams), let stream = input.pointee.streams[index] else { continue }
+            tracks.ingest(packet)
+            if stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO,
+               packet.pointee.pts != swift_AV_NOPTS_VALUE(),
+               Double(packet.pointee.pts) * av_q2d(stream.pointee.time_base) >= targetSeconds {
+                break
+            }
+        }
     }
 
     /// Generous like the probe's: a healthy index seek is milliseconds, so
@@ -1517,6 +1577,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         cancelEndObserver()
         subtitleCues.reset()
         assHeaders = [:]
+        assIndexPrimed = false
         stateLock.withLock {
             storedSelectedSubtitleStreamIndex = nil
             storedASSTracks = nil
