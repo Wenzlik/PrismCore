@@ -164,12 +164,26 @@ enum StyledTextParser {
         let text = Array(raw.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{FEFF}", with: ""))
+        // The next `}`, `>` and `<` at or after each position, from one
+        // backward pass. Searching forward from every unclosed `{` or stray
+        // `<` instead made one hostile line quadratic — and this runs
+        // synchronously on the remux thread and the software feed queue,
+        // in the default `.text` mode too.
+        var nextClose = [Int](repeating: text.count, count: text.count + 1)
+        var nextGreater = nextClose
+        var nextLess = nextClose
+        for position in stride(from: text.count - 1, through: 0, by: -1) {
+            nextClose[position] = text[position] == "}" ? position : nextClose[position + 1]
+            nextGreater[position] = text[position] == ">" ? position : nextGreater[position + 1]
+            nextLess[position] = text[position] == "<" ? position : nextLess[position + 1]
+        }
         var index = 0
         while index < text.count {
             let character = text[index]
             switch character {
             case "{":
-                guard let close = text[index...].firstIndex(of: "}") else {
+                let close = nextClose[index]
+                guard close < text.count else {
                     emit(character); index += 1; continue
                 }
                 let block = String(text[(index + 1)..<close])
@@ -185,7 +199,11 @@ enum StyledTextParser {
                 default: emit(character); index += 1
                 }
             case "<":
-                guard let close = text[index...].firstIndex(of: ">"),
+                // A `<` with another `<` before its `>` is never a tag, so
+                // only the last `<` of a run copies its inner text: the
+                // copies cover disjoint spans and stay linear in total.
+                let close = nextGreater[index]
+                guard close < text.count, nextLess[index + 1] > close,
                       applyTag(String(text[(index + 1)..<close]), to: &style, stack: &tagStack)
                 else { emit(character); index += 1; continue }
                 index = close + 1
@@ -223,12 +241,13 @@ enum StyledTextParser {
             if item.0 == "\n" { lines.append([]) } else { lines[lines.count - 1].append(item) }
         }
         var output: [(Character, Int)] = []
-        for var line in lines {
-            while let first = line.first, first.0.isWhitespace { line.removeFirst() }
-            while let last = line.last, last.0.isWhitespace { line.removeLast() }
-            guard !line.isEmpty else { continue }
+        for line in lines {
+            // Bounds, not `removeFirst()`: that shifts the whole line once
+            // per leading space — quadratic on a line of padding.
+            guard let first = line.firstIndex(where: { !$0.0.isWhitespace }),
+                  let last = line.lastIndex(where: { !$0.0.isWhitespace }) else { continue }
             if !output.isEmpty { output.append(("\n", output[output.count - 1].1)) }
-            output += line
+            output += line[first...last]
         }
         return output
     }
