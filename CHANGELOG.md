@@ -8,6 +8,74 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.7] — 2026-11-20
+
+Source-compatible: ASS/SSA rendered with libass for hosts that ask, and
+styled text cues for every text subtitle. A host that changes nothing gets
+exactly the cues, renditions and playback it got before (issue #197).
+
+### Added
+
+- **libass rendering of ASS/SSA** (`ASSRenderingMode`, default `.text`).
+  `PrismCoreSession.setASSRendering(.libass)` (before `start()`, replayed onto
+  clones and fallbacks) and `SoftwarePlaybackPipeline.setASSRendering(_:)`
+  (before `load`) build an `ASSSubtitleRenderer` per ASS/SSA stream, fetched
+  with `assRenderer(streamIndex:)`. `frame(at:canvas:)` returns
+  `ASSFrameUpdate` — `.unchanged`, or premultiplied BGRA `SubtitleImage`
+  regions for a `SubtitleCanvas` (overlay pixels, video rect, safe-area
+  insets, optional black-bar placement). Frames use the `TimedTextCue`
+  clock of the path that made them and leave the subtitle delay to the
+  host (`frame(at: itemTime - delay)`), so one delay knob serves every
+  engine. `ASSStyleOverride.none` keeps the file's styles untouched
+  (`ASS_OVERRIDE_DEFAULT`); `.font(name:scale:)` is the viewer's size knob.
+  Hosts can also build a renderer from a whole `.ass` file
+  (`init(script:fonts:)`, `ass_read_memory`, `[Fonts]` extracted) or feed
+  events themselves (`init(header:fonts:)` + `appendEvent`).
+  - **Fonts:** the container's attachments (MIME, extension or FFmpeg's
+    TTF/OTF codec id) become libass memory fonts, loaded once per source into
+    one `ASS_Library` shared by its tracks. Everything else falls back to
+    system faces through libass's CoreText provider (AUTODETECT; there is no
+    fontconfig on Apple platforms), default family Helvetica Neue — present
+    on tvOS, unlike Arial — and CJK through CoreText's cascade. A probe opened
+    with `skipAttachments: true` leaves libass on system faces.
+  - **Seeks:** every event stays in the libass track and re-demuxed events
+    are dropped by their Matroska ReadOrder, so a seek in either direction
+    needs no flush or re-feed — the same trade as `SubtitleCueHistory
+    .complete` (events are text; a film's worth is small).
+  - **Cost:** nothing at all under `.text`. Under `.libass` the renderer
+    (CoreText set-up) is created on the first frame, an idle or static
+    stretch costs one `ass_render_frame` and no compositing, layers are
+    composited only into the clusters they cover (never one canvas-sized
+    bitmap), and a canvas is capped at 4096 px a side. libass calls of one
+    source serialize on one lock — libass is not thread-safe.
+- `TimedTextCue.styled: StyledSubtitleText?` — the cue's inline styling as
+  runs (`StyledTextRun`: bold/italic/underline/strike, fill and outline
+  `SubtitleColor`, font, WebVTT voice and classes) plus placement, from SRT
+  `<font>`, WebVTT `<c>`/`<v>`/entities, ASS overrides and the ASS *style*
+  (colours, emphasis, alignment), and tx3g `styl` boxes. ASS drawing mode
+  (`\p1`) no longer leaks vector commands into the runs.
+  `withoutSourceColors()` is the "ignore source colours" view. `text` and
+  `placement` are unchanged byte for byte.
+- `SubtitleTextParser` — the same parsers for sources PrismCore does not
+  demux (server sidecars, another engine's cues): whole SRT / WebVTT / ASS
+  documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`.
+  The model is `Codable` (`TextCuePlacement` too, validated on decode).
+- `SubtitleTrackInfo.isASS`.
+- `addExternalSubtitle` now reads `.ass` / `.ssa` files (their `Dialogue:`
+  lines) into a WebVTT rendition; before, they produced no rendition.
+
+### Licensing
+
+libass and its dependencies are not new to an app that links PrismCore:
+MPVKit already ships them (`mpvkit/libass-build` 0.17.5 xcframeworks, static,
+every slice PrismCore supports) and links them into its FFmpeg target; this
+release only calls libass directly. Their licences — libass ISC, FreeType
+FTL (chosen over GPLv2), FriBidi LGPL-2.1+, HarfBuzz MIT ("Old MIT"),
+libunibreak zlib — are all compatible with PrismCore's LGPL-2.1+; FriBidi
+being LGPL adds the same relinking obligation FFmpeg already carries, which
+the App Store Exception does not lift (it covers PrismCore's own code only).
+See NOTICE.md.
+
 ## [4.0.6] — 2026-11-19
 
 Source-compatible: a diagnostics label for Profile 7 sources. Playback is
@@ -4091,7 +4159,9 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.7...HEAD
+[4.0.7]: https://github.com/Wenzlik/PrismCore/compare/4.0.6...4.0.7
+[4.0.6]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...4.0.6
 [4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...4.0.5
 [4.0.4]: https://github.com/Wenzlik/PrismCore/compare/4.0.3...4.0.4
 [4.0.3]: https://github.com/Wenzlik/PrismCore/compare/4.0.2...4.0.3
