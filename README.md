@@ -323,7 +323,7 @@ public for subtitles PrismCore does not demux:
 
 ```swift
 let cues = SubtitleTextParser.cues(from: sidecarData)            // SRT / WebVTT / ASS, sniffed
-let one = SubtitleTextParser.styledText(payload: sample, format: .tx3g)
+let one = SubtitleTextParser.styledText(payload: sample, format: .tx3g, tx3gSampleDescription: extradata)
 ```
 
 ASS/SSA can also be drawn with the file's own fonts, colours, positioning
@@ -358,7 +358,8 @@ if let renderer = session.assRenderer(streamIndex: track.streamIndex) {
   per file; the rest are skipped) plus system faces through CoreText. They are read off the source context, so a probe opened with
   `skipAttachments: true` renders with system faces only.
 - **Seeks** need nothing from the host: every event stays loaded and
-  re-demuxed ones are ignored.
+  re-demuxed ones are ignored, and a jump into an unread region prerolls
+  the events already running there (from the subtitle Cues, up to 30 s back).
 - `ASSStyleOverride.font(name:scale:)` scales (or re-fonts) the file's styles
   for a viewer's size setting; `.none`, the default, leaves them untouched.
 - For an external `.ass`, build `ASSSubtitleRenderer(script: data, fonts:)`

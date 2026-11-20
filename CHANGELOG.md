@@ -29,13 +29,17 @@ exactly the cues, renditions and playback it got before (issue #197).
   engine. `ASSStyleOverride.none` keeps the file's styles untouched
   (`ASS_OVERRIDE_DEFAULT`); `.font(name:scale:)` is the viewer's size knob.
   Hosts can also build a renderer from a whole `.ass` file
-  (`init(script:fonts:)`, `ass_read_memory`, `[Fonts]` extracted) or feed
+  (`init(script:fonts:)`, `ass_read_memory`, `[Fonts]` admitted) or feed
   events themselves (`init(header:fonts:)` + `appendEvent`).
   - **Fonts:** the container's attachments (MIME, extension or FFmpeg's
     TTF/OTF codec id) become libass memory fonts, loaded once per source into
     one `ASS_Library` shared by its tracks, within a 96 MB budget per source
     (64 MB per file; fonts past it are skipped, first-declared first). A
-    script's own `[Fonts]` section counts against the same budget.
+    script's own `[Fonts]` section counts against the same budget: PrismCore
+    decodes those fonts itself, stops buffering one the moment it exceeds
+    what is left, and hands libass the script without them — libass would
+    otherwise buffer and decode each embedded font before any budget could
+    refuse it.
     Everything else falls back to
     system faces through libass's CoreText provider (AUTODETECT; there is no
     fontconfig on Apple platforms), default family Helvetica Neue — present
@@ -45,12 +49,18 @@ exactly the cues, renditions and playback it got before (issue #197).
     are dropped by their Matroska ReadOrder, so a seek in either direction
     needs no flush or re-feed — the same trade as `SubtitleCueHistory
     .complete` (events are text; a film's worth is small). A jump into a
-    region not yet read would miss a sign that started before the target,
-    so under `.libass` a remux re-anchor reads ahead of its anchor from the
-    earliest plan entry within 8 MB of source (at most 30 s) and keeps the
-    subtitle packets of that stretch; events that began earlier are still
-    missed (libavformat does not expose Matroska's CueDuration). The
-    software path has no such preroll yet.
+    region not yet read would miss a sign that started before the target
+    (Matroska stores an event in the cluster where it starts, and FFmpeg's
+    own seek backtracks only to the *latest* subtitle Cue). Under `.libass`
+    both paths therefore preroll: back to the earliest ASS event the
+    subtitle index (Cues) holds within 30 s of the target — whatever the
+    bitrate, and only when one is indexed there — else a blind 8 MB of
+    source (10 s at an unknown rate). The remux re-anchor starts at the plan
+    entry before it and keeps that stretch's subtitle packets; the software
+    path reads it subtitle-only, without decoding, before its normal seek.
+    Matroska parses its Cues on the first seek, so the first preroll of a
+    context may seek once more. A subtitle track without Cues still misses
+    events older than the blind window.
   - `invalidate()` forces the next frame after a host dropped its overlay;
     an empty frame (a clear) does the same on its own.
   - **Cost:** nothing at all under `.text`. Under `.libass` the renderer
@@ -63,19 +73,27 @@ exactly the cues, renditions and playback it got before (issue #197).
   runs (`StyledTextRun`: bold/italic/underline/strike, fill and outline
   `SubtitleColor`, font, WebVTT voice and classes) plus placement, from SRT
   `<font>`, WebVTT `<c>`/`<v>`/entities, ASS overrides and the ASS *style*
-  (colours, emphasis, alignment), and tx3g `styl` boxes. ASS drawing mode
+  (colours, emphasis, alignment), and tx3g — the track's sample description
+  (default style, justification, `ftab` fonts) and each sample's `styl`
+  records, which must be ordered and non-overlapping or are ignored, as in
+  FFmpeg. WebVTT classes are read on every tag (`<i.yellow>`). Nesting,
+  classes and style changes per cue are bounded (32 / 16 / 512), so
+  hostile markup stays linear. ASS drawing mode
   (`\p1`) no longer leaks vector commands into the runs.
   `withoutSourceColors()` is the "ignore source colours" view. `text` and
   `placement` are unchanged byte for byte.
 - `SubtitleTextParser` — the same parsers for sources PrismCore does not
   demux (server sidecars, another engine's cues): whole SRT / WebVTT / ASS
-  documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`.
+  documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`
+  (`assHeader:` / `tx3gSampleDescription:` carry the track's metadata).
   The model is `Codable` and `Hashable` (`TextCuePlacement` too, validated
   on decode). Two same-text cues that differ only in style or position are
   no longer merged by the remux cue tap's dedup.
 - `SubtitleTrackInfo.isASS`.
 - `addExternalSubtitle` now reads `.ass` / `.ssa` files (their `Dialogue:`
   lines) into a WebVTT rendition; before, they produced no rendition.
+- A WebVTT rendition no longer prints one cue twice when a re-anchor lands
+  inside it and the libass preroll re-reads its packet.
 
 ### Licensing
 
