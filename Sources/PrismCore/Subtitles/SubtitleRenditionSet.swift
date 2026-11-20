@@ -477,7 +477,7 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             // The whole file is converted up front; segmentation then follows
             // the video boundaries exactly like an embedded track's, so the
             // rendition playlist lines up 1:1 with the variant.
-            for cue in cues { writer.add(cue) }
+            writer.preload(cues)
             built.append(Track(inputIndex: nil, timeBase: nil, converter: .preloaded, writer: writer))
             descriptions.append(
                 MasterPlaylistBuilder.SubtitleRendition(
