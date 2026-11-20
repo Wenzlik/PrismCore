@@ -420,8 +420,8 @@ enum StyledTextParser {
             } else if tag.hasPrefix("b"), let value = Int(tag.dropFirst(1)) {
                 style.bold = value != 0   // `\b1` and `\b700` (a weight) are both bold
             } else if tag.hasPrefix("r"), !tag.hasPrefix("rnd") {
-                let name = String(tag.dropFirst(1))
-                style = name.isEmpty ? base : header?.styles[name]?.inline ?? base
+                let name = tag.dropFirst(1).trimmingCharacters(in: .whitespaces)
+                style = name.isEmpty ? base : header?.style(strictlyNamed: name)?.inline ?? base
             }
         }
     }

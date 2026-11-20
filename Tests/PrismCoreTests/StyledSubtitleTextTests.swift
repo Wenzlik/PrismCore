@@ -66,6 +66,25 @@ struct StyledSubtitleTextTests {
         #expect(styled("1,0,Default,,0,0,0,,{\\alpha&HFF&}gone", .ass, header: header)?.runs.first?.color?.alpha == 0)
     }
 
+    @Test func resetFindsNamedStylesLikeLibass() throws {
+        let header = """
+        [V4+ Styles]
+        Format: Name, Fontname, PrimaryColour, Bold
+        Style: Default,Helvetica Neue,&H00FFFFFF,0
+        Style: Sign,Gill Sans,&H0000FFFF,-1
+        """
+        // `*`-prefixed and space-separated names reach Default, not the event's Sign.
+        for reset in ["\\r*Default", "\\r Default", "\\rDefault"] {
+            let text = try #require(styled("1,0,Sign,,0,0,0,,{\\c&H0000FF&}x{\(reset)}y", .ass, header: header))
+            let y = try #require(text.runs.last)
+            #expect(y.text == "y" && y.color == white && !y.isBold && y.fontName == "Helvetica Neue", "\(reset)")
+        }
+        // An unknown name resets to the event's own style (libass), not to Default.
+        let unknown = try #require(styled("1,0,Sign,,0,0,0,,{\\c&H0000FF&}x{\\rNope}y", .ass, header: header))
+        #expect(unknown.runs.last?.isBold == true && unknown.runs.last?.fontName == "Gill Sans")
+        #expect(unknown.runs.last?.color == SubtitleColor(red: 255, green: 255, blue: 0))
+    }
+
     @Test func webVTTVoiceClassesEntitiesAndTimestamps() throws {
         let text = try #require(styled("<v.loud Esme>Hi &amp; <c.yellow.bg_black>bye</c><00:00:01.500>!</v>", .webvtt))
         #expect(text.plainText == "Hi & bye!")

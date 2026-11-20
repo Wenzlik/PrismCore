@@ -72,10 +72,16 @@ struct ASSScriptHeader: Equatable {
     /// scripts prefix, then `Default`.
     func style(named name: String?) -> Style? {
         guard let name else { return styles["Default"] }
+        return style(strictlyNamed: name) ?? styles["Default"]
+    }
+
+    /// The same name matching without the `Default` fallback — what `\r`
+    /// needs: an unknown name there resets to the event's *own* style, as
+    /// libass does, while `{\r*Default}` / `{\r Default}` must still find
+    /// Default (an exact-key lookup missed both).
+    func style(strictlyNamed name: String) -> Style? {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        return styles[trimmed]
-            ?? styles[String(trimmed.drop { $0 == "*" })]
-            ?? styles["Default"]
+        return styles[trimmed] ?? styles[String(trimmed.drop { $0 == "*" })]
     }
 
     /// Styled runs for one event's `Text` field under its named style.
