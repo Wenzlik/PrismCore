@@ -165,6 +165,83 @@ struct ASSRenderingTests {
             .frame(at: 0, canvas: canvas)
     }
 
+    // MARK: - Fix round 2
+
+    /// P1.1: how far back a libass re-anchor reads, from the plan's own
+    /// entries. Pure, so the window rule is pinned without a demand seek
+    /// (the producer races through any committable fixture before one).
+    @Test func subtitlePrerollReachesBackByBitrateWithinPlanEntries() {
+        let starts = stride(from: 0.0, through: 120, by: 6).map { $0 }   // 6 s segments
+        func entry(_ anchor: Int, _ bitRate: Int64) -> Int {
+            HLSRemuxer.subtitlePrerollEntry(anchor: anchor, startSeconds: { starts[$0] }, bitRate: bitRate)
+        }
+        // 2 Mb/s: 8 MB is 33 s, capped at 30 → five entries back from 60 s.
+        #expect(starts[entry(10, 2_000_000)] == 30)
+        // 5 Mb/s: 13.4 s → two entries (12 s).
+        #expect(starts[entry(10, 5_000_000)] == 48)
+        // 80 Mb/s 4K: under one segment — no preroll, the old seek.
+        #expect(entry(10, 80_000_000) == 10)
+        // Unknown bitrate: 10 s → one entry. Never before the first.
+        #expect(starts[entry(10, 0)] == 54)
+        #expect(entry(1, 1_000) == 0)
+        #expect(entry(0, 1_000) == 0)
+    }
+
+    /// P1.3: fonts a script embeds in `[Fonts]` are charged to the same
+    /// budget as attachments, and skipped when they do not fit.
+    @Test func embeddedScriptFontsShareTheAttachmentBudget() throws {
+        // libass's uuencoding alphabet is `!`…`` ` ``: 4 chars → 3 bytes.
+        let line = String(repeating: "!", count: 80)
+        let fonts = "[Fonts]\nfontname: embedded_0.ttf\n" + Array(repeating: line, count: 50).joined(separator: "\n") + "\n"
+        let script = Self.header.replacingOccurrences(of: "[Events]", with: fonts + "\n[Events]")
+            + "\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,x\n"
+        #expect(LibassLibrary.embeddedFontBytes(in: Data(script.utf8)) == 3_000)
+        #expect(LibassLibrary.embeddedFontBytes(in: Data(Self.header.utf8)) == 0)
+
+        let roomy = try LibassLibrary(fontBudget: 10_000)
+        _ = try ASSSubtitleRenderer(script: Data(script.utf8), library: roomy, storageSize: nil)
+        #expect(roomy.loadedFontBytes == 3_000)
+
+        // Attachments first, then a header whose fonts no longer fit.
+        let tight = try LibassLibrary(fontBudget: 4_000)
+        #expect(tight.addFont(name: "attached.ttf", bytes: Data(repeating: 1, count: 2_000)))
+        let renderer = try ASSSubtitleRenderer(header: Data(script.utf8), library: tight, storageSize: nil)
+        #expect(tight.loadedFontBytes == 2_000, "the embedded set would exceed the budget and must be skipped")
+        // Parsing still happened: styles and events are there.
+        renderer.appendEvent(Data("0,0,Default,,0,0,0,,still renders".utf8), start: 0, duration: 2)
+        #expect(images(renderer.frame(at: 1, canvas: canvas))?.isEmpty == false)
+    }
+
+    /// P2.4: a clear handed to the host invalidates libass's cached picture;
+    /// `invalidate()` does the same for a host that dropped its overlay.
+    @Test func aClearOrInvalidateForcesTheNextFrame() throws {
+        let renderer = try renderer()
+        #expect(images(renderer.frame(at: 1.5, canvas: canvas))?.isEmpty == false)
+        #expect(images(renderer.frame(at: 1.5, canvas: SubtitleCanvas(width: 0, height: 360)))?.isEmpty == true)
+        #expect(images(renderer.frame(at: 1.6, canvas: canvas))?.isEmpty == false,
+                "after a clear the same static line must be drawn again, not .unchanged")
+        guard case .unchanged = renderer.frame(at: 1.7, canvas: canvas) else {
+            Issue.record("nothing changed since the redraw"); return
+        }
+        renderer.invalidate()
+        #expect(images(renderer.frame(at: 1.8, canvas: canvas))?.isEmpty == false)
+    }
+
+    /// P2.5: absurd host geometry is clamped or ignored, never a trap.
+    @Test func absurdGeometryNeverTraps() throws {
+        let huge = try ASSSubtitleRenderer(header: Data(Self.header.utf8),
+                                           videoSize: CGSize(width: 3_000_000_000, height: 1080))
+        huge.appendEvent(Data("0,0,Default,,0,0,0,,x".utf8), start: 0, duration: 5)
+        #expect(images(huge.frame(at: 1, canvas: canvas))?.isEmpty == false)
+        let renderer = try renderer()
+        for rect in [CGRect(x: 1e12, y: 0, width: 640, height: 360), CGRect(x: 0, y: 0, width: 1e15, height: 1e15),
+                     CGRect(x: -1e18, y: -1e18, width: 1, height: 1), CGRect(x: CGFloat.nan, y: 0, width: 640, height: CGFloat.infinity)] {
+            _ = renderer.frame(at: 1.5, canvas: SubtitleCanvas(width: 640, height: 360, videoRect: rect))
+        }
+        _ = renderer.frame(at: 1.5, canvas: SubtitleCanvas(width: 640, height: 360,
+                                                           safeAreaInsets: .init(top: Double.nan, left: 1e300, bottom: -1e300, right: 0)))
+    }
+
     @Test func regionsSplitDistantLinesAndMergeNearOnes() {
         typealias R = ASSCompositor.Rect
         func layer(_ rect: R) -> ASSCompositor.Layer {

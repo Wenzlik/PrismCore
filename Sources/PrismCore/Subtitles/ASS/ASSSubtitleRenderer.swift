@@ -172,15 +172,18 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
     /// An external `.ass`/`.ssa` file, whole (`ass_read_memory`). `[Fonts]`
     /// embedded in the script are extracted too.
     public convenience init(script: Data, fonts: [SubtitleFont] = [], videoSize: CGSize? = nil) throws {
-        let library = try LibassLibrary(fonts: fonts)
+        try self.init(script: script, library: LibassLibrary(fonts: fonts), storageSize: Self.storage(videoSize))
+    }
+
+    convenience init(script: Data, library: LibassLibrary, storageSize: (width: Int, height: Int)?) throws {
         // A mutable, NUL-terminated copy: libass tokenizes the buffer in place.
         var bytes = [CChar](repeating: 0, count: script.count + 1)
         bytes.withUnsafeMutableBytes { _ = script.copyBytes(to: $0.bindMemory(to: UInt8.self), count: script.count) }
-        let track = library.withLock {
+        let track = library.admittingEmbeddedFonts(of: script) {
             bytes.withUnsafeMutableBufferPointer { ass_read_memory(library.handle, $0.baseAddress, script.count, nil) }
         }
         guard let track else { throw ASSRendererError.unreadableScript }
-        self.init(library: library, track: track, storageSize: Self.storage(videoSize))
+        self.init(library: library, track: track, storageSize: storageSize)
     }
 
     /// An event stream: the script header (a Matroska ASS track's
@@ -194,7 +197,7 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
             throw ASSRendererError.allocationFailed
         }
         if let header, !header.isEmpty {
-            library.withLock {
+            library.admittingEmbeddedFonts(of: header) {
                 header.withUnsafeBytes { raw in
                     ass_process_codec_private(
                         track, raw.bindMemory(to: CChar.self).baseAddress, Int32(clamping: raw.count)
@@ -218,8 +221,15 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         }
     }
 
+    /// Widest video a storage size may claim. Real streams stop at 8K;
+    /// past this a host value is a slip, and it would trap converting to
+    /// libass's `int` (3 000 000 000 did, on the first frame).
+    static let maximumStorageSide = 16_384
+
     private static func storage(_ size: CGSize?) -> (width: Int, height: Int)? {
-        guard let size, size.width >= 1, size.height >= 1, size.width.isFinite, size.height.isFinite else { return nil }
+        guard let size, size.width.isFinite, size.height.isFinite,
+              (1...Double(maximumStorageSide)).contains(size.width),
+              (1...Double(maximumStorageSide)).contains(size.height) else { return nil }
         return (Int(size.width), Int(size.height))
     }
 
@@ -254,6 +264,14 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
     /// Events held right now.
     public var eventCount: Int { library.withLock { Int(track.pointee.n_events) } }
 
+    /// Make the next `frame(at:canvas:)` return a `.frame` even if nothing
+    /// changed — for a host that dropped what it showed (an overlay torn
+    /// down and rebuilt, a switch to another track and back while paused)
+    /// and needs the picture again rather than `.unchanged`.
+    public func invalidate() {
+        library.withLock { hasFrame = false }
+    }
+
     /// See `ASSStyleOverride`; applies from the next `frame(at:canvas:)`.
     public func setStyleOverride(_ override: ASSStyleOverride) {
         library.withLock { styleOverride = override }
@@ -280,9 +298,10 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         guard time.isFinite, abs(time) < 1e9,
               (1...Self.maximumCanvasSide).contains(canvas.width),
               (1...Self.maximumCanvasSide).contains(canvas.height)
-        else { return .frame(ASSFrame(time: time, canvas: canvas, images: [])) }
+        else { return clearedLocking(time: time, canvas: canvas) }
         return library.withLock {
             guard let renderer = rendererLocked() else {
+                hasFrame = false
                 return .frame(ASSFrame(time: time, canvas: canvas, images: []))
             }
             var forced = !hasFrame
@@ -306,6 +325,15 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         }
     }
 
+    /// An empty frame tells the host to clear, so whatever libass last
+    /// rendered is no longer on screen: the next valid call must draw again.
+    /// Without this, valid canvas → zero width mid-layout → the same canvas
+    /// returned `.unchanged` and the line stayed hidden.
+    private func clearedLocking(time: Double, canvas: SubtitleCanvas) -> ASSFrameUpdate {
+        library.withLock { hasFrame = false }
+        return .frame(ASSFrame(time: time, canvas: canvas, images: []))
+    }
+
     /// Built on first render, not with the track: the font provider costs a
     /// CoreText set-up, and a track nobody draws should cost only its text.
     private func rendererLocked() -> OpaquePointer? {
@@ -324,10 +352,23 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         return created
     }
 
+    /// A pixel value as libass's `int`, clamped to a range no real layout
+    /// reaches: a host rect far off the canvas must not trap the conversion.
+    private static func px(_ value: Double) -> Int32 {
+        guard value.isFinite else { return 0 }
+        return Int32(min(1e6, max(-1e6, value)).rounded())
+    }
+
     private func configure(_ renderer: OpaquePointer, for canvas: SubtitleCanvas) {
         let bounds = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
         let video = (canvas.videoRect ?? bounds).standardized
-        let video0 = video.width >= 1 && video.height >= 1 ? video : bounds
+        // A picture rect libass can be told about: finite, at least a pixel,
+        // and touching the canvas. Anything else is a host slip; the whole
+        // canvas is the honest fallback.
+        let usable = [video.minX, video.minY, video.width, video.height].allSatisfy(\.isFinite)
+            && video.width >= 1 && video.height >= 1 && video.intersects(bounds)
+            && video.width <= 64 * bounds.width && video.height <= 64 * bounds.height
+        let video0 = usable ? video : bounds
         let insets = canvas.safeAreaInsets
         let safe = CGRect(x: insets.left, y: insets.top,
                           width: Double(canvas.width) - insets.left - insets.right,
@@ -336,8 +377,8 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
         if content.isNull || content.width < 1 || content.height < 1 { content = video0 }
         ass_set_frame_size(renderer, Int32(canvas.width), Int32(canvas.height))
         ass_set_margins(renderer,
-                        Int32(content.minY.rounded()), Int32((Double(canvas.height) - content.maxY).rounded()),
-                        Int32(content.minX.rounded()), Int32((Double(canvas.width) - content.maxX).rounded()))
+                        Self.px(content.minY), Self.px(Double(canvas.height) - content.maxY),
+                        Self.px(content.minX), Self.px(Double(canvas.width) - content.maxX))
         ass_set_use_margins(renderer, canvas.placesDialogueInBlackBars ? 1 : 0)
         if let storageSize {
             ass_set_storage_size(renderer, Int32(storageSize.width), Int32(storageSize.height))
@@ -347,7 +388,7 @@ public final class ASSSubtitleRenderer: @unchecked Sendable {
             let par = (video0.width / video0.height) / (Double(storageSize.width) / Double(storageSize.height))
             ass_set_pixel_aspect(renderer, par.isFinite && par > 0 ? par : 0)
         } else {
-            ass_set_storage_size(renderer, Int32(content.width), Int32(content.height))
+            ass_set_storage_size(renderer, Self.px(content.width), Self.px(content.height))
             ass_set_pixel_aspect(renderer, 1)
         }
     }
@@ -413,8 +454,12 @@ final class LibassLibrary: @unchecked Sendable {
         // libass logs every font lookup to stderr by default; a TV app has
         // no stderr reader, and a busy script logs per frame.
         ass_set_message_cb(handle, { _, _, _, _ in }, nil)
-        // `[Fonts]` sections inside a script (uuencoded) become memory fonts.
-        ass_set_extract_fonts(handle, 1)
+        // `[Fonts]` sections inside a script (uuencoded) become memory fonts
+        // only through `admittingEmbeddedFonts`, which charges them to the
+        // budget first. Left on, libass extracted them behind the budget's
+        // back: a header could add its own font set beside 96 MB of
+        // attachments.
+        ass_set_extract_fonts(handle, 0)
         for font in fonts { addFont(name: font.name, bytes: font.data) }
     }
 
@@ -442,4 +487,44 @@ final class LibassLibrary: @unchecked Sendable {
 
     /// Font bytes libass holds for this library.
     var loadedFontBytes: Int { withLock { fontBytes } }
+
+    /// Run a libass parse of `script` (a whole file, or a track header) under
+    /// the lock, with `[Fonts]` extraction on only when the fonts the script
+    /// embeds fit what is left of the budget — then they are charged to it,
+    /// exactly like attachments. Over budget, the parse still runs and the
+    /// embedded fonts are skipped (system faces stand in). `body` must not
+    /// take the lock again.
+    func admittingEmbeddedFonts<T>(of script: Data, _ body: () throws -> T) rethrows -> T {
+        let embedded = Self.embeddedFontBytes(in: script)
+        return try withLock {
+            let admitted = embedded > 0 && embedded <= fontBudget - fontBytes
+            if admitted { fontBytes += embedded }
+            ass_set_extract_fonts(handle, admitted ? 1 : 0)
+            defer { ass_set_extract_fonts(handle, 0) }
+            return try body()
+        }
+    }
+
+    /// Decoded size of a script's `[Fonts]` section: its data lines are
+    /// uuencoded, four characters for three bytes (`fontname:` lines name
+    /// the next font and carry none). One linear pass over the bytes; no
+    /// decode.
+    static func embeddedFontBytes(in script: Data) -> Int {
+        var inFonts = false
+        var encoded = 0
+        for rawLine in script.split(separator: UInt8(ascii: "\n")) {
+            var line = rawLine[...]
+            while let last = line.last, last == UInt8(ascii: "\r") || last == UInt8(ascii: " ") { line = line.dropLast() }
+            while let first = line.first, first == UInt8(ascii: " ") || first == UInt8(ascii: "\t") { line = line.dropFirst() }
+            guard let first = line.first else { continue }
+            if first == UInt8(ascii: "[") {
+                inFonts = line.count == 7 && String(decoding: line, as: UTF8.self).lowercased() == "[fonts]"
+                continue
+            }
+            guard inFonts else { continue }
+            if line.count >= 9, String(decoding: line.prefix(9), as: UTF8.self).lowercased() == "fontname:" { continue }
+            encoded += line.count
+        }
+        return encoded / 4 * 3
+    }
 }
