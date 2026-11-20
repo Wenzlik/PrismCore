@@ -93,8 +93,13 @@ public enum SubtitleTextParser {
     /// One sample's styled text, or `nil` when it has no visible text.
     /// `assHeader` is the ASS track's script header (Matroska CodecPrivate,
     /// or a `.ass` file's head) — without it, events get no style colours
-    /// and `\pos` is dropped.
-    public static func styledText(payload: Data, format: PayloadFormat, assHeader: Data? = nil) -> StyledSubtitleText? {
+    /// and `\pos` is dropped. `tx3gSampleDescription` is a tx3g track's
+    /// TextSampleEntry from its display flags on (what FFmpeg exposes as the
+    /// stream's extradata) — without it, samples get no default style,
+    /// justification or fonts.
+    public static func styledText(
+        payload: Data, format: PayloadFormat, assHeader: Data? = nil, tx3gSampleDescription: Data? = nil
+    ) -> StyledSubtitleText? {
         let kind: TextSubtitleConverter.Kind
         switch format {
         case .subrip: kind = .subrip
@@ -104,7 +109,8 @@ public enum SubtitleTextParser {
         }
         let header = kind == .ass ? ASSScriptHeader(data: assHeader) : nil
         guard let converted = TextSubtitleConverter.convert(
-            payload, kind: kind, playResolution: header?.playResolution, assHeader: header
+            payload, kind: kind, playResolution: header?.playResolution, assHeader: header,
+            movText: kind == .movText ? TextSubtitleConverter.MovTextDescription(tx3gSampleDescription) : nil
         ), let styled = converted.styled, !styled.runs.isEmpty else { return nil }
         return styled
     }

@@ -68,7 +68,8 @@ enum TextSubtitleConverter {
     /// `playResolution` is the ASS script's, for `\pos` — `nil` keeps the
     /// alignment and drops the point.
     static func convert(
-        _ payload: Data, kind: Kind, playResolution: PlayResolution?, assHeader: ASSScriptHeader? = nil
+        _ payload: Data, kind: Kind, playResolution: PlayResolution?, assHeader: ASSScriptHeader? = nil,
+        movText: MovTextDescription? = nil
     ) -> Converted? {
         let raw: String?
         switch kind {
@@ -82,7 +83,8 @@ enum TextSubtitleConverter {
         guard let raw else { return nil }
         var converted = sanitizeStyled(raw, playResolution: playResolution)
         guard !converted.text.isEmpty else { return nil }
-        converted.styled = styledText(payload, kind: kind, playResolution: playResolution, header: assHeader)
+        converted.styled = styledText(payload, kind: kind, playResolution: playResolution, header: assHeader,
+                                      movText: movText)
         return converted
     }
 

@@ -22,7 +22,8 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
         _ packet: UnsafeMutablePointer<AVPacket>, timeBase: AVRational,
         kind: TextSubtitleConverter.Kind, currentTime: Double,
         playResolution: TextSubtitleConverter.PlayResolution? = nil,
-        assHeader: ASSScriptHeader? = nil
+        assHeader: ASSScriptHeader? = nil,
+        movText: TextSubtitleConverter.MovTextDescription? = nil
     ) {
         // Reject oversized payloads before copying or parsing: subtitle data
         // must not bypass the decoded video pipeline's memory discipline.
@@ -36,7 +37,7 @@ final class SoftwareSubtitleCueStore: @unchecked Sendable {
               !currentTime.isFinite || end > currentTime,
               let converted = TextSubtitleConverter.convert(
                 Data(bytes: bytes, count: Int(packet.pointee.size)), kind: kind, playResolution: playResolution,
-                assHeader: assHeader
+                assHeader: assHeader, movText: movText
               ) else { return }
         // A WebVTT track's own settings outrank anything read off the payload
         // — the same precedence the remux renditions use.

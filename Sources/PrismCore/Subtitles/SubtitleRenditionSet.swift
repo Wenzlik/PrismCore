@@ -84,6 +84,8 @@ final class SubtitleRenditionSet: @unchecked Sendable {
         /// An ASS track's script header (styles, play resolution), parsed
         /// once here rather than per packet, for the styled runs.
         var assHeader: ASSScriptHeader? = nil
+        /// A tx3g track's sample description (default style, fonts), same reason.
+        var movText: TextSubtitleConverter.MovTextDescription? = nil
     }
 
     /// The pending-cue lifecycle of one OCR-fed bitmap rendition.
@@ -408,7 +410,8 @@ final class SubtitleRenditionSet: @unchecked Sendable {
                     timeBase: stream.pointee.time_base,
                     converter: converter,
                     writer: writer,
-                    assHeader: Self.assHeader(of: stream.pointee.codecpar)
+                    assHeader: Self.assHeader(of: stream.pointee.codecpar),
+                    movText: Self.movTextDescription(of: stream.pointee.codecpar)
                 )
             )
             descriptions.append(
@@ -950,7 +953,8 @@ final class SubtitleRenditionSet: @unchecked Sendable {
             else { return }
             let payload = Data(bytes: data, count: Int(packet.pointee.size))
             guard let converted = TextSubtitleConverter.convert(
-                payload, kind: kind, playResolution: playResolution, assHeader: track.assHeader
+                payload, kind: kind, playResolution: playResolution, assHeader: track.assHeader,
+                movText: track.movText
             ) else { return }
 
             let tick = av_q2d(timeBase)
@@ -1124,6 +1128,16 @@ final class SubtitleRenditionSet: @unchecked Sendable {
 
     /// The parsed script header of an ASS/SSA stream (its extradata), `nil`
     /// for any other codec or an empty header.
+    /// A mov_text stream's sample description (its extradata), `nil` for
+    /// any other codec or a record too short to hold one.
+    static func movTextDescription(
+        of codecpar: UnsafePointer<AVCodecParameters>
+    ) -> TextSubtitleConverter.MovTextDescription? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_MOV_TEXT, let extradata = codecpar.pointee.extradata,
+              codecpar.pointee.extradata_size > 0 else { return nil }
+        return .init(Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size)))
+    }
+
     static func assHeader(of codecpar: UnsafePointer<AVCodecParameters>) -> ASSScriptHeader? {
         guard kind(for: codecpar.pointee.codec_id) == .ass, let extradata = codecpar.pointee.extradata,
               codecpar.pointee.extradata_size > 0 else { return nil }

@@ -118,7 +118,8 @@ extension TextSubtitleConverter {
     /// `convert` turns into WebVTT text. `header` is the ASS track's script
     /// header (styles, play resolution); ignored for the other kinds.
     static func styledText(
-        _ payload: Data, kind: Kind, playResolution: PlayResolution?, header: ASSScriptHeader?
+        _ payload: Data, kind: Kind, playResolution: PlayResolution?, header: ASSScriptHeader?,
+        movText: MovTextDescription? = nil
     ) -> StyledSubtitleText? {
         switch kind {
         case .subrip, .webvtt:
@@ -130,15 +131,72 @@ extension TextSubtitleConverter {
             if let header { return header.styled(text: event.text, styleName: event.style) }
             return StyledTextParser.parse(event.text, playResolution: playResolution)
         case .movText:
-            return movTextStyled(payload)
+            return movTextStyled(payload, description: movText)
         }
     }
 
-    /// A `tx3g` sample with its `styl` box applied (3GPP TS 26.245 § 5.17):
-    /// per-range bold / italic / underline and text colour. Ranges are
-    /// character offsets; other boxes (highlight, karaoke, hyperlinks) are
-    /// skipped.
-    static func movTextStyled(_ payload: Data) -> StyledSubtitleText? {
+    /// What a `tx3g` track's sample description (FFmpeg's `extradata` for
+    /// mov_text: the TextSampleEntry from its display flags on, 3GPP TS
+    /// 26.245 § 5.16) says about every sample: the default style, the
+    /// justification, and the font table its style records point into.
+    struct MovTextDescription: Equatable {
+        var style = InlineStyle()
+        var placement: TextCuePlacement?
+        var fonts: [Int: String] = [:]
+
+        /// `nil` when the record is shorter than the fixed part (30 bytes).
+        init?(_ extradata: Data?) {
+            guard let extradata, extradata.count >= 30 else { return nil }
+            let bytes = [UInt8](extradata)
+            // Justification: 0 left/top, 1 centre, -1 right/bottom (signed).
+            let column: Int? = switch Int8(bitPattern: bytes[4]) { case 0: 1; case 1: 2; case -1: 3; default: nil }
+            let row: Int? = switch Int8(bitPattern: bytes[5]) { case 0: 6; case 1: 3; case -1: 0; default: nil }
+            if let column, let row, column + row != 2 { placement = TextCuePlacement(alignment: column + row) }
+            // Default StyleRecord at 18: start, end, font-ID, face flags, size, RGBA.
+            let fontID = Int(bytes[22]) << 8 | Int(bytes[23])
+            style = MovTextDescription.style(flags: bytes[24], rgba: bytes[26..<30])
+            // FontTableBox ('ftab') after the fixed part: count, then id + Pascal name.
+            if bytes.count >= 40, bytes[34..<38].elementsEqual("ftab".utf8) {
+                let boxEnd = min(bytes.count, 30 + (Int(bytes[30]) << 24 | Int(bytes[31]) << 16 | Int(bytes[32]) << 8 | Int(bytes[33])))
+                var at = 40
+                for _ in 0..<(Int(bytes[38]) << 8 | Int(bytes[39])) {
+                    guard at + 3 <= boxEnd else { break }
+                    let id = Int(bytes[at]) << 8 | Int(bytes[at + 1])
+                    let length = Int(bytes[at + 2])
+                    guard at + 3 + length <= boxEnd else { break }
+                    if let name = String(bytes: bytes[(at + 3)..<(at + 3 + length)], encoding: .utf8), !name.isEmpty {
+                        fonts[id] = name
+                    }
+                    at += 3 + length
+                }
+            }
+            style.fontName = fonts[fontID]
+        }
+
+        static func style(flags: UInt8, rgba: ArraySlice<UInt8>) -> InlineStyle {
+            var style = InlineStyle()
+            style.bold = flags & 1 != 0
+            style.italic = flags & 2 != 0
+            style.underline = flags & 4 != 0
+            let channel = Array(rgba)
+            style.color = SubtitleColor(red: channel[0], green: channel[1], blue: channel[2], alpha: channel[3])
+            return style
+        }
+    }
+
+    /// A `tx3g` sample with its `styl` box applied (3GPP TS 26.245 § 5.17)
+    /// over the track's default style: per-range bold / italic / underline,
+    /// text colour and font (through the description's font table). Ranges
+    /// are character offsets; other boxes (highlight, karaoke, hyperlinks)
+    /// are skipped.
+    ///
+    /// Style records must be ordered and must not overlap — as FFmpeg's
+    /// decoder requires — or the whole box is ignored and the text keeps the
+    /// default style. Applied unchecked, a damaged sample with thousands of
+    /// overlapping full-length records rewrote the whole text once per record
+    /// on the demux thread (review r3 P1.4); validated, every character is
+    /// written at most once.
+    static func movTextStyled(_ payload: Data, description: MovTextDescription? = nil) -> StyledSubtitleText? {
         let bytes = [UInt8](payload)
         guard bytes.count >= 2 else { return nil }
         let length = Int(bytes[0]) << 8 | Int(bytes[1])
@@ -146,7 +204,7 @@ extension TextSubtitleConverter {
               let text = String(bytes: bytes[2..<(2 + length)], encoding: .utf8) else { return nil }
         let scalars = Array(text.unicodeScalars)
         var styleOf = [Int](repeating: 0, count: scalars.count)
-        var styles = [InlineStyle()]
+        var styles = [description?.style ?? InlineStyle()]
 
         func be16(_ at: Int) -> Int { Int(bytes[at]) << 8 | Int(bytes[at + 1]) }
         var offset = 2 + length
@@ -154,26 +212,33 @@ extension TextSubtitleConverter {
             let size = be16(offset) << 16 | be16(offset + 2)
             guard size >= 8, offset + size <= bytes.count else { break }
             if bytes[(offset + 4)..<(offset + 8)].elementsEqual("styl".utf8), size >= 10 {
-                let count = be16(offset + 8)
-                for entry in 0..<count {
+                var records: [(start: Int, end: Int, style: InlineStyle)] = []
+                var previousEnd = 0
+                var valid = true
+                for entry in 0..<be16(offset + 8) {
                     let at = offset + 10 + entry * 12
                     guard at + 12 <= offset + size else { break }
+                    // A range past the text is clipped to it (lenient, as
+                    // before); one out of order or overlapping voids the box.
                     let start = be16(at), end = min(be16(at + 2), scalars.count)
+                    guard start >= previousEnd, start <= end else { valid = false; break }
+                    previousEnd = end
                     guard start < end else { continue }
-                    let flags = bytes[at + 6]
-                    var style = InlineStyle()
-                    style.bold = flags & 1 != 0
-                    style.italic = flags & 2 != 0
-                    style.underline = flags & 4 != 0
-                    style.color = SubtitleColor(red: bytes[at + 8], green: bytes[at + 9], blue: bytes[at + 10], alpha: bytes[at + 11])
-                    styles.append(style)
-                    for index in start..<end { styleOf[index] = styles.count - 1 }
+                    var style = MovTextDescription.style(flags: bytes[at + 6], rgba: bytes[(at + 8)..<(at + 12)])
+                    style.fontName = description?.fonts[be16(at + 4)] ?? description?.style.fontName
+                    records.append((start, end, style))
+                }
+                if valid {
+                    for record in records {
+                        styles.append(record.style)
+                        for index in record.start..<record.end { styleOf[index] = styles.count - 1 }
+                    }
                 }
             }
             offset += size
         }
         let chars = zip(scalars, styleOf).map { (Character($0.0), $0.1) }
-        return StyledTextParser.styled(chars: chars, styles: styles, placement: nil)
+        return StyledTextParser.styled(chars: chars, styles: styles, placement: description?.placement)
     }
 
     /// An event's text with drawing-mode stretches (`{\p1}…{\p0}`) removed;

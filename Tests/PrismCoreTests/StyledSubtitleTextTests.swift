@@ -148,6 +148,76 @@ struct StyledSubtitleTextTests {
         #expect(many.plainText.count == 10_000)
     }
 
+    private func tx3gSample(_ text: String, records: [(start: Int, end: Int, font: Int, flags: UInt8)]) -> Data {
+        let utf8 = Array(text.utf8)
+        var sample: [UInt8] = [UInt8(utf8.count >> 8), UInt8(utf8.count & 0xFF)] + utf8
+        let size = 10 + records.count * 12
+        sample += [0, 0, UInt8(size >> 8), UInt8(size & 0xFF)] + Array("styl".utf8)
+        sample += [UInt8(records.count >> 8), UInt8(records.count & 0xFF)]
+        for record in records {
+            sample += [UInt8(record.start >> 8), UInt8(record.start & 0xFF), UInt8(record.end >> 8), UInt8(record.end & 0xFF),
+                       UInt8(record.font >> 8), UInt8(record.font & 0xFF), record.flags, 18, 255, 0, 0, 255]
+        }
+        return Data(sample)
+    }
+
+    /// r3 P1.4: overlapping or out-of-order `styl` records void the box
+    /// (text kept, default style) — and thousands of them cost nothing.
+    @Test func tx3gOverlappingStyleRecordsAreRefused() throws {
+        let overlapping = TextSubtitleConverter.movTextStyled(
+            tx3gSample("Hello world", records: [(0, 5, 1, 1), (3, 8, 1, 2)]))
+        #expect(overlapping?.runs == [StyledTextRun(text: "Hello world")])
+        let backwards = TextSubtitleConverter.movTextStyled(
+            tx3gSample("Hello world", records: [(6, 11, 1, 1), (0, 5, 1, 1)]))
+        #expect(backwards?.runs == [StyledTextRun(text: "Hello world")])
+        let ordered = try #require(TextSubtitleConverter.movTextStyled(
+            tx3gSample("Hello world", records: [(0, 5, 1, 1), (6, 11, 1, 2)])))
+        #expect(ordered.runs.map(\.text) == ["Hello", " ", "world"])
+        #expect(ordered.runs.first?.isBold == true && ordered.runs.last?.isItalic == true)
+
+        let long = String(repeating: "x", count: 4_000)
+        let hostile = tx3gSample(long, records: Array(repeating: (0, 4_000, 1, 1), count: 5_000))
+        let clock = ContinuousClock()
+        let started = clock.now
+        let parsed = TextSubtitleConverter.movTextStyled(hostile)
+        #expect(clock.now - started < .seconds(2))
+        #expect(parsed?.plainText == long && parsed?.runs.count == 1 && parsed?.runs.first?.isBold == false)
+    }
+
+    /// r3 P2.6: the track's sample description gives every sample its
+    /// default style, justification and fonts; a record's font id resolves
+    /// through the `ftab`.
+    @Test func tx3gSampleDescriptionGivesDefaultsAndFonts() throws {
+        func pascal(_ id: Int, _ name: String) -> [UInt8] { [0, UInt8(id), UInt8(name.utf8.count)] + Array(name.utf8) }
+        let fonts = pascal(1, "Gill Sans") + pascal(2, "Menlo")
+        let ftabSize = 10 + fonts.count
+        var description: [UInt8] = [0, 0, 0, 0, 0x00, 0x00]          // display flags; left, top
+        description += [0, 0, 0, 0] + [UInt8](repeating: 0, count: 8)  // background, text box
+        description += [0, 0, 0, 0, 0, 1, 0x02, 18, 255, 255, 0, 255]  // default: font 1, italic, yellow
+        description += [0, 0, UInt8(ftabSize >> 8), UInt8(ftabSize & 0xFF)] + Array("ftab".utf8) + [0, 2] + fonts
+
+        let sample = tx3gSample("Hello world", records: [(0, 5, 2, 1)])
+        let text = try #require(SubtitleTextParser.styledText(
+            payload: sample, format: .tx3g, tx3gSampleDescription: Data(description)))
+        #expect(text.placement == TextCuePlacement(alignment: 7))
+        let hello = try #require(text.runs.first)
+        #expect(hello.text == "Hello" && hello.isBold && !hello.isItalic && hello.fontName == "Menlo")
+        let rest = try #require(text.runs.last)
+        #expect(rest.text == " world" && rest.isItalic && rest.fontName == "Gill Sans")
+        #expect(rest.color == SubtitleColor(red: 255, green: 255, blue: 0))
+
+        // No styl box at all: the defaults alone.
+        let plain = try #require(SubtitleTextParser.styledText(
+            payload: tx3gSample("Ahoj", records: []), format: .tx3g, tx3gSampleDescription: Data(description)))
+        #expect(plain.runs == [StyledTextRun(text: "Ahoj", isItalic: true, color: SubtitleColor(red: 255, green: 255, blue: 0),
+                                             fontName: "Gill Sans")])
+        // Bottom-centre (FFmpeg's encoder default) is the host default: no placement.
+        var bottom = description
+        bottom[4] = 1; bottom[5] = 0xFF
+        #expect(TextSubtitleConverter.MovTextDescription(Data(bottom))?.placement == nil)
+        #expect(TextSubtitleConverter.MovTextDescription(Data(description.prefix(29))) == nil)
+    }
+
     /// r3 P2.7: classes on any WebVTT tag, not only `c` and `v`.
     @Test func classesOnEmphasisTagsAreKept() throws {
         let text = try #require(styled("<i.yellow>Ahoj</i> <b.loud.red>pozor</b> <u>u</u>", .webvtt))

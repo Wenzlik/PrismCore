@@ -418,6 +418,11 @@ package enum FuzzTargets {
             assertStyledSane(styled, from: "styled(ass)")
         }
         if let styled = TextSubtitleConverter.movTextStyled(data) { assertStyledSane(styled, from: "styled(tx3g)") }
+        // The same bytes as a sample description, applied to the seed shape.
+        if let description = TextSubtitleConverter.MovTextDescription(data),
+           let styled = TextSubtitleConverter.movTextStyled(Data(FuzzSeeds.tx3gStyledSample), description: description) {
+            assertStyledSane(styled, from: "styled(tx3g, description)")
+        }
 
         guard let text = String(data: data, encoding: .utf8) else { return }
         assertWebVTTSafe(TextSubtitleConverter.sanitize(text), from: "sanitize")

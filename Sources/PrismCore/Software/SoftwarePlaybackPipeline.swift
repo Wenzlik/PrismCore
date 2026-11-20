@@ -328,6 +328,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
     /// Feed-queue confined: each ASS stream's parsed script header, so the
     /// styled runs do not re-parse the styles on every packet.
     private var assHeaders: [Int32: ASSScriptHeader] = [:]
+    private var movTextDescriptions: [Int32: TextSubtitleConverter.MovTextDescription] = [:]
     /// Feed-queue confined: whether `prerollASSEvents` has sought once on
     /// this context, so Matroska has parsed its Cues.
     private var assIndexPrimed = false
@@ -1461,7 +1462,8 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
                                 currentTime: clockAnchored
                                     ? CMTimeGetSeconds(timeline.currentTime) - subtitleDelaySeconds : .nan,
                                 playResolution: SubtitleRenditionSet.playResolution(of: stream.pointee.codecpar, kind: kind),
-                                assHeader: kind == .ass ? assHeader(for: stream) : nil)
+                                assHeader: kind == .ass ? assHeader(for: stream) : nil,
+                                movText: kind == .movText ? movTextDescription(for: stream) : nil)
             if kind == .ass { stateLock.withLock { storedASSTracks }?.ingest(packet) }
         }
 
@@ -1480,6 +1482,13 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         if let cached = assHeaders[stream.pointee.index] { return cached }
         let parsed = SubtitleRenditionSet.assHeader(of: stream.pointee.codecpar)
         if let parsed { assHeaders[stream.pointee.index] = parsed }
+        return parsed
+    }
+
+    private func movTextDescription(for stream: UnsafeMutablePointer<AVStream>) -> TextSubtitleConverter.MovTextDescription? {
+        if let cached = movTextDescriptions[stream.pointee.index] { return cached }
+        let parsed = SubtitleRenditionSet.movTextDescription(of: stream.pointee.codecpar)
+        if let parsed { movTextDescriptions[stream.pointee.index] = parsed }
         return parsed
     }
 
@@ -1577,6 +1586,7 @@ public final class SoftwarePlaybackPipeline: @unchecked Sendable {
         cancelEndObserver()
         subtitleCues.reset()
         assHeaders = [:]
+        movTextDescriptions = [:]
         assIndexPrimed = false
         stateLock.withLock {
             storedSelectedSubtitleStreamIndex = nil
