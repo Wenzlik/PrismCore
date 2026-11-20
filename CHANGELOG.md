@@ -33,7 +33,9 @@ exactly the cues, renditions and playback it got before (issue #197).
   events themselves (`init(header:fonts:)` + `appendEvent`).
   - **Fonts:** the container's attachments (MIME, extension or FFmpeg's
     TTF/OTF codec id) become libass memory fonts, loaded once per source into
-    one `ASS_Library` shared by its tracks. Everything else falls back to
+    one `ASS_Library` shared by its tracks, within a 96 MB budget per source
+    (64 MB per file; fonts past it are skipped, first-declared first).
+    Everything else falls back to
     system faces through libass's CoreText provider (AUTODETECT; there is no
     fontconfig on Apple platforms), default family Helvetica Neue — present
     on tvOS, unlike Arial — and CJK through CoreText's cascade. A probe opened

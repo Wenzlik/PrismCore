@@ -218,6 +218,21 @@ struct ASSRenderingTests {
         #expect(images(renderer.frame(at: 1, canvas: canvas))?.isEmpty == false)
     }
 
+    @Test func fontMemoryIsBudgetedAcrossTheWholeSet() throws {
+        let library = try LibassLibrary(fontBudget: 2_500)
+        let font = Data(repeating: 1, count: 1_000)
+        #expect(library.addFont(name: "a.ttf", bytes: font))
+        #expect(library.addFont(name: "b.ttf", bytes: font))
+        #expect(!library.addFont(name: "c.ttf", bytes: font), "the third would take the set past its budget")
+        #expect(library.addFont(name: "small.ttf", bytes: Data(repeating: 1, count: 400)), "what still fits is taken")
+        #expect(library.loadedFontBytes == 2_400)
+        #expect(!library.addFont(name: "empty.ttf", bytes: Data()))
+        // The per-file cap still applies under a generous budget.
+        let roomy = try LibassLibrary(fontBudget: .max)
+        #expect(!roomy.addFont(name: "huge.ttf", bytes: Data(count: LibassLibrary.maximumFontBytes + 1)))
+        #expect(LibassLibrary.maximumFontSetBytes >= LibassLibrary.maximumFontBytes)
+    }
+
     // MARK: - Routing: off by default, on when asked
 
     private final class CueCollector: @unchecked Sendable {

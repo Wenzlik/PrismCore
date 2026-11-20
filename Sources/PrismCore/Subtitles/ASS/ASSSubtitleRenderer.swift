@@ -389,16 +389,27 @@ enum ASSRendererError: Error, Equatable {
 // Safety: `handle` is used only inside `withLock`.
 final class LibassLibrary: @unchecked Sendable {
     static let defaultFamily = "Helvetica Neue"
-    /// One font is capped like a whole attachment set would be on a TV:
-    /// past this it is a broken or hostile file, not a typeface.
+    /// Past this one file is a broken or hostile attachment, not a typeface
+    /// (a full CJK collection is ~30 MB).
     static let maximumFontBytes = 64 << 20
+    /// What all fonts of one library may hold together. libass keeps its own
+    /// copy of every font, and the cap was per file only: eight 40 MB
+    /// attachments loaded 320 MB beside the decoder — jetsam on an Apple TV.
+    /// Fonts past the budget are skipped (system faces stand in), in
+    /// container order, so the first-declared — usually the dialogue face —
+    /// win. A heavy anime release is 20–60 MB.
+    static let maximumFontSetBytes = 96 << 20
 
     let handle: OpaquePointer
     private let lock = NSLock()
+    private let fontBudget: Int
+    /// Bytes handed to libass so far. Under `lock`.
+    private var fontBytes = 0
 
-    init(fonts: [SubtitleFont] = []) throws {
+    init(fonts: [SubtitleFont] = [], fontBudget: Int = LibassLibrary.maximumFontSetBytes) throws {
         guard let handle = ass_library_init() else { throw ASSRendererError.allocationFailed }
         self.handle = handle
+        self.fontBudget = fontBudget
         // libass logs every font lookup to stderr by default; a TV app has
         // no stderr reader, and a busy script logs per frame.
         ass_set_message_cb(handle, { _, _, _, _ in }, nil)
@@ -414,12 +425,21 @@ final class LibassLibrary: @unchecked Sendable {
     }
 
     /// libass copies the bytes, so the caller's buffer may go away after.
-    func addFont(name: String, bytes: Data) {
-        guard !bytes.isEmpty, bytes.count <= Self.maximumFontBytes else { return }
-        withLock {
+    /// `false` when the font was refused: empty, over the per-file cap, or
+    /// over what is left of the library's budget.
+    @discardableResult
+    func addFont(name: String, bytes: Data) -> Bool {
+        guard !bytes.isEmpty, bytes.count <= Self.maximumFontBytes else { return false }
+        return withLock {
+            guard bytes.count <= fontBudget - fontBytes else { return false }
+            fontBytes += bytes.count
             bytes.withUnsafeBytes { raw in
                 ass_add_font(handle, name, raw.bindMemory(to: CChar.self).baseAddress, Int32(raw.count))
             }
+            return true
         }
     }
+
+    /// Font bytes libass holds for this library.
+    var loadedFontBytes: Int { withLock { fontBytes } }
 }

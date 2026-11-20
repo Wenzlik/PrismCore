@@ -354,8 +354,8 @@ if let renderer = session.assRenderer(streamIndex: track.streamIndex) {
 - **Images** are premultiplied BGRA `CGImage`s positioned in canvas pixels
   (origin top-left), one per cluster of glyphs — set them as layer contents.
   An empty frame means clear.
-- **Fonts** are the container's attachments plus system faces through
-  CoreText. They are read off the source context, so a probe opened with
+- **Fonts** are the container's attachments (up to 96 MB per source, 64 MB
+  per file; the rest are skipped) plus system faces through CoreText. They are read off the source context, so a probe opened with
   `skipAttachments: true` renders with system faces only.
 - **Seeks** need nothing from the host: every event stays loaded and
   re-demuxed ones are ignored.

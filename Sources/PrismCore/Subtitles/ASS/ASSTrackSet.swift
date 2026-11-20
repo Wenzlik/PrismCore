@@ -17,6 +17,8 @@ import Libavutil
 // Safety: `renderers` is immutable after init; each renderer locks itself.
 final class ASSTrackSet: @unchecked Sendable {
     private let renderers: [Int32: (renderer: ASSSubtitleRenderer, timeBase: AVRational)]
+    /// Attachments actually loaded — within `LibassLibrary`'s per-file cap
+    /// and per-source budget.
     let fontCount: Int
 
     init?(input: UnsafeMutablePointer<AVFormatContext>) {
@@ -42,8 +44,10 @@ final class ASSTrackSet: @unchecked Sendable {
             // No copy on our side: libass copies, and the context outlives this call.
             let bytes = Data(bytesNoCopy: extradata, count: Int(stream.pointee.codecpar.pointee.extradata_size),
                              deallocator: .none)
-            library.addFont(name: avMetadataValue(stream.pointee.metadata, "filename") ?? "attachment\(index)", bytes: bytes)
-            fonts += 1
+            if library.addFont(name: avMetadataValue(stream.pointee.metadata, "filename") ?? "attachment\(index)",
+                               bytes: bytes) {
+                fonts += 1
+            }
         }
         fontCount = fonts
 
