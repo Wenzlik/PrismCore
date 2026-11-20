@@ -12,7 +12,9 @@ source-compatible.)
 
 Source-compatible: ASS/SSA rendered with libass for hosts that ask, and
 styled text cues for every text subtitle. A host that changes nothing gets
-exactly the cues, renditions and playback it got before (issue #197).
+the cues, renditions and playback it got before (issue #197), with one
+deliberate exception: ASS drawings no longer show up as subtitle text (see
+*Changed*).
 
 ### Added
 
@@ -87,8 +89,8 @@ exactly the cues, renditions and playback it got before (issue #197).
   classes and style changes per cue are bounded (32 / 16 / 512), so
   hostile markup stays linear. ASS drawing mode
   (`\p1`) no longer leaks vector commands into the runs.
-  `withoutSourceColors()` is the "ignore source colours" view. `text` and
-  `placement` are unchanged byte for byte.
+  `withoutSourceColors()` is the "ignore source colours" view. `placement`
+  is unchanged, and so is `text` except for ASS drawings (see *Changed*).
 - `SubtitleTextParser` — the same parsers for sources PrismCore does not
   demux (server sidecars, another engine's cues): whole SRT / WebVTT / ASS
   documents to `StyledSubtitleCue`s, single samples to `StyledSubtitleText`
@@ -109,6 +111,23 @@ exactly the cues, renditions and playback it got before (issue #197).
 - The cue stores' byte bounds (software store, `SubtitleCueHistory
   .bounded`) charge styled runs in full — fonts, voices, classes, per-run
   overhead — not only their visible words.
+
+### Changed
+
+- **ASS drawings are no longer shown as dialogue.** ASS uses drawing mode
+  (`{\p1}` … `{\p0}`) for vector shapes — signs, boxes, masks — and the
+  text between those tags is coordinates like `m 0 0 l 10 0`, not words.
+  Until now the plain cue text removed the `{\p1}` tag but kept the
+  coordinates, so `TimedTextCue.text`, the WebVTT renditions AVPlayer shows
+  (PiP and AirPlay included) and the software path's cues all displayed them
+  as a subtitle line. Now everything from a `\pN` with N above zero up to
+  the next `\p0` (or the end of the event) is dropped from the plain text
+  too, exactly as `TimedTextCue.styled` already dropped it. An event that is
+  only a drawing produces no text cue at all. This applies to embedded
+  ASS/SSA tracks, external `.ass`/`.ssa` files, and ASS tags pasted into
+  SRT. Two quirks are now read the way libass reads them: text before the
+  first backslash in a `{…}` block is not a tag (`{p1\i1}` does not start a
+  drawing), and a `\p` inside a `\t(…)` animation is not applied.
 
 ### Licensing
 

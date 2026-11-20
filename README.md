@@ -309,7 +309,8 @@ landing keyframe: a long caption whose packet precedes that keyframe may be
 missing until the next cue. Bitmap/OCR and external subtitle selection remain
 outside this software surface. ASS colours, fonts, karaoke and drawing overrides
 are not preserved by the text converter — only the inline styles and placement
-WebVTT has words for.
+WebVTT has words for; drawings themselves (`{\p1}…{\p0}`) are removed from the
+text since 4.0.7.
 
 ### Styled cues and ASS with libass (4.0.7)
 
@@ -317,7 +318,9 @@ Every text cue now carries its styling as runs next to the WebVTT string it
 always had: `TimedTextCue.styled` (`StyledSubtitleText`: `runs` of
 `StyledTextRun` — bold, italic, underline, strike, fill and outline colour,
 font, WebVTT voice/classes — plus `placement`, the ASS style's alignment
-included). `text` and `placement` are unchanged; `styled.withoutSourceColors()`
+included). `text` and `placement` are unchanged, except that ASS drawing
+commands (`{\p1}m 0 0 l 10 0{\p0}`) are no longer left in `text` as dialogue
+(4.0.7); `styled.withoutSourceColors()`
 is the view for a viewer who turned source colours off. The same parsers are
 public for subtitles PrismCore does not demux:
 
