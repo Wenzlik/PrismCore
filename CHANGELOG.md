@@ -8,6 +8,11 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.8] — 2026-11-23
+
+Source-compatible: AC-3 / E-AC-3 decoded inside PrismCore without dynamic range
+compression (software path, Dialogue Boost, cached audio), plus a README tidy-up.
+
 ### Changed
 
 - **AC-3 / E-AC-3 decoded inside PrismCore no longer gets dynamic range
@@ -4266,7 +4271,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.7...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.8...HEAD
+[4.0.8]: https://github.com/Wenzlik/PrismCore/compare/4.0.7...4.0.8
 [4.0.7]: https://github.com/Wenzlik/PrismCore/compare/4.0.6...4.0.7
 [4.0.6]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...4.0.6
 [4.0.5]: https://github.com/Wenzlik/PrismCore/compare/4.0.4...4.0.5
