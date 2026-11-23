@@ -75,7 +75,7 @@ table: the app's name, a link, and its platforms.
 | Audio (bridge) | AAC-LATM / TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / PCM (and FLAC that CoreMedia refuses) → EAC3 5.1, 128 kbps per channel (AAC 5.1 in a build without the **`eac3` encoder**). Opt-in `bridgedAudio: .lossless`: **FLAC with the source's own channels up to 7.1, 24-bit**, for a route that takes 8 channels. A TrueHD track's whole 7.1 presentation comes through with nothing remixed or truncated whenever its layout is one FLAC carries (stereo, 5.1, 7.1). A bridged track that ends before the video plays silence to the video's end (planned shape; a stream-copied one still ends early) |
 | TrueHD Atmos / DTS:X | **Objects are not preserved** — no public Apple API takes them from an app and no shippable encoder writes JOC (see *Dolby Atmos from TrueHD*). The bed is: 5.1 by default, the full 7.1 with `.lossless`. **Opt-in for TrueHD only:** `objectAudioRendering: .heights` renders its objects to 7.1.4 (or, where the render cannot place the metadata, derives 7.1.4 from the stream's 7.1, guided by its objects) and serves APAC, so the heights play (see *TrueHD Atmos with heights*; `.renderedHeights`). Each track says which in `audioTrackDeliveries[…].objectAudio` (`.preserved` / `.notPreserved` / `.none`). TrueHD Atmos is read off the stream's major sync, for every TrueHD track, selected or not. DTS:X still relies on the container's claim, because there is no bitstream reader for it yet |
 | Multi-audio | Every viable track becomes an HLS alternate rendition with its language, name and channel count, so AVPlayer gets a real `AVMediaSelectionGroup` to switch on. `preferredAudioLanguage:` decides which one is `DEFAULT`, so playback starts in the right language instead of switching visibly after it. The software path switches too: `SoftwarePlaybackPipeline.selectAudioTrack(streamIndex:)` swaps the decoder mid-playback without touching the clock or the picture |
-| Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
+| Dialogue boost | Opt-in (`dialogueBoost:` on the session): extra "Dialogue Boost" renditions derived from the default track — which is the `preferredAudioLanguage:` track when one matched — decoded, centre channel favoured (bed −6 dB / −12 dB), re-encoded to EAC3 — marked `public.accessibility.enhances-speech-intelligibility` so hosts find them by characteristic. Engine-side because AVFoundation ignores `audioMix`/audio taps on HLS items. The base track stays bit-for-bit (Atmos included). An AC3 / EAC3 source is decoded without its dynamic range compression (`drc_scale` 0) — the full dynamics the stream-copied base plays at, as is every AC3 / EAC3 decode in the engine (software path, cached audio clips). Needs the `eac3` encoder and a centre-channel source; stereo would need `dialoguenhance`, which current builds don't ship |
 | Night mode / channel cap | Opt-in (`bridgedAudioProcessing:` on the session) for audio PrismCore re-encodes only — bridged tracks and dialogue-boost renditions; stream-copied tracks are never touched. `nightMode` compresses loud passages downward (`acompressor`, no make-up gain); `maxChannels` folds wider tracks down (`2` for stereo) and `CHANNELS` says so |
 | Audio description | A track flagged visual-impaired in the container is declared `CHARACTERISTICS="public.accessibility.describes-video"` (`AudioTrackInfo.isAudioDescription`) |
 | Subtitles (text) | SubRip / ASS / SSA / WebVTT / mov_text converted during the remux read into segmented WebVTT renditions, cut on the video's own boundaries — so text survives PiP and AirPlay instead of living in a host overlay. ASS inline italics / bold / underline become WebVTT tags; `\an` / `\pos` placement and a WebVTT track's own cue settings ride the timing line, so a caption authored at the top of the frame stays there. External `.srt` / `.vtt` register as first-class renditions |
@@ -92,7 +92,7 @@ table: the app's name, a link, and its platforms.
 ## Quick start
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.4")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.7")
 ```
 
 One call probes the source, picks the path and hands back something already
@@ -1166,8 +1166,13 @@ Deliberate omissions, so you don't have to read the source to find them:
 - **No published playback state.** The remux path is a service: it hands you a URL
   and gets out of the way. Your `AVPlayer` remains the source of truth for time,
   rate and status.
-- **No subtitle rendering.** Text becomes WebVTT renditions AVPlayer selects
-  itself; bitmap tracks are surfaced for a host that wants to draw them.
+- **No subtitle overlay.** Text becomes WebVTT renditions AVPlayer selects
+  itself, and every text cue also carries its styling (`TimedTextCue.styled`)
+  for a host that draws its own. ASS/SSA can be rendered with libass
+  (`setASSRendering(.libass)`, opt-in), but what comes back is images for the
+  host's overlay — PrismCore never puts them on screen. Bitmap tracks are
+  OCR'd into text renditions; the raw tracks stay surfaced for a host that
+  wants to draw them.
 - **No playlist or queue management.** Make a new session for the next title.
 - **No analytics.** Nothing leaves the device, and nothing phones anywhere.
 - **No re-encoding of video, ever.** If a frame would have to be touched, that
@@ -1285,7 +1290,7 @@ not. Since 1.0.0 that contract is a promise: breaking changes bump the major,
 features the minor, fixes the patch — so the ordinary pin is the right one:
 
 ```swift
-.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.4")
+.package(url: "https://github.com/Wenzlik/PrismCore.git", from: "4.0.7")
 ```
 
 Hosts that archive through Xcode Cloud (or any CI with automatic resolution
@@ -1340,7 +1345,7 @@ Shipping, and stable under semantic versioning since 1.0.0 (see *Stability and
 versioning*). Two headline claims are still proven by construction rather than by a
 lab.
 
-The test suite is 922 tests across 130 suites, hermetic apart from an opt-in
+The test suite is __TEST_COUNT__ tests across __SUITE_COUNT__ suites, hermetic apart from an opt-in
 real-media harness. It exercises the playlists, the loopback server, the subtitle
 renditions and the audio bridge's decode → resample → FIFO → encode chain, plus
 end-to-end remuxes of synthetic fixtures: a two-language master (AAC eng + AC3 ces)
