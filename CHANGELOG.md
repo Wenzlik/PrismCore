@@ -8,6 +8,23 @@ source-compatible.)
 
 ## [Unreleased]
 
+### Changed
+
+- **AC-3 / E-AC-3 decoded inside PrismCore no longer gets dynamic range
+  compression.** FFmpeg's `ac3` / `eac3` decoders default to `drc_scale` 1,
+  which applies the bitstream's `dynrng` gains, so the software path's audio,
+  the Dialogue Boost renditions (the bridge's decoder) and cached audio clips
+  came out compressed — dialogue about 2 dB quieter than the same track
+  stream-copied and decoded by AVFoundation, an audible step on every switch
+  between the two. Every engine-side AC-3 / E-AC-3 decoder now opens with
+  `drc_scale` 0 (`AudioDecoderOptions`): full dynamics, the passthrough's
+  level. A build whose decoder refuses the option keeps decoding, compressed,
+  and says so in the unified log. Passthrough (stream copy) is unchanged, and
+  so is every other codec.
+- README: the *Non-goals* subtitle line describes the 4.0.7 rendering
+  (styled cues, opt-in libass images for the host's overlay), the SPM
+  examples name 4.0.7, and the Dialogue Boost row mentions DRC.
+
 ## [4.0.7] — 2026-11-20
 
 Source-compatible: ASS/SSA rendered with libass for hosts that ask, and
