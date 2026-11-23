@@ -67,6 +67,7 @@ enum CachedAudioDecoder {
         guard let codec else { throw FFmpegError(code: -1, operation: "avcodec_alloc_context3") }
         try FFmpegError.check(avcodec_parameters_to_context(codec, stream.pointee.codecpar), "avcodec_parameters_to_context")
         codec.pointee.pkt_timebase = stream.pointee.time_base
+        AudioDecoderOptions.apply(to: codec)
         try FFmpegError.check(avcodec_open2(codec, decoder, nil), "avcodec_open2(cached audio)")
 
         let end = from + duration

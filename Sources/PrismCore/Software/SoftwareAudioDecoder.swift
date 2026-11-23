@@ -72,7 +72,8 @@ final class SoftwareAudioDecoder {
     private let sourceTimeBase: AVRational
     private(set) var outputFormat: OutputFormat
 
-    private var codecContext: UnsafeMutablePointer<AVCodecContext>?
+    /// Readable for the tests that check what the decoder was opened with.
+    private(set) var codecContext: UnsafeMutablePointer<AVCodecContext>?
     private var resampler: OpaquePointer?
     private var decodedFrame: UnsafeMutablePointer<AVFrame>?
 
@@ -117,6 +118,7 @@ final class SoftwareAudioDecoder {
             "avcodec_parameters_to_context(audio)"
         )
         context.pointee.pkt_timebase = timeBase
+        AudioDecoderOptions.apply(to: context)
         try FFmpegError.check(avcodec_open2(context, decoder, nil), "avcodec_open2(audio decoder)")
 
         try configureOutputLayout(sourceChannels: codecpar.pointee.ch_layout.nb_channels)

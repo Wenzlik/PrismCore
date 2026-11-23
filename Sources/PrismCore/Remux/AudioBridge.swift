@@ -195,7 +195,8 @@ final class AudioBridge {
 
     // MARK: - State
 
-    private var decoderCtx: UnsafeMutablePointer<AVCodecContext>?
+    /// Readable for the tests that check what the decoder was opened with.
+    private(set) var decoderCtx: UnsafeMutablePointer<AVCodecContext>?
     private var encoderCtx: UnsafeMutablePointer<AVCodecContext>?
     private var swrCtx: OpaquePointer?
     private var fifo: OpaquePointer?
@@ -283,6 +284,7 @@ final class AudioBridge {
         // Decoded frames get their PTS in this time base — the one packets
         // arrive in — which is what the anchoring math below assumes.
         decCtx.pointee.pkt_timebase = timeBase
+        AudioDecoderOptions.apply(to: decCtx)
         try FFmpegError.check(avcodec_open2(decCtx, decoder, nil), "avcodec_open2(audio decoder)")
 
         // Encoder.
