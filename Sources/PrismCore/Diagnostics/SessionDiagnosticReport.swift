@@ -396,6 +396,15 @@ public struct SessionDiagnosticReport: Sendable, Equatable, Codable {
             public var budgetBytes: Int?
             /// Segments evicted to stay inside it, over the whole session.
             public var evictedSegments: Int
+            /// Of those, how many were at or after AVPlayer's read front
+            /// when evicted — non-zero means retention, not production
+            /// speed, cost the player a segment it was about to fetch.
+            /// `nil` from a report older than 4.0.9.
+            public var evictedAheadOfReadFront: Int? = nil
+            /// Producer re-anchors taken (seeks, misses, rendition joins).
+            public var reanchors: Int? = nil
+            /// Media-segment fetches that found no file on disk.
+            public var segmentMisses: Int? = nil
         }
     }
 

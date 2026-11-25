@@ -9,12 +9,13 @@ import Foundation
 /// deleted segment would be gone for good, so retention only runs in planned
 /// mode.
 ///
-/// The policy is distance-from-playhead: when the recorded total exceeds the
-/// budget, the segment farthest from the one being produced goes first — the
-/// producer trails the playhead, so distance from it approximates "least
-/// likely to be fetched next". A keep window around the playhead is exempt
-/// even over budget: evicting what AVPlayer is about to fetch would turn the
-/// budget into a reproduction loop.
+/// The policy is distance-from-the-reader: when the recorded total exceeds
+/// the budget, the segment farthest from the `keep` range — a little behind
+/// AVPlayer's read front up to the producer (`DemandCoordinator
+/// .retentionKeepRange`) — goes first, and the range itself is exempt even
+/// over budget: evicting what AVPlayer is about to fetch would turn the
+/// budget into a reproduction loop. Before the first fetch there is no
+/// front, and a window of `keepWindow` around the producing index stands in.
 ///
 /// Pure bookkeeping — the caller owns the files and deletes what `record`
 /// returns.
@@ -35,7 +36,8 @@ struct SegmentRetention {
 
     /// Record segment `index` as present with `bytes` on disk (a reproduction
     /// replaces the old size), and return the indices to evict — farthest from
-    /// `producing` first — until the total fits the budget again.
+    /// `keep` (else from `producing`) first — until the total fits the budget
+    /// again.
     ///
     /// `protected` indexes are never evicted, budget notwithstanding: they
     /// have an outstanding demand serve, and the whole reason the segment was
@@ -44,16 +46,21 @@ struct SegmentRetention {
     /// policy can't see that on its own, because a demanded segment stops
     /// being near the producer the moment production runs on past it.
     mutating func record(
-        index: Int, bytes: Int, producing: Int, protected: Set<Int> = []
+        index: Int, bytes: Int, producing: Int, keep: ClosedRange<Int>? = nil, protected: Set<Int> = []
     ) -> [Int] {
         totalBytes += bytes - (sizes[index] ?? 0)
         sizes[index] = bytes
 
+        let kept = keep ?? (producing - keepWindow)...(producing + keepWindow)
+        func distance(_ segment: Int) -> Int {
+            segment < kept.lowerBound ? kept.lowerBound - segment
+                : segment > kept.upperBound ? segment - kept.upperBound : 0
+        }
         var victims: [Int] = []
         while totalBytes > budgetBytes {
             let candidate = sizes.keys
-                .filter { abs($0 - producing) > keepWindow && !protected.contains($0) }
-                .max { abs($0 - producing) < abs($1 - producing) }
+                .filter { !kept.contains($0) && !protected.contains($0) }
+                .max { distance($0) < distance($1) }
             guard let victim = candidate else { break }
             totalBytes -= sizes.removeValue(forKey: victim) ?? 0
             victims.append(victim)

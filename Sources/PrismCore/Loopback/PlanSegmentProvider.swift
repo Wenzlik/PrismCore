@@ -147,7 +147,7 @@ struct PlanSegmentProvider: SegmentProvider {
         // before the disk read so a parked producer wakes even when the serve
         // itself is instant.
         if let index = Self.segmentIndex(inPath: path) {
-            coordinator.noteFetch(of: index)
+            coordinator.noteFetch(of: index, track: Self.track(ofPath: path))
         }
         // An init or segment fetch under `audioN/` is the demand that arms a
         // lazy rendition — not the playlist fetch, which AVPlayer makes for
@@ -177,7 +177,8 @@ struct PlanSegmentProvider: SegmentProvider {
 
         // Unproduced planned artifacts by shape:
         if let index = Self.segmentIndex(inPath: path) {
-            coordinator.requestProduction(of: index)
+            coordinator.noteMiss()
+            coordinator.requestProduction(of: index, track: Self.track(ofPath: path))
             // Protected from HERE, not from when the wait's closure runs: a
             // queued pending leaves a gap in which production could land the
             // segment and retention evict it again (issue #43). The matching
@@ -219,6 +220,13 @@ struct PlanSegmentProvider: SegmentProvider {
         let name = (path as NSString).lastPathComponent
         guard name.hasPrefix("seg"), name.hasSuffix(".m4s") else { return nil }
         return Int(name.dropFirst(3).dropLast(4))
+    }
+
+    /// The read front a media path belongs to: its directory — `""` for the
+    /// variant, `audioN` for a rendition.
+    static func track(ofPath path: String) -> String {
+        let directory = (path as NSString).deletingLastPathComponent
+        return directory.hasPrefix("/") ? String(directory.dropFirst()) : directory
     }
 
     /// `seg%05d.vtt` under a rendition directory → index. Same shape as the

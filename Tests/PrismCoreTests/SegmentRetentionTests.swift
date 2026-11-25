@@ -208,4 +208,18 @@ struct SegmentRetentionTests {
         #expect(initData.range(of: Data("avc1".utf8)) != nil)
         #expect(initData.range(of: Data("mp4a".utf8)) != nil)
     }
+
+    @Test("A keep range around the read front is exempt, and eviction starts farthest from it")
+    func keepRangeAroundTheFront() {
+        var retention = SegmentRetention(budgetBytes: 1_000, keepWindow: 0)
+        var victims: [Int] = []
+        for index in 0...25 {
+            victims += retention.record(index: index, bytes: 100, producing: index, keep: 10...20)
+        }
+        #expect(!victims.contains { (10...20).contains($0) })
+        // Farthest from the range first: the oldest behind it before anything past it.
+        #expect(victims.first == 0)
+        // The range itself (11 segments) outlasts the budget rather than go.
+        #expect(retention.totalBytes == 1_100)
+    }
 }

@@ -541,6 +541,87 @@ struct ProducerLeadCapTests {
         #expect(returned.wait(timeout: signalWindow) == .success)
     }
 
+    @Test("A measured source's lead is a minute, held to half the retention budget")
+    func measuredSourceLead() {
+        // A typical episode (8 Mbit/s) under the default 1 GiB: the full minute.
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: 1 << 30, bitsPerSecond: 8_000_000) == 60)
+        // 64 MiB at 8 Mbit/s: half of it is ~33.5 s.
+        let tight = DemandCoordinator.leadSeconds(budgetBytes: 64 << 20, bitsPerSecond: 8_000_000)
+        #expect(tight > 33 && tight < 34)
+        // A budget too small for even thirty seconds never goes under them.
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: 64 << 20, bitsPerSecond: 60_000_000) == 30)
+        // Keep-everything: the full minute.
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: nil, bitsPerSecond: 8_000_000) == 60)
+    }
+
+    @Test("No measured rate keeps the thirty-second lead, whatever the budget")
+    func unmeasuredSourceLead() {
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: 1 << 30, bitsPerSecond: nil) == 30)
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: nil, bitsPerSecond: nil) == 30)
+        #expect(DemandCoordinator.leadSeconds(budgetBytes: 1 << 30, bitsPerSecond: 0) == 30)
+    }
+
+    @Test("A raised lead cap lets the producer run past the network lead")
+    func raisedLeadDoesNotPark() {
+        let coordinator = DemandCoordinator()
+        coordinator.leadCapSeconds = DemandCoordinator.extendedLeadSeconds
+        coordinator.noteFetch(of: 0)
+        // Past thirty seconds, inside a minute at the 6 s stride.
+        let returned = park(on: coordinator, producing: leadSegments + 3)
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("The lead is measured from the slowest live front")
+    func leadFromLowestFront() {
+        let coordinator = DemandCoordinator()
+        coordinator.noteFetch(of: leadSegments + 3, track: "")
+        coordinator.noteFetch(of: 0, track: "audio1")
+        // Inside the lead of the variant's front, past the audio front's.
+        let returned = park(on: coordinator, producing: leadSegments + 5)
+        #expect(returned.wait(timeout: stillParkedWindow) == .timedOut)
+        coordinator.noteFetch(of: leadSegments + 3, track: "audio1")
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("A front waiting on the segment in hand is never parked behind a slower one")
+    func demandedSegmentIsNotParked() {
+        let coordinator = DemandCoordinator()
+        coordinator.setProducing(index: leadSegments + 5)
+        coordinator.noteFetch(of: 0, track: "audio1")
+        // The variant asks for exactly what is being produced: a miss inside
+        // the forward-wait window, so no anchor request comes to wake it.
+        coordinator.noteFetch(of: leadSegments + 5, track: "")
+        let returned = park(on: coordinator, producing: leadSegments + 5)
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("Retention keeps from behind the lowest front to past the producer")
+    func retentionKeepRange() {
+        let coordinator = DemandCoordinator()
+        #expect(coordinator.retentionKeepRange(producing: 5) == nil)
+        coordinator.noteFetch(of: 40, track: "")
+        coordinator.noteFetch(of: 38, track: "audio1")
+        let keep = coordinator.retentionKeepRange(producing: 50)
+        #expect(keep == (38 - DemandCoordinator.keepBehindFront)...(50 + DemandCoordinator.keepAheadOfFront))
+        // Diagnostics count only evictions at or after the lowest front.
+        coordinator.noteEvictions([1, 2, 38, 60])
+        #expect(coordinator.evictionsAheadOfReadFrontCount == 2)
+    }
+
+    @Test("Continuity is judged per front: a rendition's next segment is not a seek")
+    func continuityPerFront() {
+        let coordinator = DemandCoordinator()
+        coordinator.setProducing(index: 10)
+        coordinator.noteFetch(of: 9, track: "")
+        coordinator.noteFetch(of: 10, track: "")
+        coordinator.noteFetch(of: 6, track: "audio1")
+        coordinator.noteFetch(of: 11, track: "audio1")
+        coordinator.noteFetch(of: 11, track: "")
+        // The variant's 11 follows its own 10, and sits inside the window.
+        coordinator.requestProduction(of: 11, track: "")
+        #expect(coordinator.takeAnchorRequest() == nil)
+    }
+
     @Test("Past the window the producer parks, and a catching-up fetch releases it")
     func fetchReleasesThePark() {
         let coordinator = DemandCoordinator()

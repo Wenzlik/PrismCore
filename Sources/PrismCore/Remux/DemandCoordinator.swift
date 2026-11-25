@@ -79,6 +79,35 @@ final class DemandCoordinator: @unchecked Sendable {
     /// is made `lastDemandedIndex` already IS the request.
     private var previousDemandedIndex = -1
 
+    /// The read front per fetched directory — the variant (`""`) and each
+    /// `audioN/` — with when it last moved, and the fetch before it. AVPlayer
+    /// reads the variant and its audio rendition as separate fronts that can
+    /// drift a segment or two apart; judging continuity and the lead against
+    /// one shared "newest fetch" made a rendition's next segment look like a
+    /// seek, and let retention evict what the slower front still needed.
+    private var fronts: [String: (index: Int, at: ContinuousClock.Instant)] = [:]
+    private var previousFronts: [String: Int] = [:]
+    /// A front not fetched for this long is a rendition the player left (or
+    /// a paused player): it no longer holds the producer or retention back.
+    static let frontStaleness: Duration = .seconds(15)
+    /// Segments retention keeps behind the lowest read front: a refetch after
+    /// a rebuffer, an item handover or a short skip back is served from disk
+    /// instead of throwing the producer back (#3795 in Aether).
+    static let keepBehindFront = 15
+    /// Segments retention keeps past the highest front and the producer.
+    static let keepAheadOfFront = 4
+
+    /// Diagnostics (#3795 in Aether): how often production was moved, how
+    /// often a media segment was not on disk when fetched, and how many
+    /// evicted segments sat at or after the read front — the one number that
+    /// says retention, not production speed, starved the player.
+    var reanchorCount: Int { lock.withLock { reanchors } }
+    private var reanchors = 0
+    private var misses = 0
+    private var evictedAheadOfFront = 0
+    var segmentMissCount: Int { lock.withLock { misses } }
+    var evictionsAheadOfReadFrontCount: Int { lock.withLock { evictedAheadOfFront } }
+
     /// How far past the last demanded segment the producer may run before it
     /// parks, in seconds of content. Thirty seconds: comfortably more than
     /// AVPlayer's forward read-ahead, comfortably less than the retention
@@ -92,6 +121,38 @@ final class DemandCoordinator: @unchecked Sendable {
     /// because segments vary — a 2 s head, keyframe-stretched entries — and
     /// the buffer AVPlayer cares about is time.
     static let producerLeadSeconds = 30.0
+    /// The lead any source with a measured rate gets instead (#3795 in
+    /// Aether): a minute. On a file the only thing that can drain AVPlayer's
+    /// pool is production itself running slower than real time for a while
+    /// (an audio transcode, a hot iPad); on a remote source a link dip as
+    /// well. The produced segments sit on disk, not in memory, so the cost
+    /// is retention budget, which `leadSeconds(budgetBytes:bitsPerSecond:)`
+    /// respects. Deliberately conservative: not yet measured on a device —
+    /// for a remote source not at all.
+    static let extendedLeadSeconds = 60.0
+
+    /// The lead the producer parks on — `producerLeadSeconds` unless the
+    /// remuxer set it from the source's rate before production started.
+    var leadCapSeconds: Double {
+        get { lock.withLock { leadCap } }
+        set { lock.withLock { leadCap = newValue } }
+    }
+    private var leadCap = DemandCoordinator.producerLeadSeconds
+
+    /// The lead for a source, file or remote alike: `extendedLeadSeconds`
+    /// held to HALF the retention budget at the source's measured average
+    /// rate, never under `producerLeadSeconds`. Half, because retention keeps
+    /// everything from behind the read front up to the producer
+    /// (`retentionKeepRange`): the other half is room for the segments kept
+    /// behind the front, instead of the budget being spent on the lead
+    /// alone. No measured rate can't be bounded, so thirty seconds; no
+    /// budget (`nil`) keeps everything, so the full minute.
+    static func leadSeconds(budgetBytes: Int?, bitsPerSecond: Int?) -> Double {
+        guard let bitsPerSecond, bitsPerSecond > 0 else { return producerLeadSeconds }
+        guard let budgetBytes else { return extendedLeadSeconds }
+        let affordable = Double(budgetBytes) / 2 / (Double(bitsPerSecond) / 8)
+        return min(extendedLeadSeconds, max(producerLeadSeconds, affordable))
+    }
     /// The sequential shape has no plan to read durations from; its
     /// `segmentSeconds` stands in (set by the producer).
     var nominalSegmentSeconds = 6.0
@@ -139,6 +200,7 @@ final class DemandCoordinator: @unchecked Sendable {
             defer { requestedAnchor = nil; anchorIsForced = false; anchorIsJoin = false; requestedAt = nil }
             reanchorInFlight = anchor
             inFlightIsJoin = anchorIsJoin
+            reanchors += 1
             return (index: anchor, forced: anchorIsForced)
         }
     }
@@ -177,7 +239,8 @@ final class DemandCoordinator: @unchecked Sendable {
     }
 
     /// Park the calling thread while the producer is more than
-    /// `producerLeadSegments` ahead of the last demanded segment. Same
+    /// `leadCapSeconds` ahead of the lowest live read front (else the last
+    /// demanded segment). Same
     /// contract as `waitForAnchorRequest`: **blocks a real thread**, producer's
     /// own thread only. Returns as soon as demand catches up, an anchor
     /// request lands (the copy loop's per-packet check will take it), or the
@@ -191,10 +254,22 @@ final class DemandCoordinator: @unchecked Sendable {
     func parkWhileAhead(producing: Int, isCancelled: () -> Bool) {
         lock.lock()
         defer { lock.unlock() }
-        while requestedAnchor == nil, !isCancelled(), lastDemandedIndex >= 0,
-              leadSeconds(from: lastDemandedIndex, to: producing) > Self.producerLeadSeconds {
+        while requestedAnchor == nil, !isCancelled(), lastDemandedIndex >= 0, isAheadOfDemand(producing: producing) {
             lock.wait(until: Date(timeIntervalSinceNow: Self.parkBackstopSeconds))
         }
+    }
+
+    /// Whether the producer is past its lead: measured from the lowest live
+    /// front, so a rendition a little behind is not run away from — but never
+    /// while ANY live front has reached `producing`: that path is waiting on
+    /// the segment in hand (a miss inside the forward-wait window makes no
+    /// anchor request), and parking would hold its serve to the timeout.
+    /// Under the lock.
+    private func isAheadOfDemand(producing: Int) -> Bool {
+        guard let bounds = activeFrontBounds(now: .now) else {
+            return leadSeconds(from: lastDemandedIndex, to: producing) > leadCap
+        }
+        return bounds.highest < producing && leadSeconds(from: bounds.lowest, to: producing) > leadCap
     }
 
     /// Content seconds between the start of segment `from` and the start of
@@ -209,6 +284,49 @@ final class DemandCoordinator: @unchecked Sendable {
             return Double(toPTS - plan.entries[from].startPTS) * Double(plan.timeBaseNum) / Double(plan.timeBaseDen)
         }
         return Double(to - from) * nominalSegmentSeconds
+    }
+
+    /// The lowest and highest read fronts fetched within `frontStaleness`;
+    /// `nil` when none is (before the first fetch, or a long pause). Under
+    /// the lock.
+    private func activeFrontBounds(now: ContinuousClock.Instant) -> (lowest: Int, highest: Int)? {
+        let active = fronts.values.filter { now - $0.at <= Self.frontStaleness }.map(\.index)
+        guard let lowest = active.min(), let highest = active.max() else { return nil }
+        return (lowest, highest)
+    }
+
+    /// What retention must never evict while `producing`: from
+    /// `keepBehindFront` segments behind the lowest read front up to
+    /// `keepAheadOfFront` past the highest front or the producer, whichever
+    /// is further — so nothing between the player and the producer goes.
+    /// Anchored on the read front rather than the producer: with the
+    /// producer a lead ahead, a window around it alone left the segments
+    /// AVPlayer was about to fetch unprotected. Falls back to the newest
+    /// fetch when every front is stale; `nil` before the first fetch.
+    func retentionKeepRange(producing: Int) -> ClosedRange<Int>? {
+        lock.withLock {
+            guard lastDemandedIndex >= 0 else { return nil }
+            let bounds = activeFrontBounds(now: .now) ?? (lastDemandedIndex, lastDemandedIndex)
+            let lower = max(0, bounds.lowest - Self.keepBehindFront)
+            let upper = max(bounds.highest, producing) + Self.keepAheadOfFront
+            return lower...max(lower, upper)
+        }
+    }
+
+    /// Retention evicted `victims`: count the ones at or after the lowest
+    /// read front (diagnostics).
+    func noteEvictions(_ victims: [Int]) {
+        guard !victims.isEmpty else { return }
+        lock.withLock {
+            let front = activeFrontBounds(now: .now)?.lowest ?? lastDemandedIndex
+            guard front >= 0 else { return }
+            evictedAheadOfFront += victims.filter { $0 >= front }.count
+        }
+    }
+
+    /// A media segment was fetched and was not on disk (diagnostics).
+    func noteMiss() {
+        lock.withLock { misses += 1 }
     }
 
     /// The newest demanded index, or `nil` before the first fetch — what
@@ -273,12 +391,19 @@ final class DemandCoordinator: @unchecked Sendable {
     /// A media-segment fetch arrived — hit or miss. The newest fetch is where
     /// AVPlayer's read-ahead front is, so it moves `lastDemandedIndex` and
     /// wakes a producer parked on its lead cap.
-    func noteFetch(of index: Int) {
+    ///
+    /// `track` is the fetched path's directory — `""` for the variant,
+    /// `audioN` for a rendition — so each front is followed on its own.
+    func noteFetch(of index: Int, track: String = "") {
         lock.withLock {
             if index != lastDemandedIndex {
                 previousDemandedIndex = lastDemandedIndex
                 lastDemandedIndex = index
             }
+            if let front = fronts[track], front.index != index {
+                previousFronts[track] = front.index
+            }
+            fronts[track] = (index, .now)
             lock.broadcast()
         }
     }
@@ -299,7 +424,10 @@ final class DemandCoordinator: @unchecked Sendable {
     /// together, so ±1 of the previous fetch counts as continuous); a request
     /// that jumps further is a seek, however close it lands, and waiting for
     /// serial production to reach it was up to two segments of silence.
-    func requestProduction(of index: Int, force: Bool = false) {
+    ///
+    /// `track` (see `noteFetch`) judges continuity against that front's own
+    /// previous fetch; without one, against the newest fetch of any.
+    func requestProduction(of index: Int, force: Bool = false, track: String? = nil) {
         lock.withLock {
             // Judged against where production is HEADED, not where it is: a
             // pending anchor, else a taken re-anchor whose first segment has
@@ -310,7 +438,8 @@ final class DemandCoordinator: @unchecked Sendable {
             // anchor to N+1 — honoured once the debounce ran out — and N's
             // wait timed out, though production from N reaches N+1 anyway.
             let headed = requestedAnchor ?? reanchorInFlight ?? producingIndex
-            let continuous = previousDemandedIndex < 0 || abs(index - previousDemandedIndex) <= 1
+            let previous = track.flatMap { previousFronts[$0] } ?? previousDemandedIndex
+            let continuous = previous < 0 || abs(index - previous) <= 1
             // A forced join is held even against a jump inside the window,
             // waiting to be taken or taken with its first segment not landed:
             // the rendition re-armed by its fetch of N needs N whole, and
