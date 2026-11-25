@@ -618,7 +618,11 @@ struct SuspendedRenditionTests {
         // (11), and that cut applies the suspension — so the hole is at 12 at
         // the latest, two before the last (14). At the default 6 s the same
         // cap reaches the last segments, and a fast producer filled the hole.
-        let session = try PrismCoreSession(url: try fixture("h264_opus_opus_60s.mkv"), segmentTargetDuration: 4)
+        // The cap is held at 30 s by a retention budget of the fixture's own
+        // size (a measured source's lead is half the budget at its rate).
+        let url = try fixture("h264_opus_opus_60s.mkv")
+        let size = try #require(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let session = try PrismCoreSession(url: url, segmentCacheBytes: size, segmentTargetDuration: 4)
         let master = try await session.start()
         defer { Task { await session.stop() } }
         let base = master.deletingLastPathComponent()

@@ -18,7 +18,10 @@ import Libavutil
 /// Fixtures (`generate_reanchor.sh`): 60 s, three B-frames, a keyframe every
 /// 2 s, a click on every whole second. Closed GOP + AAC (copied, primed),
 /// and open GOP + Opus (bridged). 60 s is past the producer's 30 s lead, so
-/// the late segment below only exists once a fetch re-anchors production.
+/// the late segment below only exists once a fetch re-anchors production. The
+/// lead is held at 30 s by a retention budget of the fixture's own size: a
+/// measured source's lead is half the budget at its rate (4.0.9), and the
+/// default 1 GiB would let it run the whole minute.
 @Suite("Re-anchor timeline", .serialized)
 struct ReanchorTimelineTests {
 
@@ -38,7 +41,9 @@ struct ReanchorTimelineTests {
         // that the 30 s lead parks it well before 50 s on its own.
         let media = try Data(contentsOf: try fixture(name))
         let hold = HeldMedia(bytes: [UInt8](media), holdAt: media.count / 2)
-        let session = try PrismCoreSession(url: URL(string: "prismcore-test://\(name)")!, input: hold.make)
+        let session = try PrismCoreSession(
+            url: URL(string: "prismcore-test://\(name)")!, segmentCacheBytes: media.count, input: hold.make
+        )
         let master = try await session.start()
         defer { hold.release(); Task { await session.stop() } }
         let base = master.deletingLastPathComponent()
