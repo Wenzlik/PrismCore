@@ -1819,7 +1819,10 @@ public actor PrismCoreSession {
                           staleUnconvertedPackets: $0.staleUnconvertedPackets, isClean: $0.isClean)
                 },
                 retention: .init(budgetBytes: options.segmentCacheBytes,
-                                 evictedSegments: remuxer.residentSegments.evictedCount),
+                                 evictedSegments: remuxer.residentSegments.evictedCount,
+                                 evictedAheadOfReadFront: demand.evictionsAheadOfReadFrontCount,
+                                 reanchors: demand.reanchorCount,
+                                 segmentMisses: demand.segmentMissCount),
                 remuxFailure: remuxError.map(redaction.failure),
                 // One lock: read apart, a re-anchor landing between the two
                 // reads yields a pair that never existed (the old offset

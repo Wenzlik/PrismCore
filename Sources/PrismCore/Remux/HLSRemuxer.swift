@@ -1964,6 +1964,13 @@ final class HLSRemuxer: @unchecked Sendable {
             ? segmentCacheBytes.map { SegmentRetention(budgetBytes: $0) }
             : nil
         demand?.nominalSegmentSeconds = Double(segmentSeconds)
+        // A file on disk runs far ahead of the playhead (#3795 in Aether);
+        // a remote source keeps the thirty-second lead.
+        demand?.leadCapSeconds = DemandCoordinator.leadSeconds(
+            isFileSource: sourceURL.isFileURL,
+            budgetBytes: retention?.budgetBytes,
+            bitsPerSecond: sourceURL.isFileURL ? measuredSourceBandwidth(input: input) : nil
+        )
 
         // Unlinks run off the producer thread: a `removeItem` per victim per
         // rendition sat in the cut path, between a landed segment and the
@@ -1990,9 +1997,15 @@ final class HLSRemuxer: @unchecked Sendable {
                 if plannedPlan == nil, let playhead = demand?.playheadIndex, playhead <= index {
                     for ahead in playhead...index { protected.insert(ahead) }
                 }
+                // Kept around the READ FRONT, not just the producer (#3795 in
+                // Aether): everything from a little behind AVPlayer's fetches
+                // up to the producer stays, and eviction starts farthest from
+                // that range.
                 victims = retention!.record(
-                    index: index, bytes: videoBytes + renditionBytes, producing: index, protected: protected
+                    index: index, bytes: videoBytes + renditionBytes, producing: index,
+                    keep: demand?.retentionKeepRange(producing: index), protected: protected
                 )
+                demand?.noteEvictions(victims)
             }
             if let window {
                 try slide(window, budgetCutIndex: victims.max())

@@ -8,6 +8,44 @@ source-compatible.)
 
 ## [Unreleased]
 
+## [4.0.9] — 2026-11-25
+
+Source-compatible: retention anchored on the player's read front, per-path
+read fronts, a longer producer lead for local files, and diagnostics counters
+for why a loopback buffer ran dry (Aether #3795).
+
+### Fixed
+
+- **Retention keeps what the player is about to fetch.** The keep window sat
+  around the segment the producer had just finished (±4), while the lead cap
+  was measured from AVPlayer's newest fetch, so with the producer a lead ahead
+  the segments between the player and the producer were the first eviction
+  could reach once the budget filled — and a refetch, a miss, a re-anchor and
+  a demuxer seek followed. Retention now keeps the range from 15 segments
+  behind the lowest read front up to 4 past the highest front or the producer
+  (`DemandCoordinator.retentionKeepRange`) and evicts farthest from that range
+  first. Before the first fetch the old window around the producer stands in.
+- **Read fronts are tracked per path.** The variant and each `audioN/`
+  rendition are followed separately: a miss is judged continuous against its
+  own path's previous fetch (a rendition a segment behind the variant no
+  longer looks like a seek and re-anchors the producer), and the lead cap is
+  measured from the lowest front fetched in the last 15 s.
+
+### Changed
+
+- **A file source's producer runs a minute ahead** instead of thirty seconds
+  (`DemandCoordinator.fileSourceLeadSeconds`), held to half the retention
+  budget at the file's average rate and never under the network lead. Remote
+  sources keep thirty seconds. Conservative on purpose; needs measuring on a
+  device.
+
+### Added
+
+- `SessionDiagnosticReport.Runtime.Retention` gains `evictedAheadOfReadFront`,
+  `reanchors` and `segmentMisses` (all optional, `nil` in older reports): a
+  non-zero `evictedAheadOfReadFront` says retention starved the player; zero
+  evictions and zero re-anchors say production speed or the player did.
+
 ## [4.0.8] — 2026-11-23
 
 Source-compatible: AC-3 / E-AC-3 decoded inside PrismCore without dynamic range
@@ -4271,7 +4309,8 @@ HTTP server, with:
 - **Software path** — libavcodec into `AVSampleBufferDisplayLayer` for the video
   AVPlayer cannot decode at all.
 
-[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.8...HEAD
+[Unreleased]: https://github.com/Wenzlik/PrismCore/compare/4.0.9...HEAD
+[4.0.9]: https://github.com/Wenzlik/PrismCore/compare/4.0.8...4.0.9
 [4.0.8]: https://github.com/Wenzlik/PrismCore/compare/4.0.7...4.0.8
 [4.0.7]: https://github.com/Wenzlik/PrismCore/compare/4.0.6...4.0.7
 [4.0.6]: https://github.com/Wenzlik/PrismCore/compare/4.0.5...4.0.6
