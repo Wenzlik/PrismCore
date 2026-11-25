@@ -121,38 +121,37 @@ final class DemandCoordinator: @unchecked Sendable {
     /// because segments vary — a 2 s head, keyframe-stretched entries — and
     /// the buffer AVPlayer cares about is time.
     static let producerLeadSeconds = 30.0
-    /// The lead a source on local disk gets instead (#3795 in Aether): a
-    /// minute. Reading a file never stalls on a link, so the only thing that
-    /// can drain AVPlayer's pool is production itself running slower than
-    /// real time for a while (an audio transcode, a hot iPad). The produced
-    /// segments sit on disk, not in memory, so the cost is retention budget,
-    /// which `leadSeconds(isFileSource:budgetBytes:bitsPerSecond:)` respects.
-    /// Deliberately conservative until it is measured on a device.
-    static let fileSourceLeadSeconds = 60.0
+    /// The lead any source with a measured rate gets instead (#3795 in
+    /// Aether): a minute. On a file the only thing that can drain AVPlayer's
+    /// pool is production itself running slower than real time for a while
+    /// (an audio transcode, a hot iPad); on a remote source a link dip as
+    /// well. The produced segments sit on disk, not in memory, so the cost
+    /// is retention budget, which `leadSeconds(budgetBytes:bitsPerSecond:)`
+    /// respects. Deliberately conservative: not yet measured on a device —
+    /// for a remote source not at all.
+    static let extendedLeadSeconds = 60.0
 
     /// The lead the producer parks on — `producerLeadSeconds` unless the
-    /// remuxer set it for a file source before production started.
+    /// remuxer set it from the source's rate before production started.
     var leadCapSeconds: Double {
         get { lock.withLock { leadCap } }
         set { lock.withLock { leadCap = newValue } }
     }
     private var leadCap = DemandCoordinator.producerLeadSeconds
 
-    /// The lead for a source: thirty seconds for anything remote (unchanged);
-    /// for a file, `fileSourceLeadSeconds` held to HALF the retention budget
-    /// at the source's average rate, never under the network lead. Half,
-    /// because retention keeps everything from behind the read front up to
-    /// the producer (`retentionKeepRange`): the other half is room for the
-    /// segments kept behind the front, instead of the budget being spent on
-    /// the lead alone. No
-    /// budget (`nil`) keeps everything, so the full lead; an unknown rate
-    /// can't be bounded, so the network lead.
-    static func leadSeconds(isFileSource: Bool, budgetBytes: Int?, bitsPerSecond: Int?) -> Double {
-        guard isFileSource else { return producerLeadSeconds }
-        guard let budgetBytes else { return fileSourceLeadSeconds }
+    /// The lead for a source, file or remote alike: `extendedLeadSeconds`
+    /// held to HALF the retention budget at the source's measured average
+    /// rate, never under `producerLeadSeconds`. Half, because retention keeps
+    /// everything from behind the read front up to the producer
+    /// (`retentionKeepRange`): the other half is room for the segments kept
+    /// behind the front, instead of the budget being spent on the lead
+    /// alone. No measured rate can't be bounded, so thirty seconds; no
+    /// budget (`nil`) keeps everything, so the full minute.
+    static func leadSeconds(budgetBytes: Int?, bitsPerSecond: Int?) -> Double {
         guard let bitsPerSecond, bitsPerSecond > 0 else { return producerLeadSeconds }
+        guard let budgetBytes else { return extendedLeadSeconds }
         let affordable = Double(budgetBytes) / 2 / (Double(bitsPerSecond) / 8)
-        return min(fileSourceLeadSeconds, max(producerLeadSeconds, affordable))
+        return min(extendedLeadSeconds, max(producerLeadSeconds, affordable))
     }
     /// The sequential shape has no plan to read durations from; its
     /// `segmentSeconds` stands in (set by the producer).

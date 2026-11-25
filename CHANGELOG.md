@@ -11,7 +11,7 @@ source-compatible.)
 ## [4.0.9] — 2026-11-25
 
 Source-compatible: retention anchored on the player's read front, per-path
-read fronts, a longer producer lead for local files, and diagnostics counters
+read fronts, a longer producer lead, and diagnostics counters
 for why a loopback buffer ran dry (Aether #3795).
 
 ### Fixed
@@ -33,11 +33,12 @@ for why a loopback buffer ran dry (Aether #3795).
 
 ### Changed
 
-- **A file source's producer runs a minute ahead** instead of thirty seconds
-  (`DemandCoordinator.fileSourceLeadSeconds`), held to half the retention
-  budget at the file's average rate and never under the network lead. Remote
-  sources keep thirty seconds. Conservative on purpose; needs measuring on a
-  device.
+- **The producer runs a minute ahead** instead of thirty seconds
+  (`DemandCoordinator.extendedLeadSeconds`) for any source whose rate is
+  measured — a file or a remote source alike — held to half the retention
+  budget at that rate and never under thirty seconds. A source with no
+  measured rate keeps thirty seconds. Conservative on purpose and not yet
+  measured on a device; the remote lead not at all.
 
 ### Added
 

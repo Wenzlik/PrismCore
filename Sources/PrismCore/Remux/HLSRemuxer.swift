@@ -1964,12 +1964,12 @@ final class HLSRemuxer: @unchecked Sendable {
             ? segmentCacheBytes.map { SegmentRetention(budgetBytes: $0) }
             : nil
         demand?.nominalSegmentSeconds = Double(segmentSeconds)
-        // A file on disk runs far ahead of the playhead (#3795 in Aether);
-        // a remote source keeps the thirty-second lead.
+        // A minute of lead when the source's rate is measured — file or
+        // remote — held to half the retention budget (#3795 in Aether);
+        // thirty seconds when it is not.
         demand?.leadCapSeconds = DemandCoordinator.leadSeconds(
-            isFileSource: sourceURL.isFileURL,
             budgetBytes: retention?.budgetBytes,
-            bitsPerSecond: sourceURL.isFileURL ? measuredSourceBandwidth(input: input) : nil
+            bitsPerSecond: measuredSourceBandwidth(input: input)
         )
 
         // Unlinks run off the producer thread: a `removeItem` per victim per
