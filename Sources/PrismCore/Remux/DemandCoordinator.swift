@@ -255,10 +255,22 @@ final class DemandCoordinator: @unchecked Sendable {
     func parkWhileAhead(producing: Int, isCancelled: () -> Bool) {
         lock.lock()
         defer { lock.unlock() }
-        while requestedAnchor == nil, !isCancelled(), lastDemandedIndex >= 0,
-              leadSeconds(from: activeFrontBounds(now: .now)?.lowest ?? lastDemandedIndex, to: producing) > leadCap {
+        while requestedAnchor == nil, !isCancelled(), lastDemandedIndex >= 0, isAheadOfDemand(producing: producing) {
             lock.wait(until: Date(timeIntervalSinceNow: Self.parkBackstopSeconds))
         }
+    }
+
+    /// Whether the producer is past its lead: measured from the lowest live
+    /// front, so a rendition a little behind is not run away from — but never
+    /// while ANY live front has reached `producing`: that path is waiting on
+    /// the segment in hand (a miss inside the forward-wait window makes no
+    /// anchor request), and parking would hold its serve to the timeout.
+    /// Under the lock.
+    private func isAheadOfDemand(producing: Int) -> Bool {
+        guard let bounds = activeFrontBounds(now: .now) else {
+            return leadSeconds(from: lastDemandedIndex, to: producing) > leadCap
+        }
+        return bounds.highest < producing && leadSeconds(from: bounds.lowest, to: producing) > leadCap
     }
 
     /// Content seconds between the start of segment `from` and the start of

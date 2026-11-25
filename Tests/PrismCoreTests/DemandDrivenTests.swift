@@ -570,12 +570,24 @@ struct ProducerLeadCapTests {
     @Test("The lead is measured from the slowest live front")
     func leadFromLowestFront() {
         let coordinator = DemandCoordinator()
-        coordinator.noteFetch(of: 10, track: "")
+        coordinator.noteFetch(of: leadSegments + 3, track: "")
         coordinator.noteFetch(of: 0, track: "audio1")
         // Inside the lead of the variant's front, past the audio front's.
         let returned = park(on: coordinator, producing: leadSegments + 5)
         #expect(returned.wait(timeout: stillParkedWindow) == .timedOut)
-        coordinator.noteFetch(of: 10, track: "audio1")
+        coordinator.noteFetch(of: leadSegments + 3, track: "audio1")
+        #expect(returned.wait(timeout: signalWindow) == .success)
+    }
+
+    @Test("A front waiting on the segment in hand is never parked behind a slower one")
+    func demandedSegmentIsNotParked() {
+        let coordinator = DemandCoordinator()
+        coordinator.setProducing(index: leadSegments + 5)
+        coordinator.noteFetch(of: 0, track: "audio1")
+        // The variant asks for exactly what is being produced: a miss inside
+        // the forward-wait window, so no anchor request comes to wake it.
+        coordinator.noteFetch(of: leadSegments + 5, track: "")
+        let returned = park(on: coordinator, producing: leadSegments + 5)
         #expect(returned.wait(timeout: signalWindow) == .success)
     }
 
